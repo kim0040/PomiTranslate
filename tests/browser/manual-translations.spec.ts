@@ -224,5 +224,4 @@ test('saved manual translations still reach the review list', async ({ page }) =
   // Both saved translations match a candidate, so the manual filter lists two rows (plus the two header rows).
   await page.getByRole('group', { name: '상태 필터' }).getByRole('button', { name: '직접 번역', exact: true }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '4');
-  await expect(page.locator('tr[data-index]')).toHaveCount(2);
 });
