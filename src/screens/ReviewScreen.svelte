@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
   import type { SortMode, StateFilter } from '../lib/candidates.svelte';
@@ -110,13 +110,24 @@
   async function bulk(include: boolean): Promise<void> {
     busyBulk = true;
     try {
-      for (const id of await source.allIds()) app.setIncluded(id, include);
+      app.setIncludedMany(await source.allIds(), include);
     } catch (cause) {
       app.fail(cause);
     } finally {
       busyBulk = false;
     }
   }
+
+  onMount(() => {
+    const undo = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z' || event.shiftKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('textarea, [contenteditable="true"], input:not([type="checkbox"]):not([type="radio"])')) return;
+      if (app.undoIncluded()) event.preventDefault();
+    };
+    window.addEventListener('keydown', undo);
+    return () => window.removeEventListener('keydown', undo);
+  });
 </script>
 
 <div class="review">
@@ -172,9 +183,15 @@
     {/each}
   </div>
 
-  <div class="workarea" class:wide class:compact={workareaWidth < PANEL_FULL} bind:this={workarea}>
+  <div class="workarea" class:wide class:compact={workareaWidth < PANEL_FULL} class:empty-compact={!selected && workareaWidth < PANEL_FULL} bind:this={workarea}>
     <div class="tablewrap"><CandidateTable selectedId={selected?.id ?? ''} onSelect={select} /></div>
-    {#if wide}<div class="detailwrap"><CandidateDetail candidate={selected} /></div>{/if}
+    {#if wide && selected}
+      <div class="detailwrap"><CandidateDetail candidate={selected} /></div>
+    {:else if wide && workareaWidth < PANEL_FULL}
+      <div class="detail-hint" role="status" title={t('review.detail.emptyShort')}><Icon name="list" size={17} /><span class="sr-only">{t('review.detail.emptyShort')}</span></div>
+    {:else if wide}
+      <div class="detailwrap"><CandidateDetail candidate={null} /></div>
+    {/if}
   </div>
 
   <footer class="foot">
@@ -222,7 +239,9 @@
   .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; }
   .workarea.wide { grid-template-columns: minmax(0, 1fr) 340px; }
   .workarea.wide.compact { grid-template-columns: minmax(0, 1fr) 280px; }
-  .tablewrap, .detailwrap { min-height: 0; height: 100%; }
+  .workarea.wide.empty-compact { grid-template-columns: minmax(0, 1fr) 40px; }
+  .tablewrap, .detailwrap { min-width: 0; min-height: 0; height: 100%; }
+  .detail-hint { display: grid; place-items: start center; padding-top: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); color: var(--text-secondary); }
   .foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; padding-top: var(--space-3); border-top: 1px solid var(--border); }
   .meta { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
   .next { display: flex; align-items: center; gap: var(--space-3); margin-inline-start: auto; }

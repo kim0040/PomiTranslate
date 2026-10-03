@@ -52,6 +52,15 @@
     closeRestore();
     if (backupSetId) await app.restore(backupSetId);
   }
+
+  async function copyBackupId(backupSetId: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(backupSetId);
+      app.notify(t('backups.copiedId'), 'success');
+    } catch {
+      app.notify(t('backups.copyFailed'), 'error');
+    }
+  }
 </script>
 
 <div class="page">
@@ -77,8 +86,8 @@
       </div>
     </section>
   {:else}
-    <section class="card world-context" aria-labelledby="backup-world-title">
-      <div class="context-icon" aria-hidden="true"><Icon name="folder" size={24} /></div>
+    <section class="card list-heading" aria-labelledby="backup-world-title">
+      <div class="context-icon" aria-hidden="true"><Icon name="folder" size={22} /></div>
       <div class="context-copy">
         <p class="eyebrow">{t('world.selected')}</p>
         <h2 id="backup-world-title">{worldName}</h2>
@@ -122,39 +131,31 @@
       </section>
     {:else}
       <section aria-labelledby="backup-list-title">
-        <div class="list-heading">
-          <h2 id="backup-list-title" class="section-title">{t('backups.world', { name: worldName })}</h2>
-          <p class="muted num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}</p>
-        </div>
+        <h2 id="backup-list-title" class="sr-only">{t('backups.world', { name: worldName })}</h2>
         <ul class="backup-list">
           {#each backups as backup (backup.backupSetId)}
             <li>
-              <article class="card backup-card">
-                <div class="backup-heading">
-                  <div class="backup-title">
-                    <span class="backup-icon" aria-hidden="true"><Icon name={backup.kind === 'recovery' ? 'undo' : 'archive'} size={20} /></span>
-                    <div>
-                      <h3>{kindLabel(backup.kind)}</h3>
-                      <p class="date num">{dateLabel(backup.createdAt)}</p>
+              <article class="card backup-row">
+                <div class="backup-title">
+                  <span class="backup-icon" aria-hidden="true"><Icon name={backup.kind === 'recovery' ? 'undo' : 'archive'} size={18} /></span>
+                  <div class="backup-copy">
+                    <h3>{kindLabel(backup.kind)}</h3>
+                    <div class="backup-meta num">
+                      <time>{dateLabel(backup.createdAt)}</time>
+                      <span>{t('backups.files', { count: formatNumber(backup.fileCount, app.locale) })}</span>
+                      {#if backup.sizeBytes !== undefined}<span>{t('backups.size', { size: formatBytes(backup.sizeBytes, app.locale) })}</span>{/if}
+                      <span>{locationLabel(backup)}</span>
                     </div>
+                    <button type="button" class="backup-id" title={backup.backupSetId} aria-label={t('backups.copyId')} onclick={() => copyBackupId(backup.backupSetId)}>
+                      <Icon name="copy" size={13} /> {t('backups.id')}
+                    </button>
                   </div>
+                </div>
+                <div class="backup-actions">
                   <span class:verified={backup.verified} class:unverified={!backup.verified} class="pill">
                     <Icon name={backup.verified ? 'check-circle' : 'alert-triangle'} size={14} />
                     {backup.verified ? t('backups.verified') : t('backups.unverified')}
                   </span>
-                </div>
-
-                <ul class="backup-facts">
-                  {#if backup.externalTargets?.length}<li>{t('backups.externalCount', { count: backup.externalTargets.length })}</li>{/if}
-                  <li class="num">{t('backups.files', { count: formatNumber(backup.fileCount, app.locale) })}</li>
-                  {#if backup.sizeBytes !== undefined}
-                    <li class="num">{t('backups.size', { size: formatBytes(backup.sizeBytes, app.locale) })}</li>
-                  {/if}
-                  <li>{locationLabel(backup)}</li>
-                </ul>
-
-                <div class="backup-footer">
-                  <code class="backup-id" title={backup.backupSetId}>{t('backups.id')}: {backup.backupSetId}</code>
                   <button type="button" class="btn btn-secondary" disabled={actionBusy} onclick={() => openRestore(backup)}>
                     <Icon name="undo" size={17} /> {t('backups.restore')}
                   </button>
@@ -169,7 +170,7 @@
 </div>
 
 {#if confirmRestore && selectedBackup}
-  <Dialog title={t('backups.restoreTitle')} onClose={closeRestore}>
+  <Dialog title={t('backups.restoreTitle')} hideClose onClose={closeRestore}>
     <Callout tone="warning" title={t('backups.restoreWarnTitle')}>
       <p>{t('backups.restoreBody')}</p>
     </Callout>
@@ -220,13 +221,6 @@
   .empty-copy p { margin-top: var(--space-1); }
   .empty-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); justify-content: flex-end; }
 
-  .world-context {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
-  }
   .context-icon { width: 48px; height: 48px; }
   .context-copy { min-width: 0; }
   .context-copy h2 { font-size: var(--text-lg); margin-top: 2px; overflow-wrap: anywhere; }
@@ -242,41 +236,43 @@
   .restoring-head :global(.icon) { animation: pomi-spin 0.9s linear infinite; }
   .restoring p { font-size: var(--text-sm); }
 
-  .list-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-4); margin: var(--space-2) 0 var(--space-3); }
-  .list-heading > .section-title { margin: 0; }
-  .backup-list { display: grid; gap: var(--space-3); list-style: none; margin: 0; padding: 0; }
-  .backup-card { display: grid; gap: var(--space-4); padding: var(--space-5); }
-  .backup-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
-  .backup-title { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-  .backup-icon { width: 40px; height: 40px; }
-  .backup-title h3 { font-size: var(--text-lg); overflow-wrap: anywhere; }
-  .date { color: var(--text-secondary); font-size: var(--text-sm); margin-top: 2px; }
+  .list-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-4); margin-block-end: var(--space-4); padding: var(--space-3) var(--space-4); }
+  .list-heading .context-icon { width: 40px; height: 40px; }
+  .backup-list { display: grid; gap: var(--space-2); list-style: none; margin: 0; padding: 0; }
+  .backup-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-4); }
+  .backup-title { display: flex; align-items: flex-start; gap: var(--space-3); min-width: 0; }
+  .backup-icon { width: 32px; height: 32px; border-radius: var(--radius-md); }
+  .backup-copy { min-width: 0; display: grid; gap: 3px; }
+  .backup-copy h3 { font-size: var(--text-md); overflow-wrap: anywhere; }
+  .backup-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--space-3); color: var(--text-secondary); font-size: var(--text-xs); }
+  .backup-id { display: inline-flex; align-items: center; gap: 4px; width: max-content; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--text-xs); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+  .backup-id:hover { color: var(--accent-text); }
+  .backup-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); }
   .pill.verified { background: var(--success-soft); color: var(--success-text); }
   .pill.unverified { background: var(--warning-soft); color: var(--warning-text); }
-
-  .backup-facts { display: flex; flex-wrap: wrap; gap: var(--space-2); list-style: none; margin: 0; padding: var(--space-3) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-  .backup-facts li { min-height: 28px; display: inline-flex; align-items: center; padding: 0 var(--space-2); border-radius: var(--radius-sm); background: var(--bg-sunken); color: var(--text-secondary); font-size: var(--text-sm); overflow-wrap: anywhere; }
-  .backup-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
-  .backup-id { min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); font-size: var(--text-xs); }
 
   .confirm-facts { display: grid; gap: var(--space-2); list-style: none; margin: 0; padding: var(--space-3) 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
   .confirm-facts li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); overflow-wrap: anywhere; }
   .confirm-facts li > span { color: var(--text-secondary); font-size: var(--text-sm); }
   .confirm-facts li > strong, .confirm-facts li > code { min-width: 0; color: var(--text); text-align: end; overflow-wrap: anywhere; }
 
+  @media (max-width: 760px) {
+    .backup-row { grid-template-columns: minmax(0, 1fr); }
+    .backup-actions { justify-content: flex-start; padding-inline-start: 44px; }
+  }
+
   @media (max-width: 640px) {
-    .empty-state, .world-context { grid-template-columns: 1fr; align-items: start; }
+    .empty-state, .list-heading { grid-template-columns: 1fr; align-items: start; }
     .empty-actions { justify-content: flex-start; }
     .context-icon, .empty-icon { width: 44px; height: 44px; }
-    .world-context > .pill { justify-self: start; }
-    .backup-heading { flex-direction: column; align-items: flex-start; }
-    .backup-footer { align-items: flex-start; flex-direction: column; }
-    .backup-footer .btn { width: 100%; }
+    .list-heading > .pill { justify-self: start; }
+    .backup-actions { padding-inline-start: 0; }
+    .backup-actions .btn { flex: 1; }
   }
 
   @media (max-width: 380px) {
     .empty-actions, .empty-actions .btn { width: 100%; }
     .empty-actions .btn { justify-content: center; }
-    .backup-card, .world-context, .empty-state { padding-inline: var(--space-4); }
+    .backup-row, .list-heading, .empty-state { padding-inline: var(--space-4); }
   }
 </style>

@@ -1,8 +1,14 @@
-//! The window comes back where and how large it was (tauri-plugin-window-state does the saving and
-//! the first restore). This adds the guard rails the plugin lacks: a saved size is never smaller
-//! than the window's minimum, a window that would open off-screen is brought back, and a size that
-//! was only the full screen (the window closed while in full screen) is not kept as a normal size.
-use tauri::{App, Manager, PhysicalSize};
+//! The plugin restores maximized state; this module stores normal geometry separately so fullscreen
+//! resize events cannot replace the last usable size or position. Saved geometry is clamped to the
+//! configured minimum and recentered when its monitor is gone or its title bar cannot be reached.
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, Window};
 use tauri_plugin_window_state::StateFlags;
 
 /// The configured minimum and default size (tauri.conf.json), in logical pixels.
@@ -10,11 +16,21 @@ const MIN_LOGICAL: (f64, f64) = (840.0, 620.0);
 const DEFAULT_LOGICAL: (f64, f64) = (1180.0, 800.0);
 /// At least this much of the title bar area (physical pixels) must be on a screen to be grabbed.
 const REACHABLE: (i64, i64) = (160, 60);
+const GEOMETRY_FILE: &str = ".window-geometry.json";
+static READY: AtomicBool = AtomicBool::new(false);
 
-/// What is saved: size, position and maximized. Full screen is never restored or recorded, and
-/// "visible"/"decorations" stay as the configuration says.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct Geometry {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+/// The plugin keeps the maximized flag. Normal size and position use our guarded geometry file so
+/// resize/move events while fullscreen cannot overwrite the last usable window rectangle.
 pub fn flags() -> StateFlags {
-    StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED
+    StateFlags::MAXIMIZED
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,14 +73,30 @@ pub fn plan(window: Rect, scale: f64, maximized: bool, fullscreen: bool, monitor
     }
     let placed = Rect { w: size.0, h: size.1, ..window };
     // The screen holding most of the window; none at all means it would open off-screen.
-    let home = monitors
+    let overlapping: Vec<(Rect, (i64, i64))> = monitors
         .iter()
         .copied()
         .map(|monitor| (monitor, monitor.overlap(placed)))
+        .collect();
+    let home = overlapping
+        .iter()
+        .copied()
         .filter(|(_, (w, h))| *w >= REACHABLE.0.min(placed.w) && *h >= REACHABLE.1.min(placed.h))
         .max_by_key(|(_, (w, h))| w * h)
         .map(|(monitor, _)| monitor);
     let Some(home) = home else {
+        // A mostly off-screen window can still have a visible strip that identifies its monitor.
+        // Bring it back without changing its saved size. Only a fully off-screen window needs the
+        // default size before it is centered.
+        if let Some((monitor, _)) = overlapping
+            .into_iter()
+            .filter(|(_, (w, h))| *w > 0 && *h > 0)
+            .max_by_key(|(_, (w, h))| w * h)
+        {
+            let fitted = (size.0.min(monitor.w), size.1.min(monitor.h));
+            let fitted_size = (fitted != size).then_some(fitted).or_else(|| resized.then_some(size));
+            return Plan::Apply { size: fitted_size, center: true };
+        }
         let monitor = monitors[0];
         let fitted = fit(scaled(DEFAULT_LOGICAL, scale).max(size), monitor);
         return Plan::Apply { size: Some(fitted), center: true };
@@ -89,8 +121,57 @@ fn fit(size: (i64, i64), monitor: Rect) -> (i64, i64) {
     (size.0.min(monitor.w), size.1.min(monitor.h))
 }
 
-/// Run after the window exists and the plugin restored its saved state.
-pub fn guard(app: &App) {
+fn geometry_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|directory| directory.join(GEOMETRY_FILE))
+}
+
+fn load_geometry<R: Runtime>(app: &AppHandle<R>) -> Option<Geometry> {
+    let bytes = fs::read(geometry_path(app)?).ok()?;
+    let geometry: Geometry = serde_json::from_slice(&bytes).ok()?;
+    (geometry.width > 0 && geometry.height > 0).then_some(geometry)
+}
+
+fn write_geometry<R: Runtime>(app: &AppHandle<R>, geometry: Geometry) {
+    let Some(path) = geometry_path(app) else { return; };
+    let Some(parent) = path.parent() else { return; };
+    if fs::create_dir_all(parent).is_err() { return; }
+    let Ok(bytes) = serde_json::to_vec(&geometry) else { return; };
+    let temporary = path.with_extension("json.tmp");
+    if fs::write(&temporary, bytes).is_ok() {
+        let _ = fs::rename(temporary, path);
+    }
+}
+
+/// Record regular window geometry only. Fullscreen and maximized rectangles never replace it.
+pub fn save_normal_geometry<R: Runtime>(window: &Window<R>) {
+    if !READY.load(Ordering::SeqCst)
+        || window.label() != "main"
+        || window.is_fullscreen().unwrap_or(true)
+        || window.is_maximized().unwrap_or(true)
+        || window.is_minimized().unwrap_or(true)
+    {
+        return;
+    }
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) else {
+        return;
+    };
+    if size.width == 0 || size.height == 0 { return; }
+    write_geometry(
+        window.app_handle(),
+        Geometry {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        },
+    );
+}
+
+/// Run after the window-state plugin has restored its maximized flag and before the page is shown.
+pub fn guard<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -112,20 +193,56 @@ pub fn guard(app: &App) {
             h: i64::from(monitor.size().height),
         })
         .collect();
-    let current = Rect {
-        x: i64::from(position.x),
-        y: i64::from(position.y),
-        w: i64::from(size.width),
-        h: i64::from(size.height),
-    };
-    if let Plan::Apply { size, center } = plan(current, scale, maximized, fullscreen, &monitors) {
-        if let Some((w, h)) = size {
-            let _ = window.set_size(PhysicalSize::new(w as u32, h as u32));
-        }
-        if center {
-            let _ = window.center();
-        }
+    if monitors.is_empty() || maximized || fullscreen {
+        return;
     }
+    let saved = load_geometry(app);
+    let current = if let Some(saved) = saved {
+        Rect {
+            x: i64::from(saved.x),
+            y: i64::from(saved.y),
+            w: i64::from(saved.width),
+            h: i64::from(saved.height),
+        }
+    } else {
+        Rect {
+            x: i64::from(position.x),
+            y: i64::from(position.y),
+            w: i64::from(size.width),
+            h: i64::from(size.height),
+        }
+    };
+    let action = plan(current, scale, maximized, fullscreen, &monitors);
+    let (planned_size, center) = match action {
+        Plan::Keep => (None, false),
+        Plan::Apply { size, center } => (size, center),
+    };
+    if let Some((w, h)) = planned_size {
+        let _ = window.set_size(PhysicalSize::new(w as u32, h as u32));
+    } else if saved.is_some() {
+        let _ = window.set_size(PhysicalSize::new(current.w as u32, current.h as u32));
+    }
+    if center {
+        let _ = window.center();
+    } else if let Some(saved) = saved {
+        let _ = window.set_position(PhysicalPosition::new(saved.x, saved.y));
+    }
+    if let (Ok(position), Ok(size)) = (window.outer_position(), window.inner_size()) {
+        write_geometry(
+            app,
+            Geometry {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+            },
+        );
+    }
+}
+
+/// Enable persistence after initial restore and the geometry guard have completed.
+pub fn mark_ready() {
+    READY.store(true, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -166,7 +283,7 @@ mod tests {
     #[test]
     fn a_window_with_only_a_sliver_on_screen_is_centered() {
         let plan = plan(win(-1100, 100, 1180, 800), 1.0, false, false, &[SCREEN]);
-        assert_eq!(plan, Plan::Apply { size: Some((1180, 800)), center: true });
+        assert_eq!(plan, Plan::Apply { size: None, center: true });
     }
 
     #[test]
@@ -211,9 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn only_size_position_and_maximized_are_saved() {
+    fn plugin_persists_only_maximized_state() {
         let flags = flags();
-        assert!(flags.contains(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED));
-        assert!(!flags.intersects(StateFlags::FULLSCREEN | StateFlags::VISIBLE | StateFlags::DECORATIONS));
+        assert!(flags.contains(StateFlags::MAXIMIZED));
+        assert!(!flags.intersects(StateFlags::SIZE | StateFlags::POSITION | StateFlags::FULLSCREEN | StateFlags::VISIBLE | StateFlags::DECORATIONS));
     }
 }

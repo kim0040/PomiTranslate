@@ -7,6 +7,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 type Unsubscribe = () => void;
+export type CloseSource = 'window' | 'quit';
+let notificationPermissionRequested = false;
 export type MenuAction = 'open-world' | 'settings' | 'find' | 'help' | 'tour' | 'shortcuts' | 'licenses' | 'report' | 'updates'
   | 'theme-system' | 'theme-light' | 'theme-dark';
 
@@ -95,6 +97,44 @@ export async function setMenuTheme(choice: 'system' | 'light' | 'dark'): Promise
 
 export async function onMenu(handler: (action: MenuAction) => void): Promise<Unsubscribe> {
   return listen<MenuAction>('pomi-menu', ({ payload }) => handler(payload));
+}
+
+/** Keep Rust's close guard in step with the settings draft currently shown by the page. */
+export async function setUnsavedSettings(unsaved: boolean): Promise<void> {
+  await quietly(() => invoke('set_unsaved_settings', { unsaved }));
+}
+
+export async function closeGuardAck(): Promise<void> {
+  await quietly(() => invoke('close_guard_ack'));
+}
+
+/** The event is acknowledged before the UI opens its confirmation dialog. */
+export async function onCloseRequested(handler: (source: CloseSource) => void): Promise<Unsubscribe> {
+  return listen<CloseSource>('pomi-close-requested', ({ payload }) => {
+    void closeGuardAck();
+    if (payload === 'window' || payload === 'quit') handler(payload);
+  });
+}
+
+/** Finish the close or quit after the person saved or discarded their settings. */
+export async function finishClose(source: CloseSource): Promise<void> {
+  await quietly(() => invoke('finish_close', { source }));
+}
+
+/** Ask permission only when a long job finishes in the background. */
+export async function sendCompletionNotification(title: string, body: string): Promise<void> {
+  if (!inShell() || (typeof document !== 'undefined' && document.hasFocus())) return;
+  try {
+    const notifications = await import('@tauri-apps/plugin-notification');
+    let granted = await notifications.isPermissionGranted();
+    if (!granted && !notificationPermissionRequested) {
+      notificationPermissionRequested = true;
+      granted = (await notifications.requestPermission()) === 'granted';
+    }
+    if (granted) await notifications.sendNotification({ title, body });
+  } catch {
+    // A denied permission or unavailable plugin must not affect the completed job.
+  }
 }
 
 /** A folder (or a world's level.dat) dropped on the window. */

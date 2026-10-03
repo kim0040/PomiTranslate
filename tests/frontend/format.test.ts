@@ -4,6 +4,7 @@ import {
   baseName,
   describeDetail,
   describeLocation,
+  teleportCommand,
   formatBytes,
   formatCompact,
   formatDate,
@@ -65,9 +66,11 @@ describe('format helpers', () => {
     expect(shortened).toContain('…');
     expect(shortened.startsWith('/Users')).toBe(true);
     expect(shortened.endsWith('name')).toBe(true);
-    expect(describeLocation({ holder: 'minecraft:oak_sign', pos: [1, 64, 20] }, 'en')).toBe('oak_sign (1, 64, 20)');
-    expect(describeLocation({ holder: 'minecraft:chest' }, 'en')).toBe('chest');
-    expect(describeLocation({ chunk: [3, -2] }, 'en')).toBe('Chunk (3, -2)');
+    expect(describeLocation({ holder: 'minecraft:oak_sign', pos: [1, 64, 20] }, 'en', 'sign')).toBe('Overworld · Sign · x 1 · y 64 · z 20');
+    expect(describeLocation({ holder: 'minecraft:chest' }, 'en')).toBe('Overworld · chest');
+    expect(describeLocation({ chunk: [3, -2] }, 'en')).toBe('Overworld · Chunk (3, -2)');
+    expect(describeLocation({ dimension: 'custom:sky', kind: 'entity_name', pos: [8, 70, 11] }, 'en')).toBe('custom:sky · Entity Name · x 8 · y 70 · z 11');
+    expect(teleportCommand({ dimension: 'minecraft:the_nether', pos: [1, 64, 20] })).toBe('/execute in minecraft:the_nether run tp @s 1 64 20');
     expect(describeDetail('front:2', 'en')).toBe('Front, line 2');
     expect(describeDetail('page:3', 'en')).toBe('Page 3');
     expect(describeDetail('unmapped:value', 'en')).toBe('unmapped:value');

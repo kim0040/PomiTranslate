@@ -5,6 +5,28 @@
   const previewLanguages = { ko: '한국어', en: 'English', ja: '日本語' };
   const previewTranslations = { ko: '잃어버린 열쇠 상점', en: 'The Lost Key Shop', ja: '失われた鍵の店' };
   window.__pomiRequests = [];
+  window.__pomiNativeCalls = [];
+  window.__pomiNotifications = [];
+  window.__pomiNotificationPermissionRequests = 0;
+  window.__pomiClipboard = [];
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (value) => { window.__pomiClipboard.push(String(value)); } }
+    });
+  } catch { /* Clipboard may be supplied by the browser. */ }
+  class FixtureNotification {
+    static permission = 'default';
+    static async requestPermission() {
+      window.__pomiNotificationPermissionRequests++;
+      FixtureNotification.permission = 'granted';
+      return 'granted';
+    }
+    constructor(title, options = {}) {
+      window.__pomiNotifications.push({ title, body: options.body || '' });
+    }
+  }
+  window.Notification = FixtureNotification;
   const callbacks = new Map();
   const listeners = new Map();
   let callbackId = 0;
@@ -12,10 +34,10 @@
   let bootstrapAttempts = 0;
 
   const candidates = [
-    { id: 'welcome', source: 'Welcome to Roguefire', kind: 'sign', kinds: { sign: 3 }, occurrences: 3, locations: [{ holder: 'minecraft:oak_sign', pos: [12, 64, -8], chunk: [0, -1], detail: 'front:1' }] },
-    { id: 'shop', source: 'The Lost Key Shop', kind: 'text_display', kinds: { text_display: 1 }, occurrences: 1, locations: [{ holder: 'minecraft:text_display', pos: [24, 70, 11], chunk: [1, 0], detail: 'base' }] },
-    { id: 'book', source: 'Find the keeper beyond the old bridge.', kind: 'book_page', kinds: { book_page: 2 }, occurrences: 2, locations: [{ holder: 'minecraft:written_book', pos: [30, 65, 9], chunk: [1, 0], detail: 'page:3' }] },
-    { id: 'lore', source: 'A blade that remembers every battle', kind: 'item_lore', kinds: { item_lore: 8 }, occurrences: 8, locations: [{ holder: 'minecraft:diamond_sword', pos: [8, 63, 20], chunk: [0, 1], detail: 'line:1' }] },
+    { id: 'welcome', source: 'Welcome to Roguefire', kind: 'sign', kinds: { sign: 3 }, occurrences: 3, locations: [{ holder: 'minecraft:oak_sign', kind: 'sign', dimension: 'minecraft:overworld', pos: [12, 64, -8], chunk: [0, -1], detail: 'front:1' }] },
+    { id: 'shop', source: 'The Lost Key Shop', kind: 'text_display', kinds: { text_display: 1 }, occurrences: 1, locations: [{ holder: 'minecraft:text_display', kind: 'text_display', dimension: 'minecraft:overworld', pos: [24, 70, 11], chunk: [1, 0], detail: 'base' }] },
+    { id: 'book', source: 'Find the keeper beyond the old bridge.', kind: 'book_page', kinds: { book_page: 2 }, occurrences: 2, locations: [{ holder: 'minecraft:written_book', kind: 'book_page', dimension: 'minecraft:the_nether', pos: [30, 65, 9], chunk: [1, 0], detail: 'page:3' }] },
+    { id: 'lore', source: 'A blade that remembers every battle', kind: 'item_lore', kinds: { item_lore: 8 }, occurrences: 8, locations: [{ holder: 'minecraft:diamond_sword', kind: 'item_lore', dimension: 'custom:sky', file: 'dimensions/custom/sky/region/r.0.0.mca', pos: [8, 63, 20], chunk: [0, 1], detail: 'line:1' }] },
     { id: 'tellraw', source: 'You are not ready yet.', kind: 'command', kinds: { command: 1 }, occurrences: 1, locations: [{ holder: 'minecraft:command_block', pos: [-4, 58, 42], chunk: [-1, 2], detail: 'base' }] },
     { id: 'merchant', source: 'Merchant of the Northern Gate', kind: 'entity_name', kinds: { entity_name: 2 }, occurrences: 2, locations: [{ holder: 'minecraft:villager', pos: [101, 67, -33], chunk: [6, -3], detail: 'custom' }] }
   ];
@@ -91,7 +113,8 @@
       available: true, scanPlanId: scan.scanPlanId, fingerprint: scan.fingerprint,
       candidateCount: candidates.length, occurrenceCount: scan.occurrenceCount, kinds: scan.kinds, coverage: scan.coverage, candidates: candidates.slice(0, 200), excludedCandidateIds: ['tellraw'],
       candidateOverrides: { shop: previewTranslations[previewLocale] }, savedAt: 1790672400,
-      status: 'needs_retry', translatedCount: 2
+      status: 'needs_retry', translatedCount: 2,
+      lastJob: { world: 'Roguefire', at: 1790672300, status: 'partial', translated: 4, failed: 2, changedFiles: 4, candidateCount: 6 }
     };
   }
   function filteredPage(body) {
@@ -165,19 +188,21 @@
         await new Promise((resolve) => setTimeout(resolve, 100));
         throw current === 'startup-handshake' ? 'CORE_HANDSHAKE_TIMEOUT'
           : current === 'startup-bootstrap' ? 'BOOTSTRAP_TIMEOUT'
-          : 'Translation core stopped before it returned a result';
+          : 'CORE_STOPPED';
       }
       if (current === 'startup-delay') await new Promise((resolve) => setTimeout(resolve, 500));
       const empty = current === 'empty';
-      const resumed = ['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review'].includes(current);
+      const resumed = ['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review', 'home-resume'].includes(current);
       const resultScenarios = ['result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
         ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
+        ...(new URLSearchParams(location.search).get('notify') === 'off' ? { prefs: { theme: 'system', notice_accepted: true, tutorial_seen: true, update_auto_check: false, update_last_check: 0, update_skipped_version: '', notify_on_finish: false } } : {}),
         apiKeyStored: !fresh || freshKeySaved, credentialMode: 'local', worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
         worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
-        resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false }
+        resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false },
+        lastJob: empty || current === 'unscanned' ? null : { world: 'Roguefire', at: 1790672300, status: 'partial', translated: 4, failed: 2, changedFiles: 4, candidateCount: 6 }
       });
     }
     // This fixture tests draft wiring only; the real AST parser has Python regressions.
@@ -282,6 +307,9 @@
       }
       if (command === 'plugin:event|unlisten') { listeners.delete(args.eventId); return null; }
       if (command === 'plugin:dialog|open') return window.__pomiDialogFiles ?? null;
+      if (command === 'set_unsaved_settings') { window.__pomiNativeCalls.push({ command, args }); window.__pomiUnsavedSettings = args.unsaved; return null; }
+      if (command === 'close_guard_ack' || command === 'finish_close') { window.__pomiNativeCalls.push({ command, args }); return null; }
+      if (command === 'plugin:notification|is_permission_granted') return false;
       if (command === 'credential_status') return { stored: new URLSearchParams(location.search).get('missingKey') !== '1' && (!fresh || freshKeySaved), mode: credentialModes.get(args.provider) || 'local' };
       if (command === 'credential_import') return { stored: true, mode: 'local' };
       if (command === 'operation_active') return false;

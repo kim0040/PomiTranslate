@@ -11,6 +11,7 @@ import {
   type BackupSummary,
   type BootstrapPayload,
   type Estimate,
+  type LastJob,
   type ModelInfo,
   type Notices,
   type RecentWorld,
@@ -22,18 +23,20 @@ import {
   type AppPrefs,
   type WorldInspection
 } from './api';
-import { checkForUpdate, installUpdate, onUpdateProgress, openExternal, type MenuAction, type UpdateInfo } from './native';
+import { checkForUpdate, finishClose, installUpdate, onCloseRequested, onUpdateProgress, openExternal, sendCompletionNotification, type CloseSource, type MenuAction, type UpdateInfo } from './native';
 import { resourcePackOptions } from './resource-pack';
 import { CandidateSource } from './candidates.svelte';
 import { hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
 import { applyTheme, type ThemeChoice } from './theme';
 import { emptyProgress, reduceProgress, type JobProgress } from './workflow';
 import { normalizedScanOptions, scanOptionsSignature } from './settings';
+import { baseName } from './format';
 
 export type Page = 'workspace' | 'backups' | 'settings' | 'about' | 'help';
 export type Step = 'world' | 'scan' | 'review' | 'run' | 'result';
 export type Busy = '' | 'loading' | 'scan' | 'translate' | 'restore' | 'models' | 'prompt' | 'settings' | 'usage';
 export type Tone = 'info' | 'success' | 'error';
+type ToastAction = { label: string; run: () => void };
 
 export const STEPS: Step[] = ['world', 'scan', 'review', 'run', 'result'];
 
@@ -51,7 +54,7 @@ export const ISSUES_URL = 'https://github.com/kim0040/PomiTranslate/issues/new';
 const DAY = 24 * 60 * 60;
 export const DEFAULT_PREFS: AppPrefs = {
   theme: 'system', notice_accepted: false, tutorial_seen: false,
-  update_auto_check: true, update_last_check: 0, update_skipped_version: ''
+  update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true
 };
 export type UpdateState = 'idle' | 'checking' | 'installing' | 'error';
 /** Menu commands that work while the core failed to start: help pages and links only. */
@@ -86,12 +89,14 @@ export class AppState {
   updateError = $state('');
   updateProgress = $state<{ downloaded: number; total: number | null } | null>(null);
   banner = $state<{ tone: 'error' | 'warning'; message: string } | null>(null);
-  toasts = $state<{ id: number; tone: Tone; message: string }[]>([]);
+  toasts = $state<{ id: number; tone: Tone; message: string; action?: ToastAction }[]>([]);
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
   /** A move away from settings that waits until the user saves or drops the changes there. */
   pendingLeave = $state<(() => void) | null>(null);
+  /** Set while the pending settings decision was requested by a window close or app quit. */
+  pendingCloseSource = $state<CloseSource | null>(null);
   /** The workflow step that sent the user to settings, so settings can offer the way back. */
   returnStep = $state<Step | null>(null);
 
@@ -128,10 +133,12 @@ export class AppState {
   progress = $state<JobProgress>(emptyProgress());
   result = $state<TranslationResult | null>(null);
   resume = $state<ResumeStatus | null>(null);
+  lastJob = $state<LastJob | null>(null);
   /** The recovery snapshot of the last restore, until the next scan or world change replaces the job. */
   lastRestoreId = $state('');
 
   private toastSerial = 0;
+  private includedUndo: Set<string> | null = null;
   private estimateRevision = 0;
   private unsubscribe: (() => void)[] = [];
   private listenersStarted = false;
@@ -205,9 +212,9 @@ export class AppState {
 
   // --- feedback ----------------------------------------------------------------------------
 
-  notify(message: string, tone: Tone = 'info', ms = 5200): void {
+  notify(message: string, tone: Tone = 'info', ms = 5200, action?: ToastAction): void {
     const id = ++this.toastSerial;
-    this.toasts = [...this.toasts, { id, tone, message }];
+    this.toasts = [...this.toasts, { id, tone, message, action }];
     if (ms > 0) setTimeout(() => this.dismissToast(id), ms);
   }
 
@@ -215,15 +222,47 @@ export class AppState {
     this.toasts = this.toasts.filter((toast) => toast.id !== id);
   }
 
+  private notifyAfterJob(kind: 'scan' | 'translation' | 'restore', startedAt: number, result: {
+    status: string; candidates?: number; translated?: number; failed?: number;
+  }): void {
+    if (Date.now() - startedAt < 10_000 || !this.prefs.notify_on_finish ||
+        typeof document === 'undefined' || document.hasFocus()) return;
+    const world = baseName(this.worldDir) || t('native.notification.unknownWorld');
+    let body: string;
+    if (kind === 'scan') {
+      body = result.status === 'completed'
+        ? t('native.notification.scanDone', { world, count: result.candidates ?? 0 })
+        : t('native.notification.scanFailed', { world });
+    } else if (kind === 'restore') {
+      body = result.status === 'completed'
+        ? t('native.notification.restoreDone', { world })
+        : t('native.notification.restoreFailed', { world });
+    } else {
+      const status = result.status === 'completed' || result.status === 'partial' || result.status === 'cancelled'
+        ? result.status : 'failed';
+      body = t('native.notification.translationDone', {
+        world,
+        status: t(`native.notification.status.${status}` as MessageKey),
+        translated: result.translated ?? 0,
+        failed: result.failed ?? 0
+      });
+    }
+    void sendCompletionNotification(t('native.notification.title'), body);
+  }
+
   /** A readable message for a failed call. Codes the shell or core sent map to catalog text. */
   describe(cause: unknown): string {
     if (cause instanceof BackendError) {
       const key = `error.${cause.code}`;
-      if (cause.code === 'BUSY') return t('error.busy');
       if (hasMessage(key)) return t(key as MessageKey);
-      return cause.message || t('error.default');
+      return t('error.default');
     }
-    return cause instanceof Error ? cause.message : t('error.default');
+    if (cause instanceof Error) {
+      const key = `error.${cause.message}`;
+      if (hasMessage(key)) return t(key as MessageKey);
+      return /^[A-Z][A-Z0-9_]+$/.test(cause.message) ? t('error.default') : cause.message;
+    }
+    return t('error.default');
   }
 
   fail(cause: unknown): void {
@@ -243,6 +282,7 @@ export class AppState {
       // A stalled event subscription must not prevent the initial backend request.
       for (const listening of [
         onProgress((event) => this.handleProgress(event)),
+        onCloseRequested((source) => this.handleCloseRequested(source)),
         onCloseBlocked(() => { this.notify(t('app.closeBlocked'), 'info', 10000); }),
         onZoomFailed(() => { this.notify(t('app.zoomFailed'), 'error'); })
       ]) {
@@ -273,6 +313,7 @@ export class AppState {
       this.worldDir = boot.settings.last_world_dir || '';
       this.inspection = boot.worldInspection;
       this.backups = boot.backups;
+      this.lastJob = boot.lastJob ?? boot.resume?.lastJob ?? null;
       this.applyPrefs(boot);
       if (this.worldDir && this.inspection?.validJavaWorld) this.step = 'scan';
       this.applyResume(boot.resume);
@@ -448,11 +489,28 @@ export class AppState {
     else run();
   }
 
+  /** Show the existing unsaved-settings choice for a native X or app-quit request. */
+  private handleCloseRequested(source: CloseSource): void {
+    if (!this.settingsDirty) {
+      void finishClose(source);
+      return;
+    }
+    this.page = 'settings';
+    this.pendingCloseSource = source;
+    this.pendingLeave = () => {
+      this.pendingCloseSource = null;
+      void finishClose(source);
+    };
+  }
+
   /** Answer for a move that waited on unsaved settings. */
   resolveLeave(proceed: boolean): void {
     const next = this.pendingLeave;
     this.pendingLeave = null;
-    if (!proceed || !next) return;
+    if (!proceed || !next) {
+      this.pendingCloseSource = null;
+      return;
+    }
     this.settingsDirty = false;
     next();
   }
@@ -626,6 +684,7 @@ export class AppState {
   // --- resume ------------------------------------------------------------------------------
 
   private applyResume(resumable: ResumeStatus): void {
+    if (resumable?.lastJob) this.lastJob = resumable.lastJob;
     if (!resumable?.available || !resumable.scanPlanId || !resumable.fingerprint) {
       this.resume = null;
       return;
@@ -654,6 +713,8 @@ export class AppState {
 
   async startScan(): Promise<void> {
     if (!this.worldDir || this.isBusy) return;
+    const startedAt = Date.now();
+    let notificationStatus = 'failed';
     this.busy = 'scan';
     this.banner = null;
     this.resetJob();
@@ -661,6 +722,7 @@ export class AppState {
     try {
       await this.persistSettings();
       this.scan = await callBackend<ScanResult>('scan.start', { worldDir: this.worldDir });
+      notificationStatus = this.scan.status === 'completed' ? 'completed' : this.scan.status;
       this.estimate = this.scan.estimate ?? null;
       this.candidates.reset(this.scan.scanPlanId, this.scan.candidates, this.scan.candidateCount);
     } catch (cause) {
@@ -668,6 +730,7 @@ export class AppState {
     } finally {
       this.busy = '';
       this.progress = emptyProgress();
+      this.notifyAfterJob('scan', startedAt, { status: notificationStatus, candidates: this.scan?.candidateCount });
     }
   }
 
@@ -698,9 +761,34 @@ export class AppState {
   }
 
   setIncluded(id: string, included: boolean): void {
+    if (this.excluded.has(id) === !included) return;
+    this.includedUndo = new Set(this.excluded);
     this.estimate = null;
     if (included) this.excluded.delete(id);
     else this.excluded.add(id);
+  }
+
+  setIncludedMany(ids: string[], included: boolean): void {
+    this.includedUndo = new Set(this.excluded);
+    this.estimate = null;
+    for (const id of ids) {
+      if (included) this.excluded.delete(id);
+      else this.excluded.add(id);
+    }
+    this.notify(t('review.bulkUndoReady'), 'info', 10000, {
+      label: t('review.undo'),
+      run: () => { this.undoIncluded(); }
+    });
+  }
+
+  undoIncluded(): boolean {
+    if (!this.includedUndo) return false;
+    this.excluded.clear();
+    for (const id of this.includedUndo) this.excluded.add(id);
+    this.includedUndo = null;
+    this.estimate = null;
+    void this.loadEstimate();
+    return true;
   }
 
   setOverride(id: string, value: string): void {
@@ -719,6 +807,7 @@ export class AppState {
 
   async startTranslate(options: { resume?: boolean } = {}): Promise<void> {
     if (!this.scan || this.isBusy || this.settingsRecoveryRequired || this.credentialRecovery.has(this.settings.provider)) return;
+    const startedAt = Date.now();
     this.busy = 'translate';
     this.cancelling = false;
     this.banner = null;
@@ -742,6 +831,11 @@ export class AppState {
         failurePolicy: this.failurePolicy
       });
       this.result = outcome;
+      this.lastJob = {
+        world: baseName(this.worldDir), at: Date.now() / 1000, status: outcome.status,
+        translated: outcome.translation?.translated ?? 0, failed: outcome.translation?.failed ?? 0,
+        changedFiles: outcome.changedFileCount, candidateCount: outcome.candidateCount
+      };
       this.step = 'result';
       await this.loadBackups();
       if (RESUMABLE.includes(outcome.status)) {
@@ -763,6 +857,9 @@ export class AppState {
       this.busy = '';
       this.cancelling = false;
       this.progress = emptyProgress();
+      this.notifyAfterJob('translation', startedAt, {
+        status: outcome?.status ?? 'failed', translated: outcome?.translation?.translated, failed: outcome?.translation?.failed
+      });
     }
   }
 
@@ -779,6 +876,8 @@ export class AppState {
 
   async restore(backupSetId: string): Promise<boolean> {
     if (!this.worldDir || this.isBusy) return false;
+    const startedAt = Date.now();
+    let notificationStatus = 'failed';
     this.busy = 'restore';
     this.banner = null;
     try {
@@ -789,6 +888,7 @@ export class AppState {
       if (restored.status !== 'restored' || !restored.recoverySetId) {
         throw new Error(t('backups.restoreUnconfirmed'));
       }
+      notificationStatus = 'completed';
       this.resetJob();
       // Set after the reset: the scan and backup pages say why the reviewed scan is gone.
       this.lastRestoreId = restored.recoverySetId;
@@ -801,6 +901,7 @@ export class AppState {
       return false;
     } finally {
       this.busy = '';
+      this.notifyAfterJob('restore', startedAt, { status: notificationStatus });
     }
   }
 

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
-  import { formatNumber, formatDuration, baseName } from '../lib/format';
+  import { formatNumber, formatDuration, formatDate, baseName } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
@@ -43,6 +43,14 @@
   };
   const knownBlockers = ['bedrock', 'mcr', 'linear', 'world_in_use', 'not_writable', 'not_readable', 'missing'];
   const requestEstimate = $derived(app.estimate?.requests ?? scan?.estimate?.requests ?? scan?.requestEstimate);
+  const lastScanDate = $derived(app.resume?.savedAt
+    ? formatDate(new Date(app.resume.savedAt * 1000).toISOString(), app.locale)
+    : app.lastJob?.at ? formatDate(new Date(app.lastJob.at * 1000).toISOString(), app.locale) : t('common.unknown'));
+  const lastJobDate = $derived(app.lastJob?.at ? formatDate(new Date(app.lastJob.at * 1000).toISOString(), app.locale) : t('common.unknown'));
+  const lastJobStatus = $derived(app.lastJob?.status === 'completed' ? t('scan.home.status.completed')
+    : app.lastJob?.status === 'partial' ? t('scan.home.status.partial')
+    : app.lastJob?.status === 'cancelled' ? t('scan.home.status.cancelled')
+    : t('scan.home.status.failed'));
 </script>
 
 <div class="page">
@@ -53,6 +61,31 @@
       <div class="actions"><button type="button" class="btn btn-secondary btn-sm" title={t('export.reportHelp')} onclick={exportReport}><Icon name="download" size={14} /> {t('export.scan')}</button></div>
     {/if}
   </header>
+
+  {#if !scanning && app.worldDir && (!scan || app.resume?.available)}
+    <section class="home-summary card" aria-label={t('scan.home.title')}>
+      <div class="home-summary-head">
+        <span class="ico" aria-hidden="true"><Icon name="clock" size={20} /></span>
+        <div><h2>{t('scan.home.title')}</h2><p class="muted">{baseName(app.worldDir)}</p></div>
+      </div>
+      <dl class="home-facts">
+        <div><dt>{t('scan.home.lastScan')}</dt><dd>{lastScanDate}</dd></div>
+        <div><dt>{t('scan.home.candidates')}</dt><dd class="num">{formatNumber(app.resume?.candidateCount ?? app.scan?.candidateCount ?? app.lastJob?.candidateCount ?? 0, app.locale)}</dd></div>
+        {#if app.lastJob}
+          <div><dt>{t('scan.home.lastTranslation')}</dt><dd>{lastJobDate} · {lastJobStatus} · {t('scan.home.jobCounts', { translated: formatNumber(app.lastJob.translated, app.locale), failed: formatNumber(app.lastJob.failed, app.locale) })}</dd></div>
+        {:else}
+          <div><dt>{t('scan.home.lastTranslation')}</dt><dd class="muted">{t('scan.home.noTranslation')}</dd></div>
+        {/if}
+      </dl>
+    </section>
+  {/if}
+
+  {#if !scanning && app.resume?.available}
+    <section class="resume-card card" aria-labelledby="resume-home-title">
+      <div><p class="eyebrow">{t('world.resumeFound')}</p><h2 id="resume-home-title">{t('scan.home.resumeTitle')}</h2><p class="muted">{t('scan.home.resumeBody', { count: formatNumber(app.resume.translatedCount ?? 0, app.locale) })}</p></div>
+      <button type="button" class="btn btn-primary" onclick={() => app.goStep('run')}>{t('scan.home.resume')} <Icon name="chevron-right" size={15} /></button>
+    </section>
+  {/if}
 
   {#if scanning}
     <section class="card working" aria-live="polite">
@@ -79,7 +112,7 @@
       <div class="copy">
         <h2>{app.worldDir ? baseName(app.worldDir) : t('world.title')}</h2>
         <ul class="promises">
-          <li><Icon name="shield" size={18} /> {t('scan.startHint')}</li>
+          <li><Icon name="shield" size={18} /> {t('scan.startExplain')}</li>
         </ul>
       </div>
       <button type="button" class="btn btn-primary btn-lg" disabled={!app.worldDir || !app.inspection?.validJavaWorld} onclick={() => app.startScan()}>
@@ -177,6 +210,19 @@
 <style>
   .working { padding: var(--space-4) var(--space-5); display: grid; gap: var(--space-4); }
   .working h2 { font-size: var(--text-lg); }
+  .home-summary { display: grid; grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.3fr); align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-4); }
+  .home-summary-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+  .home-summary-head h2, .resume-card h2 { font-size: var(--text-md); }
+  .home-summary-head p { font-size: var(--text-sm); overflow-wrap: anywhere; }
+  .home-summary .ico { width: 36px; height: 36px; }
+  .home-facts { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin: 0; }
+  .home-facts div { min-width: 110px; }
+  .home-facts dt { color: var(--text-secondary); font-size: var(--text-xs); }
+  .home-facts dd { margin: 1px 0 0; font-size: var(--text-sm); font-weight: 600; }
+  .resume-card { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) var(--space-4); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: var(--accent-soft); }
+  .resume-card .eyebrow { color: var(--accent-soft-text); font-size: var(--text-xs); font-weight: 700; }
+  .resume-card h2 { margin-top: 2px; color: var(--text); }
+  .resume-card p { margin-top: 2px; font-size: var(--text-sm); }
   .start { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: var(--space-4); padding: var(--space-4) var(--space-5); }
   .ico { display: grid; place-items: center; width: 44px; height: 44px; border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--accent-soft-text); }
   .copy h2 { font-size: var(--text-xl); overflow-wrap: anywhere; }
@@ -198,5 +244,6 @@
   .cols ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); font-size: var(--text-sm); }
   .tag { display: inline-block; margin-inline-start: var(--space-2); padding: 1px 8px; border-radius: var(--radius-full); background: var(--bg-sunken); color: var(--text-secondary); font-size: var(--text-xs); font-weight: 600; }
   .plain { margin: 0; padding-inline-start: 18px; }
-  @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } .start { grid-template-columns: 1fr; } }
+  @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } .start { grid-template-columns: 1fr; } .home-summary { grid-template-columns: 1fr; } }
+  @media (max-width: 540px) { .resume-card { align-items: flex-start; flex-direction: column; } }
 </style>

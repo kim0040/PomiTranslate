@@ -2,7 +2,7 @@
   export type IconName =
     | 'folder' | 'search' | 'list' | 'language' | 'check-circle' | 'archive' | 'sliders' | 'info' | 'chevron-right'
     | 'chevron-left' | 'chevron-down' | 'x' | 'check' | 'alert-triangle' | 'alert-circle' | 'refresh' | 'trash'
-    | 'eye' | 'eye-off' | 'play' | 'stop' | 'sidebar' | 'pencil' | 'shield' | 'clock' | 'minus' | 'plus' | 'undo' | 'download' | 'help';
+    | 'eye' | 'eye-off' | 'play' | 'stop' | 'sidebar' | 'pencil' | 'shield' | 'clock' | 'minus' | 'plus' | 'undo' | 'download' | 'help' | 'copy';
 </script>
 
 <script lang="ts">
@@ -39,7 +39,8 @@
     plus: 'M12 5v14M5 12h14',
     undo: 'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
     download: 'M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14',
-    help: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17v.01'
+    help: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17v.01',
+    copy: 'M8 8V4.5A1.5 1.5 0 0 1 9.5 3h9A1.5 1.5 0 0 1 20 4.5v12a1.5 1.5 0 0 1-1.5 1.5H15M5 7h8.5A1.5 1.5 0 0 1 15 8.5v12A1.5 1.5 0 0 1 13.5 22h-8A1.5 1.5 0 0 1 4 20.5v-12A1.5 1.5 0 0 1 5.5 7z'
   };
   const filled = new Set<IconName>(['play']);
 </script>

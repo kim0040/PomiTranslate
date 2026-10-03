@@ -16,7 +16,6 @@ const HOSTS: &[&str] = &[
     "platform.openai.com",
     "console.anthropic.com",
     "www.cometapi.com",
-    "cometapi.com",
 ];
 const CONTACT: &str = "mailto:mini0227kim@gmail.com";
 
@@ -31,7 +30,10 @@ pub fn allowed(url: &str) -> bool {
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.port().is_none()
-        && parsed.host_str().is_some_and(|host| HOSTS.contains(&host))
+        && parsed.host_str().is_some_and(|host| {
+            HOSTS.contains(&host)
+                && (host != "www.cometapi.com" || parsed.path() == "/console/token")
+        })
 }
 
 #[tauri::command]
@@ -101,6 +103,7 @@ mod tests {
             "http://www.cometapi.com/console/token",
             "https://www.cometapi.com.evil.example/console/token",
             "https://api.cometapi.com/console/token",
+            "https://www.cometapi.com/console/other",
             "https://cometapi.com@evil.example/console/token",
         ] {
             assert!(!allowed(refused), "{refused} must not open");

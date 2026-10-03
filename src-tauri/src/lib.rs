@@ -480,8 +480,13 @@ pub fn run() {
         .setup(|app| {
             zoom_menu::install(app)?;
             startup_theme::apply(app);
-            window_state::guard(app);
             Ok(())
+        })
+        .on_page_load(|webview, _payload| {
+            if webview.label() == "main" {
+                window_state::guard(webview.app_handle());
+                window_state::mark_ready();
+            }
         })
         .on_menu_event(|app, event| {
             if !app_menu::select(app, event.id().as_ref()) {
@@ -507,6 +512,9 @@ pub fn run() {
             close_guard::finish_close
         ])
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+                window_state::save_normal_geometry(window);
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let job_running = window.state::<ActiveSidecar>().request_gate.try_lock().is_err();
                 let unsaved = window.state::<close_guard::CloseGuard>().unsaved();

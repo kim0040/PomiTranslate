@@ -2,7 +2,7 @@
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
-  import { describeDetail, describeLocation, formatNumber } from '../lib/format';
+  import { describeDetail, describeLocation, formatNumber, rawLocation, teleportCommand } from '../lib/format';
   import Icon from './Icon.svelte';
 
   let { candidate, onClose, showHeading = true }: { candidate: Candidate | null; onClose?: () => void; showHeading?: boolean } = $props();
@@ -16,6 +16,17 @@
   });
   const kinds = $derived(candidate ? Object.entries(candidate.kinds ?? { [candidate.kind]: candidate.occurrences }) : []);
   const shown = $derived(candidate?.locations ?? []);
+
+  async function copyTeleport(location: NonNullable<Candidate['locations']>[number]): Promise<void> {
+    const command = teleportCommand(location);
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      app.notify(t('review.detail.teleportCopied'), 'success');
+    } catch {
+      app.notify(t('review.detail.teleportCopyFailed'), 'error');
+    }
+  }
 </script>
 
 <aside class="detail" aria-label={t('review.detail.title')}>
@@ -77,9 +88,16 @@
       </ul>
       <ul class="places">
         {#each shown as location, index (index)}
-          <li>
-            <span class="mono">{describeLocation(location, app.locale)}</span>
-            {#if describeDetail(location.detail, app.locale)}<span class="muted"> · {describeDetail(location.detail, app.locale)}</span>{/if}
+          <li title={rawLocation(location)}>
+            <div class="place-copy">
+              <span class="mono">{describeLocation(location, app.locale, candidate.kind)}</span>
+              {#if describeDetail(location.detail, app.locale)}<span class="muted">{describeDetail(location.detail, app.locale)}</span>{/if}
+            </div>
+            {#if location.pos}
+              <button type="button" class="btn btn-quiet btn-sm teleport" aria-label={t('review.detail.teleportCopy')} onclick={() => copyTeleport(location)}>
+                <Icon name="copy" size={13} /> {t('review.detail.teleportCopy')}
+              </button>
+            {/if}
           </li>
         {/each}
       </ul>
@@ -104,5 +122,8 @@
   .kinds, .places { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
   .kinds li { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
   .places { font-size: var(--text-xs); }
-  .places li { padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); overflow-wrap: anywhere; }
+  .places li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); overflow-wrap: anywhere; }
+  .place-copy { min-width: 0; display: grid; gap: 2px; }
+  .teleport { flex: none; }
+  @media (max-width: 480px) { .places li { align-items: flex-start; flex-direction: column; } }
 </style>
