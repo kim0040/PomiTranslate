@@ -702,6 +702,7 @@ def _settings_payload(data_dir: Path, provider: str = "", *, check_keyring: bool
     from mwt.secrets import load_api_key
 
     saved = dict(_saved(data_dir))
+    saved.pop("last_jobs", None)  # world summaries for the start screen, not a setting
     if not saved.get("provider"):
         saved["provider"] = "openai"
     saved["openrouter_reasoning"] = normalize_reasoning(saved.get("openrouter_reasoning", "default"))
@@ -736,7 +737,7 @@ def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyri
     world = Path(selected).expanduser() if selected else None
     inspection = _world_inspection(world, recursive_blockers=False) if world else None
     valid_world = bool(world and inspection and inspection.get("validJavaWorld"))
-    from mwt.userdata import load_app_prefs
+    from mwt.userdata import load_app_prefs, load_last_job
 
     return {
         "notices": payload(),
@@ -746,6 +747,7 @@ def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyri
         "worldInspection": inspection,
         "backups": list_backup_sets(world, _backup_stores(world, data_dir)) if valid_world else [],
         "resume": (_resume_candidate(data_dir, world) or {"available": False}) if valid_world else {"available": False},
+        "lastJob": load_last_job(world, data_dir) if valid_world else None,
     }
 
 
@@ -1009,13 +1011,15 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         emit({"v": 1, "id": request_id, "type": "response.ok", "payload": discover_worlds()})
         return
     if kind == "resume.status":
+        from mwt.userdata import load_last_job
+
         candidate = _resume_candidate(data_dir, world)
         emit(
             {
                 "v": 1,
                 "id": request_id,
                 "type": "response.ok",
-                "payload": candidate or {"available": False},
+                "payload": {**(candidate or {"available": False}), "lastJob": load_last_job(world, data_dir)},
             }
         )
         return
@@ -1362,6 +1366,12 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             on_translation_failure=str(body.get("failurePolicy") or "stop"),
             desktop_context=body if body.get("credentialOwner") == "rust" else None,
         )
+        try:
+            from mwt.userdata import remember_last_job
+
+            remember_last_job(world, report, data_dir)
+        except (OSError, ValueError):
+            pass  # the start screen's summary is a convenience; the result below is what matters
         emit(
             {
                 "v": 1,

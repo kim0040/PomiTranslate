@@ -11,6 +11,7 @@
     "core:window:allow-set-progress-bar",
     "core:window:allow-set-theme",
     "core:window:allow-set-background-color",
-    "core:window:allow-request-user-attention"
+    "core:window:allow-request-user-attention",
+    "notification:default"
   ]
 }

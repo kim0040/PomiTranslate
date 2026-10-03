@@ -86,6 +86,28 @@ mod tests {
     use super::allowed;
 
     #[test]
+    fn every_api_key_page_the_help_screen_lists_opens() {
+        for page in [
+            "https://platform.openai.com/api-keys",
+            "https://aistudio.google.com/app/apikey",
+            "https://console.anthropic.com/settings/keys",
+            "https://openrouter.ai/settings/keys",
+            "https://www.cometapi.com/console/token",
+        ] {
+            assert!(allowed(page), "{page} must open");
+        }
+        // The host is exact: a look-alike or a plain-http Comet address never opens.
+        for refused in [
+            "http://www.cometapi.com/console/token",
+            "https://www.cometapi.com.evil.example/console/token",
+            "https://api.cometapi.com/console/token",
+            "https://cometapi.com@evil.example/console/token",
+        ] {
+            assert!(!allowed(refused), "{refused} must not open");
+        }
+    }
+
+    #[test]
     fn only_known_https_addresses_and_the_contact_open() {
         assert!(allowed("https://github.com/kim0040/PomiTranslate/releases/latest"));
         assert!(allowed("https://www.minecraft.net/en-us/eula"));
