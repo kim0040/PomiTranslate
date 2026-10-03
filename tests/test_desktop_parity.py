@@ -30,16 +30,21 @@ from tests.test_release_fixtures import compound, nbt_bytes, string, write_regio
 def _request(data_dir: Path, kind: str, payload: dict | None = None) -> dict:
     replies: list[dict] = []
     with patch.object(desktop_entry, "emit", side_effect=replies.append):
-        desktop_entry.handle(
-            {
-                "v": 1,
-                "id": f"parity-{kind}",
-                "type": kind,
-                "payload": payload or {},
-            },
-            report_dir=data_dir / "reports",
-            data_dir=data_dir,
-        )
+        try:
+            desktop_entry.handle(
+                {
+                    "v": 1,
+                    "id": f"parity-{kind}",
+                    "type": kind,
+                    "payload": payload or {},
+                },
+                report_dir=data_dir / "reports",
+                data_dir=data_dir,
+            )
+        except desktop_entry.RequestRefused as exc:
+            # Match the public JSONL boundary for typed refusals, while leaving validation
+            # ValueErrors visible to the existing atomic-settings tests below.
+            replies.append({"type": "response.error", "error": {"code": exc.code, "message": str(exc)}})
     assert replies
     return replies[-1]
 
@@ -52,6 +57,7 @@ def _settings_set(data_dir: Path, **settings) -> dict:
             "credentialOwner": "rust",
             "provider": "openai",
             "model": "fixture-model",
+            "review_before_apply": False,
             **settings,
         },
     )

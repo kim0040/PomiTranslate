@@ -202,7 +202,7 @@ def test_single_bad_string_is_reported(tmp: Path) -> None:
     skipping = make_translator(world, provider, tmp / "poison-skip.json", on_translation_failure="skip").run()
     assert skipping["status"] == "partial"
     assert skipping["translation"] == {
-        "unique": 3, "translated": 2, "failed": 1, "kept_original": 0, "unchanged": 0,
+        "unique": 3, "translated": 2, "failed": 1, "kept_original": 0, "unchanged": 0, "pending": 0,
     }
     written = RegionFile.read(world / "region" / "r.0.0.mca").chunks[0].raw_nbt
     assert "[번역] Hello there".encode() in written and b"POISON line" in written

@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mwt.tokens import preserve_tokens, tokens_preserved
+from mwt.tokens import _without_trailing_reset, preserve_tokens, tokens_preserved
 
 # NBT stores a string with a 16-bit length; the core keeps the original instead of writing more.
 MAX_EDIT_BYTES = 30_000
@@ -43,7 +43,9 @@ def edit_error(source: str, text: Any) -> str:
         return "too_long"
     if "\x00" in cleaned:
         return "invalid"
-    if not tokens_preserved(source, cleaned):
+    # Use the exact same harmless trailing-reset normalization as AI output.
+    normalized = _without_trailing_reset(source, cleaned)
+    if not tokens_preserved(source, normalized):
         return "tokens"
     return ""
 
@@ -71,7 +73,7 @@ def clean_edits(
         if code:
             problems.append({"id": candidate_id, "reason": code})
         else:
-            by_source[source_by_id[candidate_id]] = text.strip()
+            by_source[source_by_id[candidate_id]] = preserve_tokens(source_by_id[candidate_id], text.strip())
     return by_source, problems
 
 
@@ -92,9 +94,9 @@ def _effective(
         if info:
             return "failed", "", str(info.get("reason") or "unknown"), str(info.get("detail") or ""), ""
         # Never answered: the run stopped before this string was sent, or it was cut off.
-        return "failed", "", "pending", "", ""
+        return "failed", "", "unknown", "Not translated yet.", ""
     shown = preserve_tokens(source, ai)
-    if shown == source and ai and ai != source:
+    if ai and not tokens_preserved(source, _without_trailing_reset(source, ai)):
         # The AI's answer lost or added a format code, so the original was kept.
         return "kept", source, "invalid_response", "format tokens differ from the original", ai
     if shown == source:

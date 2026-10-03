@@ -157,6 +157,7 @@ def main() -> None:
                             "worldDir": str(world),
                             "provider": "openai",
                             "model": "fixture",
+                            "review_before_apply": False,
                             "credentialOwner": "rust",
                         },
                     },

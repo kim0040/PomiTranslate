@@ -217,7 +217,7 @@ _FAILURE_FOR_STOP = {
 _CONTENT_FILTER_HINTS = ("content_filter", "content filter", "safety", "blocked", "prohibited", "blocklist", "moderation", "policy violation")
 _QUOTA_HINTS = ("quota", "billing", "insufficient", "credit", "exceeded your current")
 _TIMEOUT_HINTS = ("timed out", "timeout", "time out")
-_INVALID_HINTS = ("incomplete translation json", "invalid json", "no choices", "output token limit", "no candidates", "no text")
+_INVALID_HINTS = ("incomplete translation json", "invalid json", "no choices", "output token limit", "no candidates", "no text", "format tokens", "format-token")
 
 
 def failure_code_for_stop(code: str) -> str:
@@ -246,10 +246,12 @@ def classify_failure(exc: BaseException | str | None) -> str:
         if any(hint in message for hint in _CONTENT_FILTER_HINTS):
             return "content_filter"
         return "provider_error"
-    if isinstance(exc, ProviderError):
-        return "network"
     if any(hint in message for hint in _CONTENT_FILTER_HINTS):
         return "content_filter"
+    if isinstance(exc, (json.JSONDecodeError,)):
+        return "invalid_response"
+    if isinstance(exc, ProviderError):
+        return "network"
     if isinstance(exc, OSError):
         return "network"
     return "unknown"
@@ -657,7 +659,7 @@ class BatchTranslator:
         for text in texts:
             if text not in self.cache and text in self.overrides:
                 self.cache[text] = self.overrides[text]
-        return [text for text in texts if text not in self.cache]
+        return [text for text in texts if text not in self.cache or text in self.failed]
 
     def lookup(self, texts: list[str]) -> dict[str, str]:
         """Cache-only view. It never calls the provider."""
@@ -781,6 +783,7 @@ class BatchTranslator:
                 self.throttle(len(texts))
                 # The breaker may have tripped while this worker waited for the shared throttle.
                 self.ensure_not_cancelled()
+                self._check_budget()
                 self.emit("translation_batch_start", batch_size=len(texts), attempt=attempt, max_attempts=max_retries)
                 parsed = self.client.translate_mapping(
                     payload,
@@ -790,6 +793,9 @@ class BatchTranslator:
                 self.emit("translation_batch_done", batch_size=len(texts), attempt=attempt)
                 with self._lock:
                     self.consecutive_failures = 0
+                    for text in texts:
+                        self.failed.pop(text, None)
+                        self.failed_codes.pop(text, None)
                 return {
                     text: parsed.get(str(i), text)
                     for i, text in enumerate(texts)
@@ -799,7 +805,16 @@ class BatchTranslator:
             except Exception as exc:
                 last_error = str(exc)
                 last_exc = exc
-                delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts))
+                try:
+                    delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts))
+                except ProviderUnavailable:
+                    # A fatal/breaker stop still needs row-level reasons for this attempted batch.
+                    with self._lock:
+                        for text in texts:
+                            self.failed[text] = last_error
+                            self.failed_codes[text] = classify_failure(exc)
+                    raise
+                self._check_budget()
                 if attempt < max_retries:
                     self.wait(delay)
 
@@ -878,7 +893,9 @@ class WorldTranslator(TextExtractionMixin):
                 self.edits[source] = text
         self.translator = None if config["dry_run"] else BatchTranslator(
             config,
-            progress_callback=self.emit,
+            progress_callback=lambda event: self.emit(
+                event["event"], **{key: value for key, value in event.items() if key != "event"}
+            ),
             cancel_check=self.is_cancelled,
             initial_cache=self.translation_cache,
         )
@@ -1031,6 +1048,8 @@ class WorldTranslator(TextExtractionMixin):
         self.prior_usage = dict(checkpoint.get("usage_total") or {})
         self.edits = dict(checkpoint.get("edits") or {})
         self.applied = checkpoint.get("applied") or None
+        self.stop_code = str(checkpoint.get("stop_code") or "")
+        self._adopted_failures = dict(checkpoint.get("failures") or {})
         saved_report = checkpoint.get("report")
         if isinstance(saved_report, dict):
             self.report.update(saved_report)
@@ -1250,6 +1269,9 @@ class WorldTranslator(TextExtractionMixin):
 
             self._verify_external_pack_inputs()
             self.emit("phase_start", phase="write", total=len(pending_files))
+            # Recheck after collection/translation and its callbacks, before the first backup/write.
+            if world_fingerprint(world_dir) != fingerprint:
+                raise PlanInvalidated("World changed during translation. Rescan before writing.")
             if self.config["resource_pack"]["enabled"]:
                 self.write_resource_packs()
             for index, file_path in enumerate(pending_files, start=1):
@@ -1465,14 +1487,26 @@ class WorldTranslator(TextExtractionMixin):
         return paths
 
     def _guard_translations(self, texts: list[str], translations: dict[str, str]) -> dict[str, str]:
-        from mwt.tokens import preserve_tokens
+        from mwt.tokens import _without_trailing_reset, preserve_tokens, tokens_preserved
 
         guarded = {}
         for text in texts:
-            translated = preserve_tokens(text, translations.get(text, text))
+            answer = translations.get(text, text)
+            translated = preserve_tokens(text, answer)
+            problem = ""
+            if not isinstance(answer, str) or not answer.strip():
+                problem = "The provider returned an empty or invalid translation."
+            elif not tokens_preserved(text, _without_trailing_reset(text, answer)):
+                problem = "The translation's format tokens differ from the original."
             # NBT stores a string with a 16-bit length. Keep the original rather than fail the file.
             if len(translated.encode("utf-8")) > 30000:
                 translated = text
+                problem = "The translation exceeds the safe NBT string length."
+            if problem and self.translator is not None and self.runtime_config.get("keep_checkpoint"):
+                # Desktop review/retry can correct unusable answers. Legacy CLI still counts
+                # these as kept originals, preserving its single-pass behavior.
+                self.translator.failed[text] = problem
+                self.translator.failed_codes[text] = "invalid_response"
             guarded[text] = translated
         return guarded
 
@@ -1703,6 +1737,7 @@ class WorldTranslator(TextExtractionMixin):
         LLMProviderClient.reset_counters()
         translator = self.translator
         for text in sources:
+            translator.cache.pop(text, None)
             translator.failed.pop(text, None)
             translator.failed_codes.pop(text, None)
         batch_size = max(1, int(self.config["batch_size"]))
@@ -1714,6 +1749,9 @@ class WorldTranslator(TextExtractionMixin):
             requests_estimate=math.ceil(len(translator.pending(sources)) / batch_size),
         )
         status = "awaiting_review"
+        self.stop_code = ""
+        self.report["errors"] = [item for item in self.report.get("errors", [])
+                                 if item.get("scope") not in {"provider", "translation", "budget"}]
         try:
             translator.translate_texts(sources)
         except BudgetStopped as exc:
@@ -1841,6 +1879,9 @@ class WorldTranslator(TextExtractionMixin):
                     "backup_set_id": str(self.report.get("backup_set_id") or ""),
                     "world_fingerprint": world_fingerprint(Path(self.config["world_dir"])),
                     "at": time.time(),
+                    "external_pack_fingerprints": {
+                        str(path.resolve()): file_sha256(path) for path in self._external_backup_files()
+                    },
                 }
                 self.save_checkpoint()
             elif not self.runtime_config.get("apply_only"):

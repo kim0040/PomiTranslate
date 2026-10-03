@@ -88,7 +88,7 @@ def _settings_fingerprint(data_dir: Path) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _scan_scope_fingerprint(data_dir: Path) -> str:
+def _scan_scope_fingerprint(data_dir: Path, *, original_external: dict | None = None) -> str:
     """What decides which texts a scan finds. Provider, model and prompt settings do not, so
     changing them does not throw a reviewed scan away."""
     saved = _saved(data_dir)
@@ -105,6 +105,12 @@ def _scan_scope_fingerprint(data_dir: Path) -> str:
         "extractor": EXTRACTOR_VERSION,
     }
     external_scope = pack_scope_signature(saved)
+    # Reapply validates the applied ZIP's bytes separately, then compares settings and parent
+    # identity against the original scan. Our own ZIP write must not invalidate that scan.
+    for entry in external_scope:
+        original = (original_external or {}).get(entry["path"])
+        if isinstance(original, dict) and "sha256" in entry:
+            entry["sha256"] = original["sha256"]
     if external_scope:
         relevant["external_resource_packs"] = external_scope
     encoded = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -167,19 +173,22 @@ def _reasoning_may_bill(saved: dict, data_dir: Path) -> bool:
         choice = normalize_reasoning(saved.get("openrouter_reasoning", "default"))
     except ValueError:
         choice = "default"
-    if choice == "disabled":
-        return False
-    if choice != "default":
-        return True
     provider, model = str(saved.get("provider") or ""), str(saved.get("model") or "")
     for item in load_model_catalog(provider, root=data_dir) if provider and model else []:
         if item.get("id") != model:
             continue
         meta = item.get("reasoning")
+        if isinstance(meta, dict) and meta.get("mandatory"):
+            return True
+        if choice == "disabled":
+            return False
+        if choice != "default":
+            return True
         if isinstance(meta, dict):
             return bool(meta.get("mandatory") or meta.get("default_enabled") is not False)
-        return "reasoning" in (item.get("supported_parameters") or [])
-    return True  # Unknown model: assume it may think.
+        parameters = item.get("supported_parameters")
+        return "reasoning" in parameters if isinstance(parameters, list) else True
+    return choice != "disabled"  # Unknown model: assume it may think unless disabled.
 
 
 def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
@@ -562,6 +571,7 @@ def _run_translator(
     edits: dict | None = None,
     adopt_checkpoint: dict | None = None,
     retry: tuple[list[str], list[str]] | None = None,
+    budget_override: bool = False,
 ) -> dict:
     import os
 
@@ -663,7 +673,7 @@ def _run_translator(
                 "apply_only": bool(apply_only),
                 # The desktop keeps a finished job so its translations can be reviewed and corrected.
                 "keep_checkpoint": bool(scan_plan_id and not dry_run),
-                "max_cost_usd": max_cost_usd,
+                "max_cost_usd": 0.0 if budget_override else max_cost_usd,
                 "price": {"input": price["input"], "output": price["output"]} if price else None,
                 "adopt_checkpoint": adopt_checkpoint,
                 "adopt_report": retry is not None,
@@ -818,13 +828,20 @@ class RequestRefused(Exception):
         self.details = details
 
 
-def _validated_plan(data_dir: Path, fingerprint: str, scan_plan_id: str) -> dict:
+def _validated_plan(data_dir: Path, fingerprint: str, scan_plan_id: str, *, applied: dict | None = None) -> dict:
     """The saved scan plan, when it still describes the world and settings being acted on."""
     if not fingerprint or not scan_plan_id:
         raise RequestRefused("SCAN_REQUIRED", "Run Scan Only and review its result before translating.")
-    scope_fingerprint = _scan_scope_fingerprint(data_dir)
-    expected_plan_id = _scan_plan_id(fingerprint, scope_fingerprint)
     stored_plan = _load_scan_plan(data_dir, scan_plan_id)
+    from mwt.safety import file_sha256
+    for path, digest in ((applied or {}).get("external_pack_fingerprints") or {}).items():
+        target = Path(path)
+        if target.is_symlink() or not target.is_file() or file_sha256(target) != digest:
+            raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "An external resource pack changed after this job was applied.")
+    scope_fingerprint = _scan_scope_fingerprint(
+        data_dir, original_external=stored_plan.get("externalPackFingerprints") if applied else None,
+    )
+    expected_plan_id = _scan_plan_id(fingerprint, scope_fingerprint)
     if (
         scan_plan_id != expected_plan_id
         or stored_plan.get("worldFingerprint") != fingerprint
@@ -883,7 +900,7 @@ def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_d
     report = job.get("report") or {}
     page["meta"] = {
         "status": str(report.get("status") or ""),
-        "applied": report.get("status") in {"completed", "partial"} and bool(applied),
+        "applied": bool(applied),
         "backupSetId": str(applied.get("backup_set_id") or ""),
         "failedCount": len(failed_records),
         "usage": job.get("usage_total") or {},
@@ -892,7 +909,8 @@ def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_d
     return page
 
 
-def _restore_backup(world: Path, backup_id: str, data_dir: Path) -> tuple[BackupSet, str]:
+def _restore_backup(world: Path, backup_id: str, data_dir: Path, *,
+                    expected_fingerprint: str = "", expected_external: dict | None = None) -> tuple[BackupSet, str]:
     """Put a backup set back (keeping what it replaces as a recovery set) and say which set that is."""
     stores = _backup_stores(world, data_dir)
     if backup_id == "latest":
@@ -906,7 +924,23 @@ def _restore_backup(world: Path, backup_id: str, data_dir: Path) -> tuple[Backup
     allowed = [Path(path) for path in normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
                if Path(path).resolve(strict=False) in required]
     selected = BackupSet.find(world, backup_id, stores, external_files=allowed)
-    return selected, selected.restore(recovery_store=stores[0])
+    from mwt.locking import WorldWriteLock, MinecraftSessionLocks
+    from mwt.safety import world_fingerprint, file_sha256
+
+    guard, session = WorldWriteLock(world), MinecraftSessionLocks(world)
+    try:
+        guard.acquire()
+        session.acquire()
+        if expected_fingerprint and world_fingerprint(world) != expected_fingerprint:
+            raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "The world changed after this job was applied.")
+        for path, digest in (expected_external or {}).items():
+            target = Path(path)
+            if target.is_symlink() or not target.is_file() or file_sha256(target) != digest:
+                raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "An external resource pack changed after this job was applied.")
+        return selected, selected.restore(recovery_store=stores[0])
+    finally:
+        session.release()
+        guard.release()
 
 
 def _prune_finished_jobs(data_dir: Path, world: Path, keep_plan_id: str) -> None:
@@ -1515,8 +1549,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             and candidate_by_id[candidate_id] not in source_overrides
         }
         manual_only = bool(included_ids) and not uncovered_ids
-        # With nothing for the AI to write there is nothing to review: the person typed every text.
-        review = (saved.get("review_before_apply", True) is not False) and not manual_only
+        review = saved.get("review_before_apply", True) is not False
+        if not isinstance(body.get("budgetOverride", False), bool):
+            raise ValueError("budgetOverride must be true or false")
         report = _run_translator(
             world,
             dry_run=False,
@@ -1538,6 +1573,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             on_translation_failure=str(body.get("failurePolicy") or "stop"),
             desktop_context=body if body.get("credentialOwner") == "rust" else None,
             review_before_apply=review,
+            budget_override=body.get("budgetOverride", False),
         )
         emit({"v": 1, "id": request_id, "type": "response.ok", "payload": _translate_payload(report)})
         return
@@ -1545,12 +1581,14 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         reapply = kind == "translate.reapply"
         fingerprint = str(body.get("fingerprint") or "")
         scan_plan_id = str(body.get("scanPlanId") or "")
-        stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id)
+        if not fingerprint or not scan_plan_id:
+            raise RequestRefused("SCAN_REQUIRED", "Run Scan Only and review its result before translating.")
         job = _load_job(data_dir, scan_plan_id, world)
+        stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id, applied=job.get("applied") if reapply else None)
         if not job:
             raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
         applied = job.get("applied") or {}
-        job_applied = job.get("report", {}).get("status") in {"completed", "partial"} and bool(applied)
+        job_applied = bool(applied)
         source_by_id = {
             str(item.get("id")): str(item.get("source"))
             for item in stored_plan.get("candidates", [])
@@ -1565,12 +1603,14 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             raise RequestRefused("NOTHING_TO_REAPPLY", "This job has no applied backup to restore first.")
         if not reapply and job_applied:
             raise RequestRefused("ALREADY_APPLIED", "This job was already written to the world.")
+        raw_excluded = body.get("excludedCandidateIds", [])
+        if not isinstance(raw_excluded, list) or any(item not in source_by_id for item in raw_excluded):
+            raise ValueError("An excluded candidate is not part of this scan plan")
         excluded = sorted(
             {str(item) for item in (job.get("resume") or {}).get("excluded_candidate_ids") or []}
             | {
                 str(item)
-                for item in body.get("excludedCandidateIds") or []
-                if isinstance(item, str) and str(item) in source_by_id
+                for item in raw_excluded
             }
         )
         resume = job.get("resume") or {}
@@ -1586,7 +1626,11 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "WORLD_CHANGED_SINCE_APPLY",
                     "The world changed after the translation was written, so its backup cannot be restored first.",
                 )
-            _restored, recovery_id = _restore_backup(world, str(applied["backup_set_id"]), data_dir)
+            _restored, recovery_id = _restore_backup(
+                world, str(applied["backup_set_id"]), data_dir,
+                expected_fingerprint=str(applied["world_fingerprint"]),
+                expected_external=applied.get("external_pack_fingerprints") or {},
+            )
         report = _run_translator(
             world,
             dry_run=False,
@@ -1616,14 +1660,20 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
     if kind == "translate.retry_failed":
         scan_plan_id = str(body.get("scanPlanId") or "")
         stored_plan = _load_scan_plan(data_dir, scan_plan_id)
-        if not stored_plan or stored_plan.get("scopeFingerprint") != _scan_scope_fingerprint(data_dir):
-            raise RequestRefused(
-                "PLAN_INVALIDATED",
-                "The target language or resource pack setting changed after Scan Only. Run the scan again.",
-            )
         job = _load_job(data_dir, scan_plan_id, world)
         if not job:
             raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
+        stored_plan = _validated_plan(
+            data_dir, str(stored_plan.get("worldFingerprint") or ""), scan_plan_id, applied=job.get("applied"),
+        )
+        from mwt.safety import world_fingerprint, file_sha256
+        applied = job.get("applied") or {}
+        expected_world = applied.get("world_fingerprint") or job.get("world_fingerprint")
+        if world_fingerprint(world) != expected_world:
+            raise RequestRefused("PLAN_INVALIDATED", "The world changed after this translation job was saved.")
+        for path, digest in (applied.get("external_pack_fingerprints") or {}).items():
+            if not Path(path).is_file() or Path(path).is_symlink() or file_sha256(Path(path)) != digest:
+                raise RequestRefused("PLAN_INVALIDATED", "An external pack changed after this translation job was applied.")
         saved = _saved(data_dir)
         source_overrides = normalize_source_overrides(
             saved.get("source_overrides", {}), field="saved source_overrides"
@@ -1652,6 +1702,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             desktop_context=body if body.get("credentialOwner") == "rust" else None,
             adopt_checkpoint=job,
             retry=(ordered, sources),
+            budget_override=normalize_review_before_apply(body.get("budgetOverride", False), field="budgetOverride"),
         )
         emit({"v": 1, "id": request_id, "type": "response.ok", "payload": _translate_payload(report)})
         return
