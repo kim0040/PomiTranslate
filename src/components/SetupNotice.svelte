@@ -23,6 +23,9 @@
       <button type="button" class="btn btn-secondary btn-sm" disabled={app.busy === 'settings'} onclick={() => app.openSettingsFor()}>
         <Icon name="sliders" size={14} /> {t('setup.open')}
       </button>
+      <button type="button" class="btn btn-secondary btn-sm" disabled={app.busy === 'settings'} onclick={() => app.openWizard()}>
+        <Icon name="play" size={12} /> {t('help.wizardButton')}
+      </button>
     {/snippet}
   </Callout>
 {/if}

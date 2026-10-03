@@ -1,4 +1,5 @@
 import type { ScanOptions, Settings } from './api';
+import type { MessageKey } from './i18n/index.svelte';
 import { resourcePackOptions } from './resource-pack';
 
 /** A complete, normalized copy of settings, so comparisons and drafts never share objects. */
@@ -89,3 +90,13 @@ export function scanOptionsSignature(options?: Partial<ScanOptions>): string {
   const normalized = normalizedScanOptions(options);
   return JSON.stringify(Object.fromEntries(Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b))));
 }
+
+/** The style presets of the translation prompt, in the order a select lists them. */
+export const STYLE_PRESETS: { value: string; label: MessageKey }[] = [
+  { value: 'neutral', label: 'settings.style.neutral' },
+  { value: 'casual', label: 'settings.style.casual' },
+  { value: 'formal', label: 'settings.style.formal' },
+  { value: 'polite', label: 'settings.style.polite' },
+  { value: 'story', label: 'settings.style.story' },
+  { value: 'custom', label: 'settings.style.custom' }
+];

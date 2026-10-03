@@ -16,6 +16,7 @@ const background = (page: Page) => page.evaluate(() => getComputedStyle(document
 
 async function openAppearance(page: Page) {
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱' }).click();
   return page.locator('#application-settings');
 }
 
@@ -31,7 +32,7 @@ test('settings switch light, dark and system at once and keep the choice', async
   await expect.poll(async () => (await chrome(page, 'plugin:window|set_theme')).at(-1)?.value).toBe('dark');
   await expect.poll(async () => (await chrome(page, 'set_menu_theme')).at(-1)?.choice).toBe('dark');
   await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#120f0b');
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); // nothing to save
+  await expect(page.locator('.save-bar')).toHaveCount(0); // nothing to save
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 
   await section.getByRole('radio', { name: '라이트' }).check();

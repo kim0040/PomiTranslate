@@ -24,7 +24,7 @@
   let showHidden = $state(false);
   let input: HTMLInputElement | undefined = $state();
 
-  const listId = `${id}-listbox`;
+  const listId = $derived(`${id}-listbox`);
   const open = $derived(inline || popup);
   const hiddenCount = $derived(models.filter((model) => !isSuitable(model)).length);
   const usable = $derived(showHidden ? models : models.filter(isSuitable));
@@ -84,7 +84,7 @@
     } else if (event.key === 'Enter' && open && active >= 0 && rows[active]) {
       event.preventDefault();
       choose(rows[active]);
-    } else if (event.key === 'Escape' && popup) {
+    } else if (event.key === 'Escape' && popup && !inline) {
       // Closing the list must not also close a dialog around it.
       event.preventDefault();
       event.stopPropagation();
@@ -103,6 +103,17 @@
     return from === null || to === null ? '' : `${formatUsd(from, app.locale)} / ${formatUsd(to, app.locale)}`;
   };
 </script>
+
+{#snippet hiddenNote()}
+  {#if hiddenCount > 0}
+    <div class="hidden-note">
+      <span>{t(showHidden ? 'picker.hiddenShown' : 'picker.hidden', { count: hiddenCount })}</span>
+      <button type="button" class="btn btn-quiet btn-sm" aria-pressed={showHidden} onclick={() => (showHidden = !showHidden)}>
+        {t(showHidden ? 'picker.hideThem' : 'picker.showThem')}
+      </button>
+    </div>
+  {/if}
+{/snippet}
 
 <div class="picker" class:inline>
   <div class="field-row">
@@ -137,9 +148,13 @@
   </div>
 
   {#if open}
-    <div class="list" id={listId} role="listbox" aria-label={t('picker.list')} tabindex="-1" onmousedown={(event) => event.preventDefault()}>
-      {#if !rows.length}
-        <p class="empty">{models.length ? t('picker.noMatch') : t('picker.empty')}</p>
+    <!-- The note about hidden models is not part of the listbox (it holds options only), but floats with it. -->
+    <div class="popup" class:floating={!inline} role="presentation" onmousedown={(event) => event.preventDefault()}>
+    <div class="list" id={listId} role="listbox" aria-label={t('picker.list')} tabindex="-1">
+      {#if !models.length}
+        <p class="empty">{t('picker.empty')}</p>
+      {:else if !rows.length}
+        <p class="empty">{t('picker.noMatch')}</p>
       {/if}
       {#each rows as row, index (row.kind === 'model' ? row.model.id : 'custom')}
         {#if row.heading}<div class="group-title" aria-hidden="true">{row.heading}</div>{/if}
@@ -171,16 +186,11 @@
       {/each}
       {#if rest.length > LIMIT}<p class="empty">{t('picker.more', { count: rest.length - LIMIT })}</p>{/if}
     </div>
-  {/if}
-
-  {#if hiddenCount > 0}
-    <div class="hidden-note">
-      <span>{t(showHidden ? 'picker.hiddenShown' : 'picker.hidden', { count: hiddenCount })}</span>
-      <button type="button" class="btn btn-quiet btn-sm" aria-pressed={showHidden} onclick={() => (showHidden = !showHidden)}>
-        {t(showHidden ? 'picker.hideThem' : 'picker.showThem')}
-      </button>
+    {#if !inline}{@render hiddenNote()}{/if}
     </div>
   {/if}
+
+  {#if inline}{@render hiddenNote()}{/if}
 </div>
 
 <style>
@@ -188,11 +198,12 @@
   .field-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); }
   .toggle { min-height: var(--control-height); }
   .input { min-width: 0; font-family: var(--font-mono); font-size: var(--text-md); }
-  .list { overflow: auto; max-height: 320px; padding: var(--space-1); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-surface); display: grid; align-content: start; gap: 1px; }
-  .picker:not(.inline) .list { position: absolute; z-index: 30; inset-inline: 0; inset-block-start: calc(var(--control-height) + 4px); box-shadow: var(--shadow-pop); }
-  .inline .list { max-height: min(300px, 38dvh); }
+  .list { overflow: auto; max-height: 320px; padding: var(--space-1); display: grid; align-content: start; gap: 1px; }
+  .inline .list { max-height: min(300px, 38dvh); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-surface); }
+  .popup.floating { position: absolute; z-index: 30; inset-inline: 0; inset-block-start: calc(var(--control-height) + 4px); display: grid; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-surface); box-shadow: var(--shadow-pop); }
+  .floating .hidden-note { padding: var(--space-1) var(--space-3); border-block-start: 1px solid var(--border); }
   .group-title { padding: var(--space-2) var(--space-2) var(--space-1); color: var(--text-secondary); font-size: var(--text-xs); font-weight: 700; letter-spacing: 0.02em; }
-  .option { display: flex; align-items: center; gap: var(--space-3); padding: 6px var(--space-2); border-radius: var(--radius-md); cursor: pointer; min-width: 0; }
+  .option { color: var(--text); display: flex; align-items: center; gap: var(--space-3); padding: 6px var(--space-2); border-radius: var(--radius-md); cursor: pointer; min-width: 0; }
   .option.active { background: var(--bg-hover); outline: 2px solid var(--focus-ring); outline-offset: -2px; }
   .option.selected { background: var(--accent-soft); color: var(--accent-soft-text); }
   @media (hover: hover) { .option:hover { background: var(--bg-hover); } .option.selected:hover { background: var(--accent-soft); } }

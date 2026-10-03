@@ -997,6 +997,15 @@ export class AppState {
     }
   }
 
+  /** `checkConnection` for a form: the outcome as a value, with the provider's error code on failure. */
+  async testConnection(selection: Settings, draftApiKey = ''): Promise<{ ok: true; count: number } | { ok: false; code: string }> {
+    try {
+      return { ok: true, count: await this.checkConnection(selection, draftApiKey) };
+    } catch (cause) {
+      return { ok: false, code: cause instanceof BackendError ? cause.code : '' };
+    }
+  }
+
   /**
    * Check the connection: list models with the typed key (sent once, never saved) or, without one,
    * the stored key. Always asks the provider and never falls back to a cached list, so a wrong key

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { exportDocument } from '../lib/document-export';
   import { t } from '../lib/i18n/index.svelte';
@@ -9,7 +9,7 @@
   // Saved manual translations as a table. The settings keep their object format ({ source: translation });
   // the rows here are only how it is edited. Only a list with no row errors is written back, so an
   // invalid row never reaches the settings, and a fully empty row is just ignored.
-  let { overrides = $bindable({}), invalid = $bindable(false) }: { overrides?: Record<string, string>; invalid?: boolean } = $props();
+  let { overrides = $bindable({}), invalid = $bindable(false), resetKey = 0 }: { overrides?: Record<string, string>; invalid?: boolean; resetKey?: number } = $props();
 
   type Row = { id: number; source: string; target: string };
   type Problem = '' | 'source' | 'target' | 'duplicate' | 'long' | 'text';
@@ -21,6 +21,7 @@
   let query = $state('');
   let page = $state(0);
   let lastSerialized = '';
+  let lastReset = untrack(() => resetKey);
   let limitError = $state(false);
   let notice = $state('');
   let importInput: HTMLInputElement | undefined = $state();
@@ -29,12 +30,15 @@
   const blank = (row: Row) => !row.source.trim() && !row.target.trim();
   const badText = (value: string) => value.includes('\u0000') || Array.from(value).some((char) => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff);
 
-  // Changes made elsewhere (discard, import, reset to defaults) replace the rows.
+  // Changes made elsewhere (discard, import, reset to defaults) replace the rows. A discard can leave the
+  // saved object as it was while the rows hold unfinished edits, so the screen also bumps `resetKey`.
   $effect(() => {
     const next = JSON.stringify(overrides);
-    if (next !== lastSerialized) {
+    const reset = resetKey;
+    if (next !== lastSerialized || reset !== lastReset) {
       rows = fromObject(overrides);
       lastSerialized = next;
+      lastReset = reset;
       limitError = false;
       invalid = false;
     }

@@ -78,7 +78,10 @@
     <p class="lead">{t('help.lead')}</p>
     <!-- The tour walks into settings, which needs a started core. -->
     {#if !app.startupFailed}
-      <div class="actions"><button type="button" class="btn btn-secondary btn-sm" onclick={() => (app.showTour = true)}><Icon name="play" size={12} /> {t('help.tourButton')}</button></div>
+      <div class="actions">
+        <button type="button" class="btn btn-secondary btn-sm" onclick={() => (app.showTour = true)}><Icon name="play" size={12} /> {t('help.tourButton')}</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick={() => app.openWizard()}><Icon name="sliders" size={12} /> {t('help.wizardButton')}</button>
+      </div>
     {/if}
   </header>
 
