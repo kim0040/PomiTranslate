@@ -90,6 +90,54 @@ fn is_public_catalog(kind: &str, payload: &serde_json::Map<String, Value>) -> bo
         && payload.get("publicCatalog").and_then(Value::as_bool) == Some(true)
 }
 
+/// An unsaved key typed in the UI, accepted for one request kind only: it lets a new user check a
+/// key and list models before saving anything.
+const DRAFT_KEY_FIELD: &str = "draftApiKey";
+const MAX_DRAFT_KEY_CHARS: usize = 4096;
+
+/// Take the draft key out of the payload. The field is removed from every request so it can never
+/// reach the sidecar under its own name; only `models.list` may use the value.
+fn take_draft_key(
+    kind: &str,
+    payload: &mut serde_json::Map<String, Value>,
+) -> Result<Option<zeroize::Zeroizing<String>>, String> {
+    let mut value = match payload.remove(DRAFT_KEY_FIELD) {
+        Some(Value::String(value)) => value,
+        Some(Value::Null) | None => return Ok(None),
+        Some(_) => return Err("API key must be text".into()),
+    };
+    let key = zeroize::Zeroizing::new(value.trim().to_string());
+    zeroize::Zeroize::zeroize(&mut value);
+    if kind != "models.list" || key.is_empty() {
+        return Ok(None);
+    }
+    if key.chars().count() > MAX_DRAFT_KEY_CHARS {
+        return Err("API key is too long".into());
+    }
+    Ok(Some(key))
+}
+
+/// Decide which key a key-injected request carries. A draft key replaces the stored credential
+/// (which is then never read); the public OpenRouter catalog and manual-only runs get none.
+fn provider_key(
+    kind: &str,
+    payload: &serde_json::Map<String, Value>,
+    draft: Option<&zeroize::Zeroizing<String>>,
+    stored: impl FnOnce() -> Result<Option<zeroize::Zeroizing<String>>, String>,
+) -> Result<Option<zeroize::Zeroizing<String>>, String> {
+    // The core independently checks that all included sources have manual values.
+    // A false claim receives no key and cannot enable an authenticated API call.
+    let manual_only = matches!(kind, "translate.start" | "translate.resume")
+        && payload.get("manualOnly").and_then(Value::as_bool) == Some(true);
+    if manual_only || is_public_catalog(kind, payload) {
+        return Ok(None);
+    }
+    match draft {
+        Some(key) => Ok(Some(zeroize::Zeroizing::new(key.to_string()))),
+        None => stored(),
+    }
+}
+
 /// Remove and return every complete line in `buffer`, without its trailing whitespace.
 /// A partial last line stays in the buffer for the next chunk.
 fn drain_complete_lines(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
@@ -177,6 +225,10 @@ async fn sidecar_request(
             "payload": {"provider": provider, "deleted": true, "apiKeyStored": false}
         }));
     }
+    let draft_key = match request.get_mut("payload").and_then(Value::as_object_mut) {
+        Some(payload) => take_draft_key(&kind, payload)?,
+        None => None,
+    };
     if CREDENTIAL_OWNER_REQUESTS.contains(&kind.as_str()) {
         if let Some(payload) = request.get_mut("payload").and_then(Value::as_object_mut) {
             payload.insert("credentialOwner".into(), Value::String("rust".into()));
@@ -208,14 +260,11 @@ async fn sidecar_request(
         provider_boundary::validate(payload)?;
         // Frontend cannot bypass the selected store with an arbitrary supplied key.
         payload.remove("apiKey");
-        // The core independently checks that all included sources have manual values.
-        // A false claim receives no key and cannot enable an authenticated API call.
-        let manual_only = matches!(kind.as_str(), "translate.start" | "translate.resume")
-            && payload.get("manualOnly").and_then(Value::as_bool) == Some(true);
-        if !manual_only && !is_public_catalog(&kind, payload) {
-            if let Some(secret) = credentials.read(&credential_root(&app)?, &provider)? {
-                payload.insert("apiKey".into(), Value::String(secret.to_string()));
-            }
+        let secret = provider_key(&kind, payload, draft_key.as_ref(), || {
+            credentials.read(&credential_root(&app)?, &provider)
+        })?;
+        if let Some(secret) = secret {
+            payload.insert("apiKey".into(), Value::String(secret.to_string()));
         }
     }
 
@@ -518,6 +567,85 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn payload(value: Value) -> serde_json::Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    fn stored_secret() -> Result<Option<zeroize::Zeroizing<String>>, String> {
+        Ok(Some(zeroize::Zeroizing::new("stored-secret".to_string())))
+    }
+
+    #[test]
+    fn a_draft_key_replaces_the_stored_key_for_model_lists() {
+        let mut body = payload(serde_json::json!({"provider":"openai", "draftApiKey":"  typed-secret \n"}));
+        let draft = take_draft_key("models.list", &mut body).unwrap();
+        assert_eq!(draft.as_ref().map(|key| key.as_str()), Some("typed-secret"));
+        let key = provider_key("models.list", &body, draft.as_ref(), || {
+            panic!("the stored credential must not be read when a draft key is supplied")
+        })
+        .unwrap();
+        assert_eq!(key.as_ref().map(|key| key.as_str()), Some("typed-secret"));
+    }
+
+    #[test]
+    fn no_draft_key_keeps_the_stored_key_behavior() {
+        for draft_field in [
+            serde_json::json!({"provider":"openai"}),
+            serde_json::json!({"provider":"openai", "draftApiKey":""}),
+            serde_json::json!({"provider":"openai", "draftApiKey":"   "}),
+            serde_json::json!({"provider":"openai", "draftApiKey":null}),
+        ] {
+            let mut body = payload(draft_field);
+            let draft = take_draft_key("models.list", &mut body).unwrap();
+            assert!(draft.is_none());
+            let key = provider_key("models.list", &body, draft.as_ref(), stored_secret).unwrap();
+            assert_eq!(key.as_ref().map(|key| key.as_str()), Some("stored-secret"));
+        }
+    }
+
+    #[test]
+    fn the_draft_field_never_reaches_the_sidecar_under_its_own_name() {
+        for kind in [
+            "models.list",
+            "settings.set",
+            "translate.start",
+            "prompt.enhance",
+            "provider.usage",
+            "scan.start",
+        ] {
+            let mut body = payload(serde_json::json!({"provider":"openai", "draftApiKey":"typed-secret"}));
+            take_draft_key(kind, &mut body).unwrap();
+            assert!(!body.contains_key(DRAFT_KEY_FIELD), "{kind} still carries the draft field");
+            assert!(!body.contains_key("apiKey"), "{kind}: the draft is only held, not forwarded");
+        }
+        let mut malformed = payload(serde_json::json!({"draftApiKey": 7}));
+        assert!(take_draft_key("models.list", &mut malformed).is_err());
+        let mut long = payload(serde_json::json!({"draftApiKey": "k".repeat(MAX_DRAFT_KEY_CHARS + 1)}));
+        assert!(take_draft_key("models.list", &mut long).is_err());
+    }
+
+    #[test]
+    fn other_requests_ignore_a_draft_key() {
+        for kind in ["translate.start", "translate.resume", "prompt.enhance", "provider.usage"] {
+            let mut body = payload(serde_json::json!({"provider":"openai", "draftApiKey":"typed-secret"}));
+            let draft = take_draft_key(kind, &mut body).unwrap();
+            assert!(draft.is_none(), "{kind} must not accept a draft key");
+            let key = provider_key(kind, &body, draft.as_ref(), stored_secret).unwrap();
+            assert_eq!(key.as_ref().map(|key| key.as_str()), Some("stored-secret"));
+        }
+    }
+
+    #[test]
+    fn the_public_catalog_and_manual_runs_carry_no_key_even_with_a_draft() {
+        let mut public = payload(serde_json::json!({"provider":"openrouter", "publicCatalog":true, "draftApiKey":"typed-secret"}));
+        let draft = take_draft_key("models.list", &mut public).unwrap();
+        let key = provider_key("models.list", &public, draft.as_ref(), stored_secret).unwrap();
+        assert!(key.is_none());
+        let manual = payload(serde_json::json!({"provider":"openai", "manualOnly":true}));
+        let key = provider_key("translate.start", &manual, None, stored_secret).unwrap();
+        assert!(key.is_none());
+    }
 
     #[test]
     fn public_catalog_bypass_is_limited_to_openrouter_model_reads() {

@@ -2,7 +2,8 @@
   export type IconName =
     | 'folder' | 'search' | 'list' | 'language' | 'check-circle' | 'archive' | 'sliders' | 'info' | 'chevron-right'
     | 'chevron-left' | 'chevron-down' | 'x' | 'check' | 'alert-triangle' | 'alert-circle' | 'refresh' | 'trash'
-    | 'eye' | 'eye-off' | 'play' | 'stop' | 'sidebar' | 'pencil' | 'shield' | 'clock' | 'minus' | 'plus' | 'undo' | 'download' | 'help';
+    | 'eye' | 'eye-off' | 'play' | 'stop' | 'sidebar' | 'pencil' | 'shield' | 'clock' | 'minus' | 'plus' | 'undo' | 'download' | 'help'
+    | 'key' | 'monitor' | 'gauge' | 'upload';
 </script>
 
 <script lang="ts">
@@ -39,7 +40,11 @@
     plus: 'M12 5v14M5 12h14',
     undo: 'M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
     download: 'M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14',
-    help: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17v.01'
+    help: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17v.01',
+    key: 'M15 5.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zM12.5 11L4 19.5V21h2.5v-2H9v-2.5h2l1.5-1.5',
+    monitor: 'M4 5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM9 20h6M12 16v4',
+    gauge: 'M3.5 17a8.5 8.5 0 1 1 17 0M12 17l4.5-5',
+    upload: 'M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19.5h14'
   };
   const filled = new Set<IconName>(['play']);
 </script>

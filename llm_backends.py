@@ -253,6 +253,42 @@ _NON_TEXT_TOKENS = (
 )
 
 
+# Ids that name a model made for something other than translating text. A model that can also
+# answer in text (a speech or image model) is still a poor, expensive pick for this app.
+_UNSUITABLE_ID_TOKENS = frozenset(
+    {
+        "embed", "embedding", "embeddings", "whisper", "tts", "dall", "dalle", "moderation", "moderations",
+        "transcribe", "transcription", "image", "images", "imagen", "realtime", "audio", "speech",
+        "robotics", "veo", "lyria", "sora", "live",
+    }
+)
+_COMPUTER_USE = re.compile(r"computer[-_ ]?use")
+
+
+def is_translation_suitable(model_id: str, item: dict[str, Any] | None = None) -> bool:
+    """False for models whose id or modalities say they are not for translating text."""
+    lowered = str(model_id).lower()
+    if _COMPUTER_USE.search(lowered):
+        return False
+    if any(token in _UNSUITABLE_ID_TOKENS for token in re.split(r"[^a-z0-9]+", lowered)):
+        return False
+    outputs = _output_modalities(item) if item else []
+    return not outputs or "text" in outputs
+
+
+def annotate_suitability(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give every catalog record a ``suitable`` flag, including ones cached by an older build."""
+    annotated: list[dict[str, Any]] = []
+    for record in models:
+        if "suitable" in record:
+            annotated.append(record)
+            continue
+        outputs = record.get("output_modalities")
+        probe = {"architecture": {"output_modalities": outputs}} if isinstance(outputs, list) and outputs else None
+        annotated.append({**record, "suitable": is_translation_suitable(str(record.get("id", "")), probe)})
+    return annotated
+
+
 class ModelCatalogError(RuntimeError):
     pass
 
@@ -266,10 +302,12 @@ class ProviderError(RuntimeError):
         *,
         status: int | None = None,
         retry_after: float | None = None,
+        kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
+        self.kind = kind
 
     @property
     def fatal(self) -> bool:
@@ -278,6 +316,8 @@ class ProviderError(RuntimeError):
 
     @property
     def code(self) -> str:
+        if self.kind:
+            return self.kind
         if self.status in {401, 403}:
             return "AUTH_FAILED"
         if self.status == 402:
@@ -341,6 +381,7 @@ def _model_record(model_id: str, item: dict[str, Any], *, display_name: str, des
         "pricing_completion": str(pricing.get("completion", "")),
         "supported_parameters": [str(parameter) for parameter in parameters],
         "text": text,
+        "suitable": text and is_translation_suitable(model_id, item),
         "reasoning": model_reasoning(item.get("reasoning")),
     }
 
@@ -423,6 +464,17 @@ class LLMProviderClient:
         if self.family == "anthropic":
             return self._list_models_anthropic()
         raise RuntimeError(f"Unsupported provider family: {self.family}")
+
+    def check_connection(self) -> list[dict[str, Any]]:
+        """List text models with the key, failing loudly: no cache and no silent empty list.
+
+        OpenRouter publishes its catalog without authentication, so listing alone would call a wrong
+        key fine. Its ``/key`` endpoint is what actually checks the key.
+        """
+        self.ensure_ready(require_model=False)
+        if self.provider == "openrouter":
+            self._request_json("GET", f"{self.base_url}/key", headers=self._openai_headers())
+        return [item for item in self.list_models() if item.get("text")]
 
     def list_public_models(self) -> list[dict[str, Any]]:
         """Read OpenRouter's pinned catalog without authenticating or generating text."""
@@ -557,10 +609,12 @@ class LLMProviderClient:
             ) from exc
         except error.URLError as exc:
             message = f"{provider_spec(self.provider)['label']} request failed: {exc.reason}"
-            raise ProviderError(self._redact(message)) from exc
+            raise ProviderError(
+                self._redact(message), kind="TIMEOUT" if isinstance(exc.reason, TimeoutError) else None
+            ) from exc
         except (TimeoutError, OSError) as exc:
             message = f"{provider_spec(self.provider)['label']} request failed: {exc}"
-            raise ProviderError(self._redact(message)) from exc
+            raise ProviderError(self._redact(message), kind="TIMEOUT" if isinstance(exc, TimeoutError) else None) from exc
 
         try:
             parsed = json.loads(raw)

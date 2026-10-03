@@ -1051,6 +1051,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             config["api"].update(resolve_desktop_provider(body, saved))
         if body.get("model") == "":
             config["api"]["model"] = ""  # Catalog lookup must not validate the saved model.
+        # A connection check proves the key: it never falls back to a cached list, and a failure
+        # keeps the reason (wrong key, no network, timeout) instead of looking like an empty catalog.
+        connection_check = body.get("connectionCheck") is True and not public_catalog
         try:
             cached = False
             if public_catalog:
@@ -1064,24 +1067,46 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     if not models:
                         raise
                     cached = True
+            elif connection_check:
+                from mwt.userdata import remember_model_catalog
+
+                models = LLMProviderClient(config).check_connection()
+                remember_model_catalog(provider, models, root=data_dir)
             else:
                 models = LLMProviderClient(config).try_refresh_text_models()
         except Exception as exc:
+            from llm_backends import ProviderError
+
+            if isinstance(exc, ProviderError):
+                code = exc.code
+            elif connection_check and "API key is missing" in str(exc):
+                code = "KEY_MISSING"
+            else:
+                code = "MODELS_FAILED"
             emit(
                 {
                     "v": 1,
                     "id": request_id,
                     "type": "response.error",
-                    "error": {"code": "MODELS_FAILED", "message": str(exc)},
+                    "error": {"code": code, "message": str(exc)},
                 }
             )
             return
+        from llm_backends import annotate_suitability
+
+        models = annotate_suitability(models)
         emit(
             {
                 "v": 1,
                 "id": request_id,
                 "type": "response.ok",
-                "payload": {"provider": provider, "models": models, "cached": cached, "localhostServer": False},
+                "payload": {
+                    "provider": provider,
+                    "models": models,
+                    "hiddenCount": sum(1 for item in models if item.get("suitable") is False),
+                    "cached": cached,
+                    "localhostServer": False,
+                },
             }
         )
         return
