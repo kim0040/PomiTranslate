@@ -29,12 +29,18 @@ def assert_contains(label: str, text: str) -> None:
 
 def test_surfaces() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert_contains("README", readme)
+    # README has its own prose after the 2026-10-02 documentation restructure. Keep checking
+    # every safety disclosure there, and retain exact shared copy checks on the runtime surfaces.
+    for phrase in (PRODUCT_NAME, SUBTITLE, UNOFFICIAL_NOTICE,
+                   "changes are written only after a verified backup",
+                   "The text you choose to translate and your translation instructions are sent to the API provider",
+                   "AI API usage may cost you money under your provider's terms."):
+        assert phrase in readme, f"README is missing {phrase}"
     assert_contains("first-launch", FIRST_LAUNCH)
     assert_contains("pre-translate", PRE_TRANSLATE)
     assert_contains("about", ABOUT)
     assert "no purchase, subscription, or in-app payment" in ABOUT
-    assert "no purchase, subscription, or in-app payment" in readme
+    assert "no purchase, subscription or in-app payment" in readme
     notices = subprocess.run(
         [sys.executable, "-m", "mwt.desktop_entry", "--notices"],
         cwd=ROOT,

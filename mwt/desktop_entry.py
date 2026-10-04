@@ -22,6 +22,7 @@ from mwt.desktop_settings import (
     normalize_scan_options,
     normalize_source_overrides,
 )
+from mwt.desktop_review import clean_edits, normalize_max_cost_usd, normalize_review_before_apply
 from mwt.notices import ABOUT, FIRST_LAUNCH, PRE_TRANSLATE, payload
 from mwt.safety import BackupSet, ExternalTargetError, backup_store, legacy_backup_store, list_backup_sets
 from mwt.desktop_resource_packs import ExternalPackUnavailable, normalize_external_pack_paths, pack_scope_signature, selected_pack_files
@@ -29,7 +30,12 @@ from mwt.desktop_resource_packs import ExternalPackUnavailable, normalize_extern
 
 # A job stopped by the user, by an outage, or by a provider error keeps its translated strings
 # in the checkpoint. Only these states may be continued.
-RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed"}
+RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed", "awaiting_review", "budget_stopped"}
+
+# A model that thinks bills its reasoning as output. The provider does not report it before the
+# call, and one real run cost twice the old upper bound, so the upper bound counts the answer
+# twice (the answer plus an equal amount of reasoning) when reasoning is on or cannot be ruled out.
+REASONING_OUTPUT_FACTOR = 2
 
 
 def _settings_fingerprint(data_dir: Path) -> str:
@@ -82,7 +88,7 @@ def _settings_fingerprint(data_dir: Path) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _scan_scope_fingerprint(data_dir: Path) -> str:
+def _scan_scope_fingerprint(data_dir: Path, *, original_external: dict | None = None) -> str:
     """What decides which texts a scan finds. Provider, model and prompt settings do not, so
     changing them does not throw a reviewed scan away."""
     saved = _saved(data_dir)
@@ -99,6 +105,12 @@ def _scan_scope_fingerprint(data_dir: Path) -> str:
         "extractor": EXTRACTOR_VERSION,
     }
     external_scope = pack_scope_signature(saved)
+    # Reapply validates the applied ZIP's bytes separately, then compares settings and parent
+    # identity against the original scan. Our own ZIP write must not invalidate that scan.
+    for entry in external_scope:
+        original = (original_external or {}).get(entry["path"])
+        if isinstance(original, dict) and "sha256" in entry:
+            entry["sha256"] = original["sha256"]
     if external_scope:
         relevant["external_resource_packs"] = external_scope
     encoded = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -153,9 +165,36 @@ def _model_price(saved: dict, data_dir: Path) -> dict | None:
     return None
 
 
+def _reasoning_may_bill(saved: dict, data_dir: Path) -> bool:
+    """True unless the user turned reasoning off or the model's catalog entry says it never thinks."""
+    from mwt.userdata import load_model_catalog
+
+    try:
+        choice = normalize_reasoning(saved.get("openrouter_reasoning", "default"))
+    except ValueError:
+        choice = "default"
+    provider, model = str(saved.get("provider") or ""), str(saved.get("model") or "")
+    for item in load_model_catalog(provider, root=data_dir) if provider and model else []:
+        if item.get("id") != model:
+            continue
+        meta = item.get("reasoning")
+        if isinstance(meta, dict) and meta.get("mandatory"):
+            return True
+        if choice == "disabled":
+            return False
+        if choice != "default":
+            return True
+        if isinstance(meta, dict):
+            return bool(meta.get("mandatory") or meta.get("default_enabled") is not False)
+        parameters = item.get("supported_parameters")
+        return "reasoning" in parameters if isinstance(parameters, list) else True
+    return choice != "disabled"  # Unknown model: assume it may think unless disabled.
+
+
 def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
     """Requests are exact. Tokens and cost are an estimate calibrated on one real run: the cost
-    band's upper edge is twice the list price, the ratio that run showed."""
+    band's upper edge is twice the list price, the ratio that run showed, and counts reasoning
+    tokens as extra output when the model may think (REASONING_OUTPUT_FACTOR)."""
     source_overrides = normalize_source_overrides(
         saved.get("source_overrides", {}), field="saved source_overrides"
     )
@@ -172,9 +211,11 @@ def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
     output_tokens = int(count * 5 + chars * 0.85)
     price = _model_price(saved, data_dir)
     cost = None
+    reasoning = _reasoning_may_bill(saved, data_dir)
     if price and count:
         low = input_tokens * price["input"] + output_tokens * price["output"]
-        cost = {"low": low, "high": low * 2}
+        factor = REASONING_OUTPUT_FACTOR if reasoning else 1
+        cost = {"low": low, "high": (input_tokens * price["input"] + output_tokens * factor * price["output"]) * 2}
     return {
         "candidateCount": count,
         "requests": requests,
@@ -183,6 +224,7 @@ def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
         "outputTokens": output_tokens,
         "price": price,
         "cost": cost,
+        "reasoningIncluded": reasoning,
     }
 
 
@@ -486,6 +528,7 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
                     "backupSetId": str(report.get("backup_set_id") or ""),
                     "status": str(report.get("status") or ""),
                     "translatedCount": len(checkpoint.get("translation_cache") or {}),
+                    "failedCount": len(checkpoint.get("failures") or {}),
                     "reason": next(
                         (str(item.get("message") or "") for item in report.get("errors", []) if isinstance(item, dict)),
                         "",
@@ -523,6 +566,12 @@ def _run_translator(
     on_translation_failure: str = "stop",
     desktop_context: dict | None = None,
     external_pack_fingerprints: dict | None = None,
+    review_before_apply: bool = False,
+    apply_only: bool = False,
+    edits: dict | None = None,
+    adopt_checkpoint: dict | None = None,
+    retry: tuple[list[str], list[str]] | None = None,
+    budget_override: bool = False,
 ) -> dict:
     import os
 
@@ -587,8 +636,12 @@ def _run_translator(
         resource_pack_paths = list(dict.fromkeys([*(inspection.get("resourcePacks") or []), *(str(path) for path in selected_packs)]))
     checkpoint_path = _checkpoint_path(data_dir, scan_plan_id) if scan_plan_id else report_path.with_suffix(".checkpoint.json")
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    if scan_plan_id and not dry_run and not resume_from_checkpoint:
+    if scan_plan_id and not dry_run and not resume_from_checkpoint and adopt_checkpoint is None:
         checkpoint_path.unlink(missing_ok=True)
+    from mwt.desktop_review import normalize_max_cost_usd
+
+    max_cost_usd = normalize_max_cost_usd(saved.get("max_cost_usd", 0), field="saved max_cost_usd")
+    price = _model_price(saved, data_dir)
     config = merge_nested(
         DEFAULT_CONFIG,
         {
@@ -616,6 +669,15 @@ def _run_translator(
                 "max_batch_retries": int(max_batch_retries),
                 "continue_on_file_error": continue_on_file_error,
                 "max_file_write_retries": max_file_write_retries,
+                "review_before_apply": bool(review_before_apply),
+                "apply_only": bool(apply_only),
+                # The desktop keeps a finished job so its translations can be reviewed and corrected.
+                "keep_checkpoint": bool(scan_plan_id and not dry_run),
+                "max_cost_usd": 0.0 if budget_override else max_cost_usd,
+                "price": {"input": price["input"], "output": price["output"]} if price else None,
+                "adopt_checkpoint": adopt_checkpoint,
+                "adopt_report": retry is not None,
+                "edits": edits or {},
             },
             "api": {
                 "provider": provider,
@@ -650,7 +712,10 @@ def _run_translator(
         },
     )
     translator = WorldTranslator(config, progress_callback=progress_callback, cancel_check=cancel_check)
-    report = translator.run()
+    if retry is not None:
+        report = translator.retry_failed(*retry)
+    else:
+        report = translator.run()
     if dry_run and candidate_limit:
         records = [_candidate_record(source, translator.occurrences.get(source)) for source in translator._candidate_order]
         report["candidate_preview"] = records[:candidate_limit]
@@ -721,6 +786,11 @@ def _settings_payload(data_dir: Path, provider: str = "", *, check_keyring: bool
         saved=saved.get("resource_pack_options")
     )
     saved["external_resource_pack_paths"] = normalize_external_pack_paths(saved.get("external_resource_pack_paths", []))
+    saved["review_before_apply"] = saved.get("review_before_apply", True) is not False
+    try:
+        saved["max_cost_usd"] = normalize_max_cost_usd(saved.get("max_cost_usd", 0), field="saved max_cost_usd")
+    except ValueError:
+        saved["max_cost_usd"] = 0.0
     chosen = provider or str(saved.get("provider") or "")
     return {
         "settings": saved,
@@ -749,6 +819,150 @@ def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyri
         "resume": (_resume_candidate(data_dir, world) or {"available": False}) if valid_world else {"available": False},
         "lastJob": load_last_job(world, data_dir) if valid_world else None,
     }
+
+
+class RequestRefused(Exception):
+    """A request the sidecar understood and declined, with a stable code the interface can explain."""
+
+    def __init__(self, code: str, message: str, details: dict | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+
+def _validated_plan(data_dir: Path, fingerprint: str, scan_plan_id: str, *, applied: dict | None = None) -> dict:
+    """The saved scan plan, when it still describes the world and settings being acted on."""
+    if not fingerprint or not scan_plan_id:
+        raise RequestRefused("SCAN_REQUIRED", "Run Scan Only and review its result before translating.")
+    stored_plan = _load_scan_plan(data_dir, scan_plan_id)
+    from mwt.safety import file_sha256
+    for path, digest in ((applied or {}).get("external_pack_fingerprints") or {}).items():
+        target = Path(path)
+        if target.is_symlink() or not target.is_file() or file_sha256(target) != digest:
+            raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "An external resource pack changed after this job was applied.")
+    scope_fingerprint = _scan_scope_fingerprint(
+        data_dir, original_external=stored_plan.get("externalPackFingerprints") if applied else None,
+    )
+    expected_plan_id = _scan_plan_id(fingerprint, scope_fingerprint)
+    if (
+        scan_plan_id != expected_plan_id
+        or stored_plan.get("worldFingerprint") != fingerprint
+        or stored_plan.get("scopeFingerprint") != scope_fingerprint
+    ):
+        raise RequestRefused(
+            "PLAN_INVALIDATED",
+            "The world, target language or resource pack setting changed after Scan Only. Run the scan again.",
+        )
+    return stored_plan
+
+
+def _load_job(data_dir: Path, scan_plan_id: str, world: Path) -> dict:
+    """The saved translation job of this scan plan for this world, or an empty dict."""
+    from mwt.desktop_review import load_job
+
+    job = load_job(_checkpoint_path(data_dir, scan_plan_id))
+    try:
+        same_world = Path(str(job.get("world_dir") or "")).expanduser().resolve() == world.expanduser().resolve()
+    except (OSError, RuntimeError):
+        same_world = False
+    return job if same_world else {}
+
+
+def _translate_payload(report: dict) -> dict:
+    return {
+        "status": report.get("status"),
+        "candidateCount": report.get("candidate_text_count", 0),
+        "changedFileCount": report.get("changed_file_count", 0),
+        "providerRequests": report.get("provider_requests", 0),
+        "backupSetId": report.get("backup_set_id", ""),
+        "preTranslate": PRE_TRANSLATE,
+        "localhostServer": False,
+        "errors": report.get("errors", []),
+        "warnings": report.get("warnings", []),
+        "translation": report.get("translation") or {},
+        "translationFailures": report.get("translation_failures", []),
+        "keptOriginalSamples": report.get("kept_original_samples", []),
+        "translationSamples": report.get("translation_samples", []),
+        # Everything this job has cost so far, not only the request that just ran.
+        "usage": report.get("job_usage") or report.get("usage") or {},
+    }
+
+
+def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_dir: Path) -> dict:
+    from mwt.desktop_review import job_rows, translations_page
+
+    if not job:
+        raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
+    overrides = normalize_source_overrides(saved.get("source_overrides", {}), field="saved source_overrides")
+    page = translations_page(plan, job, overrides, body)
+    failed_records = [
+        {"source": row["source"]} for row in job_rows(plan, job, overrides) if row["status"] == "failed"
+    ]
+    applied = job.get("applied") or {}
+    report = job.get("report") or {}
+    page["meta"] = {
+        "status": str(report.get("status") or ""),
+        "applied": bool(applied),
+        "backupSetId": str(applied.get("backup_set_id") or ""),
+        "failedCount": len(failed_records),
+        "usage": job.get("usage_total") or {},
+        "retryEstimate": _estimate(failed_records, saved, data_dir) if failed_records else None,
+    }
+    return page
+
+
+def _restore_backup(world: Path, backup_id: str, data_dir: Path, *,
+                    expected_fingerprint: str = "", expected_external: dict | None = None) -> tuple[BackupSet, str]:
+    """Put a backup set back (keeping what it replaces as a recovery set) and say which set that is."""
+    stores = _backup_stores(world, data_dir)
+    if backup_id == "latest":
+        listed = list_backup_sets(world, stores)
+        if not listed:
+            raise ValueError("There is no backup to restore")
+        backup_id = listed[0]["backupSetId"]
+    selected = BackupSet.find(world, backup_id, stores)
+    required = set(selected.external_targets())
+    # An unrelated offline pack must not prevent restoring a world-only backup.
+    allowed = [Path(path) for path in normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
+               if Path(path).resolve(strict=False) in required]
+    selected = BackupSet.find(world, backup_id, stores, external_files=allowed)
+    from mwt.locking import WorldWriteLock, MinecraftSessionLocks
+    from mwt.safety import world_fingerprint, file_sha256
+
+    guard, session = WorldWriteLock(world), MinecraftSessionLocks(world)
+    try:
+        guard.acquire()
+        session.acquire()
+        if expected_fingerprint and world_fingerprint(world) != expected_fingerprint:
+            raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "The world changed after this job was applied.")
+        for path, digest in (expected_external or {}).items():
+            target = Path(path)
+            if target.is_symlink() or not target.is_file() or file_sha256(target) != digest:
+                raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "An external resource pack changed after this job was applied.")
+        return selected, selected.restore(recovery_store=stores[0])
+    finally:
+        session.release()
+        guard.release()
+
+
+def _prune_finished_jobs(data_dir: Path, world: Path, keep_plan_id: str) -> None:
+    """A new scan replaces the finished job kept for corrections. Unfinished jobs stay resumable."""
+    jobs_dir = data_dir / "jobs"
+    if not jobs_dir.is_dir():
+        return
+    keep = _checkpoint_path(data_dir, keep_plan_id)
+    for path in jobs_dir.glob("*.checkpoint.json"):
+        if path == keep:
+            continue
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                (job.get("report") or {}).get("status") in {"completed", "partial"}
+                and Path(str(job.get("world_dir") or "")).expanduser().resolve() == world.expanduser().resolve()
+            ):
+                path.unlink(missing_ok=True)
+        except (OSError, ValueError, RuntimeError):
+            continue
 
 
 def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
@@ -863,6 +1077,12 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             ),
             field="maxFileWriteRetries",
         )
+        review_before_apply = normalize_review_before_apply(
+            public_setting("reviewBeforeApply", "review_before_apply", True), field="reviewBeforeApply"
+        )
+        max_cost_usd = normalize_max_cost_usd(
+            public_setting("maxCostUsd", "max_cost_usd", 0), field="maxCostUsd"
+        )
         ui_language = str(body.get("uiLanguage") or saved.get("ui_language") or "ko")
         if ui_language not in {"ko", "en", "ja"}:
             raise ValueError("Unsupported interface language")
@@ -952,7 +1172,12 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             from mwt.secrets import remember_api_key
 
             remember_api_key(provider, supplied_key)
-        updates = {**public_settings_from_config(config), "ui_language": ui_language}
+        updates = {
+            **public_settings_from_config(config),
+            "ui_language": ui_language,
+            "review_before_apply": review_before_apply,
+            "max_cost_usd": max_cost_usd,
+        }
         if config["world_dir"] and Path(config["world_dir"]).expanduser().is_dir():
             path = str(Path(config["world_dir"]).expanduser().resolve())
             recent = list_recent_worlds(data_dir)
@@ -1187,6 +1412,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         scan_plan_id = _scan_plan_id(fingerprint, scope_fingerprint)
         records = list(report.pop("_candidate_records", []))
         if report.get("status") == "completed":
+            _prune_finished_jobs(data_dir, world, scan_plan_id)
             _save_scan_plan(
                 data_dir,
                 scan_plan_id,
@@ -1266,6 +1492,22 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             }
         )
         return
+    if kind == "translations.page":
+        scan_plan_id = str(body.get("scanPlanId") or "")
+        plan = _load_scan_plan(data_dir, scan_plan_id)
+        if not plan:
+            raise ValueError("Scan plan was not found")
+        job = _load_job(data_dir, scan_plan_id, world)
+        saved = _saved(data_dir)
+        emit(
+            {
+                "v": 1,
+                "id": request_id,
+                "type": "response.ok",
+                "payload": _translations_payload(plan, job, saved, body, data_dir),
+            }
+        )
+        return
     if kind in {"translate.start", "translate.resume"}:
         if kind == "translate.resume":
             resumable = _resume_candidate(data_dir, world)
@@ -1295,41 +1537,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             }
         fingerprint = str(body.get("fingerprint") or "")
         scan_plan_id = str(body.get("scanPlanId") or "")
-        scope_fingerprint = _scan_scope_fingerprint(data_dir)
-        expected_plan_id = _scan_plan_id(fingerprint, scope_fingerprint) if fingerprint else ""
-        if not fingerprint or not scan_plan_id:
-            emit(
-                {
-                    "v": 1,
-                    "id": request_id,
-                    "type": "response.error",
-                    "error": {
-                        "code": "SCAN_REQUIRED",
-                        "message": "Run Scan Only and review its result before translating.",
-                        "recoverable": True,
-                    },
-                }
-            )
-            return
-        stored_plan = _load_scan_plan(data_dir, scan_plan_id) if scan_plan_id else {}
-        if (
-            scan_plan_id != expected_plan_id
-            or stored_plan.get("worldFingerprint") != fingerprint
-            or stored_plan.get("scopeFingerprint") != scope_fingerprint
-        ):
-            emit(
-                {
-                    "v": 1,
-                    "id": request_id,
-                    "type": "response.error",
-                    "error": {
-                        "code": "PLAN_INVALIDATED",
-                        "message": "The world, target language or resource pack setting changed after Scan Only. Run the scan again.",
-                        "recoverable": True,
-                    },
-                }
-            )
-            return
+        stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id)
         excluded = [
             str(candidate_id)
             for candidate_id in body.get("excludedCandidateIds", [])
@@ -1370,6 +1578,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             and candidate_by_id[candidate_id] not in source_overrides
         }
         manual_only = bool(included_ids) and not uncovered_ids
+        review = saved.get("review_before_apply", True) is not False
+        if not isinstance(body.get("budgetOverride", False), bool):
+            raise ValueError("budgetOverride must be true or false")
         report = _run_translator(
             world,
             dry_run=False,
@@ -1390,6 +1601,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             external_pack_fingerprints=stored_plan.get("externalPackFingerprints", {}),
             on_translation_failure=str(body.get("failurePolicy") or "stop"),
             desktop_context=body if body.get("credentialOwner") == "rust" else None,
+            review_before_apply=review,
+            budget_override=body.get("budgetOverride", False),
         )
         try:
             from mwt.userdata import remember_last_job
@@ -1397,29 +1610,148 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             remember_last_job(world, report, data_dir)
         except (OSError, ValueError):
             pass  # the start screen's summary is a convenience; the result below is what matters
-        emit(
-            {
-                "v": 1,
-                "id": request_id,
-                "type": "response.ok",
-                "payload": {
-                    "status": report.get("status"),
-                    "candidateCount": report.get("candidate_text_count", 0),
-                    "changedFileCount": report.get("changed_file_count", 0),
-                    "providerRequests": report.get("provider_requests", 0),
-                    "backupSetId": report.get("backup_set_id", ""),
-                    "preTranslate": PRE_TRANSLATE,
-                    "localhostServer": False,
-                    "errors": report.get("errors", []),
-                    "warnings": report.get("warnings", []),
-                    "translation": report.get("translation") or {},
-                    "translationFailures": report.get("translation_failures", []),
-                    "keptOriginalSamples": report.get("kept_original_samples", []),
-                    "translationSamples": report.get("translation_samples", []),
-                    "usage": report.get("usage") or {},
-                },
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": _translate_payload(report)})
+        return
+    if kind in {"translate.apply", "translate.reapply"}:
+        reapply = kind == "translate.reapply"
+        fingerprint = str(body.get("fingerprint") or "")
+        scan_plan_id = str(body.get("scanPlanId") or "")
+        if not fingerprint or not scan_plan_id:
+            raise RequestRefused("SCAN_REQUIRED", "Run Scan Only and review its result before translating.")
+        job = _load_job(data_dir, scan_plan_id, world)
+        stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id, applied=job.get("applied") if reapply else None)
+        if not job:
+            raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
+        applied = job.get("applied") or {}
+        job_applied = bool(applied)
+        source_by_id = {
+            str(item.get("id")): str(item.get("source"))
+            for item in stored_plan.get("candidates", [])
+            if isinstance(item, dict)
+        }
+        edits_by_source, problems = clean_edits(body.get("edits"), source_by_id)
+        if problems:
+            raise RequestRefused(
+                "EDITS_INVALID", "Some edited translations cannot be written.", {"rows": problems}
+            )
+        if reapply and not (job_applied and applied.get("backup_set_id")):
+            raise RequestRefused("NOTHING_TO_REAPPLY", "This job has no applied backup to restore first.")
+        if not reapply and job_applied:
+            raise RequestRefused("ALREADY_APPLIED", "This job was already written to the world.")
+        raw_excluded = body.get("excludedCandidateIds", [])
+        if not isinstance(raw_excluded, list) or any(item not in source_by_id for item in raw_excluded):
+            raise ValueError("An excluded candidate is not part of this scan plan")
+        excluded = sorted(
+            {str(item) for item in (job.get("resume") or {}).get("excluded_candidate_ids") or []}
+            | {
+                str(item)
+                for item in raw_excluded
             }
         )
+        resume = job.get("resume") or {}
+        manual = {k: v for k, v in (resume.get("manual_overrides") or {}).items() if isinstance(v, str)}
+        recovery_id = ""
+        if reapply:
+            from mwt.safety import world_fingerprint
+
+            if world_fingerprint(world.expanduser().resolve()) != applied.get("world_fingerprint"):
+                # The world changed after the write (the player kept playing, or another tool
+                # touched it). Restoring the old backup would throw that work away.
+                raise RequestRefused(
+                    "WORLD_CHANGED_SINCE_APPLY",
+                    "The world changed after the translation was written, so its backup cannot be restored first.",
+                )
+            _restored, recovery_id = _restore_backup(
+                world, str(applied["backup_set_id"]), data_dir,
+                expected_fingerprint=str(applied["world_fingerprint"]),
+                expected_external=applied.get("external_pack_fingerprints") or {},
+            )
+        report = _run_translator(
+            world,
+            dry_run=False,
+            report_path=report_dir / "translate-report.json",
+            fingerprint=fingerprint,
+            data_dir=data_dir,
+            excluded_candidate_ids=excluded,
+            progress_callback=lambda event: emit(
+                {"v": 1, "id": request_id, "type": "translate.progress", "payload": event}
+            ),
+            cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
+            allow_keyring_fallback=False,
+            manual_overrides=manual,
+            skip_provider_validation=True,
+            scan_plan_id=scan_plan_id,
+            external_pack_fingerprints=stored_plan.get("externalPackFingerprints", {}),
+            on_translation_failure="skip",
+            apply_only=True,
+            edits=edits_by_source,
+            adopt_checkpoint=job,
+        )
+        try:
+            from mwt.userdata import remember_last_job
+
+            remember_last_job(world, report, data_dir)
+        except (OSError, ValueError):
+            pass  # the start screen's summary is a convenience; the result below is what matters
+        payload = _translate_payload(report)
+        if reapply:
+            payload["recoverySetId"] = recovery_id
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": payload})
+        return
+    if kind == "translate.retry_failed":
+        scan_plan_id = str(body.get("scanPlanId") or "")
+        stored_plan = _load_scan_plan(data_dir, scan_plan_id)
+        job = _load_job(data_dir, scan_plan_id, world)
+        if not job:
+            raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
+        stored_plan = _validated_plan(
+            data_dir, str(stored_plan.get("worldFingerprint") or ""), scan_plan_id, applied=job.get("applied"),
+        )
+        from mwt.safety import world_fingerprint, file_sha256
+        applied = job.get("applied") or {}
+        expected_world = applied.get("world_fingerprint") or job.get("world_fingerprint")
+        if world_fingerprint(world) != expected_world:
+            raise RequestRefused("PLAN_INVALIDATED", "The world changed after this translation job was saved.")
+        for path, digest in (applied.get("external_pack_fingerprints") or {}).items():
+            if not Path(path).is_file() or Path(path).is_symlink() or file_sha256(Path(path)) != digest:
+                raise RequestRefused("PLAN_INVALIDATED", "An external pack changed after this translation job was applied.")
+        saved = _saved(data_dir)
+        source_overrides = normalize_source_overrides(
+            saved.get("source_overrides", {}), field="saved source_overrides"
+        )
+        from mwt.desktop_review import failed_sources, job_rows
+
+        sources = failed_sources(stored_plan, job, source_overrides)
+        ordered = [row["source"] for row in job_rows(stored_plan, job, source_overrides)]
+        resume = job.get("resume") or {}
+        report = _run_translator(
+            world,
+            dry_run=False,
+            report_path=report_dir / "translate-report.json",
+            fingerprint=str(stored_plan.get("worldFingerprint") or ""),
+            data_dir=data_dir,
+            excluded_candidate_ids=[str(item) for item in resume.get("excluded_candidate_ids") or []],
+            progress_callback=lambda event: emit(
+                {"v": 1, "id": request_id, "type": "translate.progress", "payload": event}
+            ),
+            cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
+            api_key_override=str(body.get("apiKey") or ""),
+            allow_keyring_fallback=body.get("credentialOwner") != "rust",
+            manual_overrides={k: v for k, v in (resume.get("manual_overrides") or {}).items() if isinstance(v, str)},
+            scan_plan_id=scan_plan_id,
+            external_pack_fingerprints=stored_plan.get("externalPackFingerprints", {}),
+            desktop_context=body if body.get("credentialOwner") == "rust" else None,
+            adopt_checkpoint=job,
+            retry=(ordered, sources),
+            budget_override=normalize_review_before_apply(body.get("budgetOverride", False), field="budgetOverride"),
+        )
+        try:
+            from mwt.userdata import remember_last_job
+
+            remember_last_job(world, report, data_dir)
+        except (OSError, ValueError):
+            pass  # the start screen's summary is a convenience; the result below is what matters
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": _translate_payload(report)})
         return
     if kind == "backups.list":
         emit(
@@ -1432,20 +1764,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         )
         return
     if kind == "restore.start":
-        backup_id = str(body.get("backupSetId") or "latest")
-        stores = _backup_stores(world, data_dir)
-        if backup_id == "latest":
-            listed = list_backup_sets(world, stores)
-            if not listed:
-                raise ValueError("There is no backup to restore")
-            backup_id = listed[0]["backupSetId"]
-        selected = BackupSet.find(world, backup_id, stores)
-        required = set(selected.external_targets())
-        # An unrelated offline pack must not prevent restoring a world-only backup.
-        allowed = [Path(path) for path in normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
-                   if Path(path).resolve(strict=False) in required]
-        selected = BackupSet.find(world, backup_id, stores, external_files=allowed)
-        recovery_id = selected.restore(recovery_store=stores[0])
+        selected, recovery_id = _restore_backup(world, str(body.get("backupSetId") or "latest"), data_dir)
         emit(
             {
                 "v": 1,
@@ -1475,39 +1794,49 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
     for line in sys.stdin:
         if not line.strip():
             continue
-        message: dict = {}
-        try:
-            message = json.loads(line)
-            if not isinstance(message, dict):
-                raise ValueError("Protocol message must be an object")
-            if message.get("v") != 1:
-                raise ValueError("Unsupported protocol version")
-            handle(message, report_dir, data_dir, cancel_path)
-        except (ExternalPackUnavailable, ExternalTargetError):
-            emit({"v": 1, "id": message.get("id", ""), "type": "response.error",
-                  "error": {"code": "EXTERNAL_PACK_UNAVAILABLE", "message": "Selected external ZIP is unavailable or its parent directory changed. Select the original ZIP in Settings before scanning or restoring.", "recoverable": True}})
-        except (json.JSONDecodeError, ValueError) as exc:
-            emit(
-                {
-                    "v": 1,
-                    "id": message.get("id", ""),
-                    "type": "response.error",
-                    "error": {"code": "INVALID_REQUEST", "message": str(exc), "recoverable": True},
-                }
-            )
-        except Exception:
-            emit(
-                {
-                    "v": 1,
-                    "id": message.get("id", ""),
-                    "type": "response.error",
-                    "error": {
-                        "code": "OPERATION_FAILED",
-                        "message": "The operation failed. The world was not marked as completed.",
-                        "recoverable": True,
-                    },
-                }
-            )
+        dispatch(line, report_dir, data_dir, cancel_path)
+
+
+def dispatch(line: str, report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
+    """Handle one JSONL request and answer it, turning every failure into an error response."""
+    message: dict = {}
+    try:
+        message = json.loads(line)
+        if not isinstance(message, dict):
+            raise ValueError("Protocol message must be an object")
+        if message.get("v") != 1:
+            raise ValueError("Unsupported protocol version")
+        handle(message, report_dir, data_dir, cancel_path)
+    except RequestRefused as exc:
+        error = {"code": exc.code, "message": str(exc), "recoverable": True}
+        if exc.details:
+            error["details"] = exc.details
+        emit({"v": 1, "id": message.get("id", ""), "type": "response.error", "error": error})
+    except (ExternalPackUnavailable, ExternalTargetError):
+        emit({"v": 1, "id": message.get("id", ""), "type": "response.error",
+              "error": {"code": "EXTERNAL_PACK_UNAVAILABLE", "message": "Selected external ZIP is unavailable or its parent directory changed. Select the original ZIP in Settings before scanning or restoring.", "recoverable": True}})
+    except (json.JSONDecodeError, ValueError) as exc:
+        emit(
+            {
+                "v": 1,
+                "id": message.get("id", ""),
+                "type": "response.error",
+                "error": {"code": "INVALID_REQUEST", "message": str(exc), "recoverable": True},
+            }
+        )
+    except Exception:
+        emit(
+            {
+                "v": 1,
+                "id": message.get("id", ""),
+                "type": "response.error",
+                "error": {
+                    "code": "OPERATION_FAILED",
+                    "message": "The operation failed. The world was not marked as completed.",
+                    "recoverable": True,
+                },
+            }
+        )
 
 
 def main(argv: list[str] | None = None) -> None:

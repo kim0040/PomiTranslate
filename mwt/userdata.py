@@ -336,7 +336,7 @@ def _valid_pref(key: str, value):
 
 LAST_JOBS_KEY = "last_jobs"
 MAX_LAST_JOBS = 20
-LAST_JOB_STATUSES = {"completed", "partial", "needs_retry", "failed", "cancelled"}
+LAST_JOB_STATUSES = {"completed", "partial", "needs_retry", "failed", "cancelled", "budget_stopped"}
 
 
 def _job_key(world: Path | str) -> str:

@@ -102,15 +102,15 @@ for (const scenario of ['result-success']) {
 }
 
 const resultCases = [
-  { scenario: 'result-needs_retry', title: '번역이 완료되지 않아 작업을 중단했습니다', body: '월드 파일은 변경되지 않았습니다.', action: '남은 문장만 이어서 시도' },
-  { scenario: 'result-partial', title: '일부 텍스트만 번역되었습니다', body: '번역되지 않은 문장은 원문 그대로 유지되었습니다. 아래 상세 내역을 확인해 주세요.', action: '처음부터 다시 스캔' },
-  { scenario: 'result-failed', title: '번역에 실패했습니다', body: '번역을 완료하지 못했습니다. 월드 파일은 바뀌지 않았습니다.', action: '처음부터 다시 스캔' },
-  { scenario: 'result-cancelled', title: '번역을 취소했습니다', body: '이미 번역된 문장은 안전하게 저장되어 있어 언제든 이어서 진행할 수 있습니다.', action: '남은 문장만 이어서 시도' },
-  { scenario: 'result-invalidated', title: '스캔 이후 월드 파일이 변경되었습니다', body: '데이터 무결성 보호를 위해 저장을 중단했습니다. 월드를 다시 스캔해 주세요.', action: '처음부터 다시 스캔' },
-  { scenario: 'result-unsupported', title: '지원하지 않는 월드 형식입니다', body: '월드 파일은 전혀 변경되지 않았습니다.', action: '처음부터 다시 스캔' }
+  { scenario: 'result-needs_retry', title: '번역이 완료되지 않아 작업을 중단했습니다', body: '월드 파일은 변경되지 않았습니다.', action: '실패한 6개만 다시 번역', stat: '번역문 준비' },
+  { scenario: 'result-partial', title: '일부 텍스트만 번역되었습니다', body: '번역되지 않은 문장은 원문 그대로 유지되었습니다. 아래 상세 내역을 확인해 주세요.', action: '실패한 2개만 다시 번역', stat: '월드에 적용됨' },
+  { scenario: 'result-failed', title: '번역에 실패했습니다', body: '번역을 완료하지 못했습니다. 월드 파일은 바뀌지 않았습니다.', action: '실패한 6개만 다시 번역', stat: '번역문 준비' },
+  { scenario: 'result-cancelled', title: '번역을 취소했습니다', body: '이미 번역된 문장은 안전하게 저장되어 있어 언제든 이어서 진행할 수 있습니다.', action: '남은 문장만 이어서 시도', stat: '번역문 준비' },
+  { scenario: 'result-invalidated', title: '스캔 이후 월드 파일이 변경되었습니다', body: '데이터 무결성 보호를 위해 저장을 중단했습니다. 월드를 다시 스캔해 주세요.', action: '처음부터 다시 스캔', stat: '번역문 준비' },
+  { scenario: 'result-unsupported', title: '지원하지 않는 월드 형식입니다', body: '월드 파일은 전혀 변경되지 않았습니다.', action: '처음부터 다시 스캔', stat: '번역문 준비' }
 ];
 
-for (const { scenario, title, body, action } of resultCases) {
+for (const { scenario, title, body, action, stat } of resultCases) {
   test(`${scenario} explains the outcome and offers the matching next action`, async ({ page }) => {
     await boot(page, scenario);
     await run(page);
@@ -118,7 +118,8 @@ for (const { scenario, title, body, action } of resultCases) {
     await expect(page.getByRole('status').filter({ hasText: title })).toContainText(body);
     await expect(page.getByRole('button', { name: action, exact: true })).toBeVisible();
     expect(await page.locator('main').innerText()).not.toMatch(/\b(partial|failed|cancelled|invalidated|unsupported)\b/);
-    await expect(page.getByText('번역문 준비', { exact: true })).toBeVisible();
+    // "Applied" only when the world was written; otherwise the same rows are "prepared" (U9).
+    await expect(page.getByText(stat, { exact: true })).toBeVisible();
     await expect(page.getByText('번역 완료', { exact: true })).toHaveCount(0);
     if (scenario === 'result-failed') {
       expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);

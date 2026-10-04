@@ -27,14 +27,6 @@
       : app.startupFailed ? t('startup.failed')
       : t('status.ready')
   );
-  let now = $state(Date.now());
-  $effect(() => {
-    if (!app.isBusy) return;
-    now = Date.now();
-    const timer = setInterval(() => { now = Date.now(); }, 1000);
-    return () => clearInterval(timer);
-  });
-
   const taskPage = $derived<Page>(app.busy === 'restore' ? 'backups' : 'workspace');
   const percent = $derived(
     app.busy === 'translate' && app.progress.phase === 'translate' && app.progress.total > 0
@@ -78,7 +70,7 @@
         <span class="dot" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy} aria-hidden="true"></span>
         <span class="status-text">{status}{percent !== null ? ` ${percent}%` : ''}</span>
         {#if app.isBusy && app.progress.startedAt}
-          <span class="sub num">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
+          <span class="sub num">{formatDuration((app.now - app.progress.startedAt) / 1000, app.locale)}</span>
         {/if}
       </div>
     </div>

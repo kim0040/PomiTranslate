@@ -55,6 +55,10 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "estimate.get",
     "translate.start",
     "translate.resume",
+    "translate.retry_failed",
+    "translate.apply",
+    "translate.reapply",
+    "translations.page",
     "backups.list",
     "restore.start",
 ];
@@ -70,6 +74,7 @@ const CREDENTIAL_OWNER_REQUESTS: &[&str] = &[
     "scan.start",
     "translate.start",
     "translate.resume",
+    "translate.retry_failed",
 ];
 
 /// Requests that need the stored API key, which Rust reads and puts in the payload.
@@ -79,6 +84,7 @@ const KEY_INJECTED_REQUESTS: &[&str] = &[
     "provider.usage",
     "translate.start",
     "translate.resume",
+    "translate.retry_failed",
 ];
 
 pub(crate) const CODE_BUSY: &str = "BUSY";
@@ -93,6 +99,37 @@ fn coded(code: &'static str, detail: &str) -> String {
 
 fn is_allowed_request(kind: &str) -> bool {
     ALLOWED_REQUESTS.contains(&kind)
+}
+
+/// The frontend passes its selected world, never an arbitrary file or URL.
+fn validated_world_folder(world_dir: &str) -> Result<PathBuf, String> {
+    let supplied = PathBuf::from(world_dir);
+    if !supplied.is_absolute() || !supplied.is_dir() {
+        return Err("Select an existing Java world folder first".into());
+    }
+    let world = supplied
+        .canonicalize()
+        .map_err(|_| "The world folder is unavailable")?;
+    let level = world.join("level.dat");
+    if !level.is_file()
+        || level
+            .symlink_metadata()
+            .map_err(|_| "The world folder is unavailable")?
+            .file_type()
+            .is_symlink()
+    {
+        return Err("The selected folder must contain level.dat".into());
+    }
+    Ok(world)
+}
+
+#[tauri::command]
+fn reveal_world_folder(app: tauri::AppHandle, world_dir: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let world = validated_world_folder(&world_dir)?;
+    app.opener()
+        .open_path(world.to_string_lossy(), None::<&str>)
+        .map_err(|_| "The world folder could not be opened".into())
 }
 
 /// Only the pinned, public OpenRouter catalog can bypass credential access.
@@ -554,6 +591,7 @@ pub fn run() {
             desktop_links::open_external,
             desktop_links::data_locations,
             desktop_links::reveal_data_folder,
+            reveal_world_folder,
             update_check,
             update_install,
             close_guard::set_unsaved_settings,
@@ -732,6 +770,10 @@ mod tests {
             "estimate.get",
             "translate.start",
             "translate.resume",
+            "translate.retry_failed",
+            "translate.apply",
+            "translate.reapply",
+            "translations.page",
             "backups.list",
             "restore.start",
             "models.list",
@@ -750,6 +792,45 @@ mod tests {
         ] {
             assert!(!is_allowed_request(kind), "{kind:?} must be refused");
         }
+    }
+
+    #[test]
+    fn review_requests_do_not_access_credentials() {
+        assert!(KEY_INJECTED_REQUESTS.contains(&"translate.retry_failed"));
+        for kind in ["translate.apply", "translate.reapply", "translations.page"] {
+            assert!(is_allowed_request(kind));
+            // These handlers only read public settings, with no keychain fallback.
+            assert!(!CREDENTIAL_OWNER_REQUESTS.contains(&kind));
+            assert!(!KEY_INJECTED_REQUESTS.contains(&kind));
+        }
+    }
+
+    #[test]
+    fn world_reveal_only_accepts_an_existing_java_world_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        assert!(validated_world_folder("").is_err());
+        assert!(validated_world_folder(".").is_err());
+        assert!(validated_world_folder(&root.to_string_lossy()).is_err());
+        fs::write(root.join("level.dat"), b"synthetic world").unwrap();
+        assert_eq!(
+            validated_world_folder(&root.to_string_lossy()).unwrap(),
+            root.canonicalize().unwrap()
+        );
+        assert!(validated_world_folder(&root.join("level.dat").to_string_lossy()).is_err());
+        assert!(validated_world_folder(&root.join("missing").to_string_lossy()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn world_reveal_refuses_a_linked_level_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let world = temporary.path().join("world");
+        fs::create_dir(&world).unwrap();
+        let outside = temporary.path().join("outside.dat");
+        fs::write(&outside, b"synthetic").unwrap();
+        std::os::unix::fs::symlink(outside, world.join("level.dat")).unwrap();
+        assert!(validated_world_folder(&world.to_string_lossy()).is_err());
     }
 
     #[test]
