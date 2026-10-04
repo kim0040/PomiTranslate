@@ -204,6 +204,12 @@
     (name === 'translate' && reasoningInvalid) ||
     (name === 'scope' && (overridesInvalid || (draft.resource_pack_enabled && packInvalid))) ||
     (name === 'advanced' && (hasRangeError || baseUrlInvalid))));
+  const showSaveBar = $derived(pending[tab] > 0 || errorTabs.includes(tab) ||
+    (tab === 'scope' && incomplete) || (app.returnStep && !dirty && !incomplete));
+  const attentionTabs = $derived(SETTINGS_TABS.filter((name) => name !== tab &&
+    (pending[name] > 0 || errorTabs.includes(name) || (name === 'scope' && incomplete))));
+  const showCrossTabAttention = $derived(attentionTabs.length > 0 && pending[tab] === 0 &&
+    !errorTabs.includes(tab) && !(tab === 'scope' && incomplete));
   const stored = $derived(credentialProvider === draft.provider ? credentialState : null);
   const providerName = (provider: string): string => {
     const item = providers.find((choice) => choice.value === provider);
@@ -462,7 +468,7 @@
   }
 </script>
 
-<div class="page settings" style:--settings-save-height={`${dirty || incomplete || app.returnStep ? saveBarHeight : 0}px`}>
+<div class="page settings" style:--settings-save-height={`${showSaveBar ? saveBarHeight : 0}px`}>
   <header class="page-head">
     <h1>{t('settings.title')}</h1>
     <p class="lead">{t('settings.lead')}</p>
@@ -478,6 +484,7 @@
         </button>
       {/each}
     </div>
+    {#if showCrossTabAttention}<p class="cross-tab-pending" role="status">{t('settings.otherTabsAttention', { tabs: tabNames(attentionTabs) })}</p>{/if}
     <fieldset disabled={!!app.busy && app.busy !== 'models'} aria-busy={app.busy === 'settings'}>
 
     <!-- 번역: provider, model, key, language -->
@@ -823,7 +830,7 @@
     </div>
     </fieldset>
 
-    {#if dirty || incomplete || app.returnStep}
+    {#if showSaveBar}
       <footer class="save-bar" class:dirty={dirty || incomplete} bind:clientHeight={saveBarHeight}>
         <div class="save-status" role="status" aria-live="polite">
           <strong>{#if app.busy === 'settings'}{t('settings.saving')}
@@ -854,7 +861,7 @@
 {#if app.pendingLeave}
   <Dialog
     title={t(app.pendingCloseSource ? 'settings.close.title' : 'settings.leave.title')}
-    hideClose={!!app.pendingCloseSource}
+    hideClose
     onClose={() => app.resolveLeave(false)}
   >
     <p>{t(app.pendingCloseSource ? 'settings.close.body' : 'settings.leave.body')}</p>
@@ -966,6 +973,7 @@
   .save-bar.dirty { background: color-mix(in srgb, var(--accent-soft) 85%, transparent); border-top-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
   .save-status { display: grid; gap: var(--space-1); font-size: var(--text-sm); color: var(--text-secondary); }
   .save-bar.dirty .save-status { color: var(--accent-soft-text); }
+  .cross-tab-pending { margin: -4px 0 0; color: var(--text-secondary); font-size: var(--text-xs); }
   .save-buttons { display: flex; gap: var(--space-2); flex-wrap: wrap; }
   .check { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-2); padding: 10px var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); }
   .check input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); }

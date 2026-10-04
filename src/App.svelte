@@ -111,7 +111,7 @@
   });
 
   const pageTitles: Record<string, MessageKey> = { backups: 'nav.backups', settings: 'nav.settings', about: 'nav.about', help: 'nav.help' };
-  $effect(() => { void setUnsavedSettings(app.settingsDirty); });
+  $effect(() => { void setUnsavedSettings(app.settingsDirty || app.wizardDirty); });
 </script>
 
 <a class="skip" href="#main-content">{t('app.skip')}</a>

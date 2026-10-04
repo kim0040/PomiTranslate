@@ -67,6 +67,9 @@
     { backupSetId: 'legacy-2026-09-28T12-10-00', createdAt: '2026-09-28T12:10:00+09:00', fileCount: 12, verified: false, kind: 'recovery', sizeBytes: 512000, inWorldFolder: true }
   ];
   const credentialModes = new Map();
+  const requestedCredentialMode = new URLSearchParams(location.search).get('credentialMode');
+  const initialCredentialMode = ['local', 'session', 'keychain'].includes(requestedCredentialMode) ? requestedCredentialMode : 'local';
+  const connectionAttempts = new Map();
   const settings = {
     provider: 'openrouter', model: new URLSearchParams(location.search).get('model') || 'xiaomi/mimo-v2.6-flash', base_url: '', wire_format: 'openai',
     target_language: new URLSearchParams(location.search).get('targetLanguage') || previewLanguages[previewLocale], style_preset: 'neutral', style_prompt: '', custom_system_prompt: '',
@@ -89,6 +92,7 @@
     status: 'completed', candidateCount: candidates.length, occurrenceCount: candidates.reduce((sum, item) => sum + item.occurrences, 0),
     kinds: candidates.reduce((counts, item) => { counts[item.kind] = (counts[item.kind] || 0) + 1; return counts; }, {}),
     providerRequests: 0, fingerprint: 'fixture-world-fingerprint', scanPlanId: 'fixture-scan-plan', dryRun: true,
+    lastScan: { at: 1790585600, candidateCount: candidates.length },
     writeBlockers: [], errors: [], warnings: [], requestEstimate: 1, estimate, candidates: candidates.slice(0, 200),
     coverage: [
       { id: 'regions', scanned: true, present: true, count: 6 },
@@ -116,6 +120,7 @@
       available: true, scanPlanId: scan.scanPlanId, fingerprint: scan.fingerprint,
       candidateCount: candidates.length, occurrenceCount: scan.occurrenceCount, kinds: scan.kinds, coverage: scan.coverage, candidates: candidates.slice(0, 200), excludedCandidateIds: ['tellraw'],
       candidateOverrides: { shop: previewTranslations[previewLocale] }, savedAt: 1790672400,
+      lastScan: new URLSearchParams(location.search).get('scenario') === 'unscanned' ? null : { at: 1790585600, candidateCount: candidates.length },
       status: 'needs_retry', translatedCount: 2,
       lastJob: { world: 'Roguefire', at: 1790672300, status: 'partial', translated: 4, failed: 2, changedFiles: 4, candidateCount: 6 }
     };
@@ -186,6 +191,7 @@
     // A draft key is recorded only as a flag and its length, never as text.
     window.__pomiRequests.push({
       type, provider: body.provider, publicCatalog: body.publicCatalog, connectionCheck: body.connectionCheck,
+      baseUrl: body.baseUrl, wireFormat: body.wireFormat,
       hasDraftKey: typeof body.draftApiKey === 'string' && body.draftApiKey.length > 0,
       draftKeyLength: typeof body.draftApiKey === 'string' ? body.draftApiKey.length : undefined,
       hasApiKey: typeof body.apiKey === 'string' && body.apiKey.length > 0, apiKeyLength: typeof body.apiKey === 'string' ? body.apiKey.length : undefined
@@ -208,10 +214,11 @@
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
         ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
         ...(new URLSearchParams(location.search).get('notify') === 'off' ? { prefs: { theme: 'system', notice_accepted: true, tutorial_seen: true, setup_dismissed: true, update_auto_check: false, update_last_check: 0, update_skipped_version: '', notify_on_finish: false } } : {}),
-        apiKeyStored: !fresh || freshKeySaved, credentialMode: 'local', worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
+        apiKeyStored: !fresh || freshKeySaved, credentialMode: credentialModes.get(settings.provider) || initialCredentialMode, worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
         worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
         resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false },
-        lastJob: empty || current === 'unscanned' ? null : { world: 'Roguefire', at: 1790672300, status: 'partial', translated: 4, failed: 2, changedFiles: 4, candidateCount: 6 }
+        lastJob: empty || current === 'unscanned' ? null : { world: 'Roguefire', at: 1790672300, status: 'partial', translated: 4, failed: 2, changedFiles: 4, candidateCount: 6 },
+        lastScan: empty || current === 'unscanned' ? null : { at: 1790585600, candidateCount: candidates.length }
       });
     }
     // This fixture tests draft wiring only; the real AST parser has Python regressions.
@@ -270,9 +277,13 @@
       if (body.connectionCheck) {
         // The key text decides the outcome, so a test can reach every failure the real core reports.
         const draft = typeof body.draftApiKey === 'string' ? body.draftApiKey : '';
+        const identity = JSON.stringify([body.provider, body.baseUrl || '', body.wireFormat || '', draft]);
+        const attempts = connectionAttempts.get(identity) || 0;
+        connectionAttempts.set(identity, attempts + 1);
         const storedKey = (!fresh || freshKeySaved) && new URLSearchParams(location.search).get('missingKey') !== '1';
         if (!draft && !storedKey) return fail('KEY_MISSING', 'API key is missing');
-        const failures = { 'bad-': ['AUTH_FAILED', 'HTTP 401'], 'nocredit-': ['NO_CREDIT', 'HTTP 402'], 'rate-': ['RATE_LIMITED', 'HTTP 429'], 'down-': ['PROVIDER_ERROR', 'HTTP 503'], 'offline-': ['NETWORK_ERROR', 'request failed'], 'timeout-': ['TIMEOUT', 'timed out'] };
+        if (draft.startsWith('offline-') && attempts === 0) return fail('NETWORK_ERROR', 'request failed');
+        const failures = { 'bad-': ['AUTH_FAILED', 'HTTP 401'], 'nocredit-': ['NO_CREDIT', 'HTTP 402'], 'rate-': ['RATE_LIMITED', 'HTTP 429'], 'down-': ['PROVIDER_ERROR', 'HTTP 503'], 'timeout-': ['TIMEOUT', 'timed out'] };
         for (const [prefix, [code, message]] of Object.entries(failures)) if (draft.startsWith(prefix)) return fail(code, message);
         await new Promise((resolve) => setTimeout(resolve, 80));
       }

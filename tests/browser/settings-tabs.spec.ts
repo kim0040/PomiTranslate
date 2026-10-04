@@ -117,11 +117,13 @@ test('the save bar only exists while a save-required change is pending, and name
   await page.getByLabel('표지판', { exact: true }).uncheck();
   await expect(saveBar(page)).toContainText('번역·스캔 범위·고급 탭에 저장하지 않은 변경 3개');
 
-  // The app tab shows what is pending elsewhere; nothing there is part of it.
+  // The app tab shows a light cross-tab status; its instant-apply controls do not own the save bar.
   await tab(page, '앱').click();
-  await expect(saveBar(page)).toContainText('번역·스캔 범위·고급 탭에 저장하지 않은 변경 3개');
+  await expect(saveBar(page)).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: '다른 탭에서 확인할 항목이 있습니다: 번역·스캔 범위·고급' })).toBeVisible();
   await expect(tab(page, '앱').locator('.dot')).toHaveCount(0);
 
+  await tab(page, '고급').click();
   await page.getByRole('button', { name: '변경 취소', exact: true }).click();
   await expect(saveBar(page)).toHaveCount(0);
   await expect(page.locator('#style-prompt')).toBeAttached();
@@ -170,6 +172,7 @@ test('leaving with unsaved changes still asks, whichever tab they are on', async
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '저장하지 않은 설정이 있습니다' });
   await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.close')).toHaveCount(0);
   await dialog.getByRole('button', { name: '계속 편집' }).click();
   await expect(page.locator('#concurrency')).toHaveValue('2');
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();

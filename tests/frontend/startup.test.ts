@@ -16,6 +16,12 @@ const payload = () => ({
   backups: [], resume: { available: false }
 });
 
+const scanPlan = (scanPlanId: string, candidateCount = 2) => ({
+  status: 'completed', candidateCount, providerRequests: 0, fingerprint: `fingerprint-${scanPlanId}`,
+  scanPlanId, dryRun: true, candidates: []
+});
+const previousJob = { world: 'OldWorld', at: 1790672300, status: 'completed' as const, translated: 55, failed: 0, changedFiles: 8, candidateCount: 99 };
+
 beforeEach(() => {
   backend.mockReset();
   listen.mockReset().mockResolvedValue(() => {});
@@ -170,5 +176,109 @@ describe('startup recovery', () => {
     resolve(stop);
     await Promise.resolve();
     expect(stop).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('review undo and per-world summaries', () => {
+  it('invalidates the old bulk undo action when a new scan plan replaces the review', async () => {
+    backend.mockImplementation(async (type: string) => {
+      if (type === 'settings.set') return { settings: defaultSettings(), apiKeyStored: false, credentialMode: 'local' };
+      if (type === 'scan.start') return scanPlan('new-plan', 1);
+      return {};
+    });
+    const app = new AppState();
+    app.worldDir = '/world-a';
+    app.scan = scanPlan('old-plan');
+    app.lastJob = previousJob;
+    app.setIncludedMany(['old-a', 'old-b'], false);
+    const staleUndo = app.toasts.at(-1)?.action;
+
+    await app.startScan();
+    staleUndo?.run();
+
+    expect(app.scan?.scanPlanId).toBe('new-plan');
+    expect(app.includedCount).toBe(1);
+    expect(app.excluded.size).toBe(0);
+    expect(app.lastJob).toEqual(previousJob); // A same-world rescan keeps translation history.
+    expect(app.toasts.some((toast) => toast.action?.label === '되돌리기')).toBe(false);
+    app.destroy();
+  });
+
+  it('refuses undo when its recorded scan plan or world no longer matches', () => {
+    const app = new AppState();
+    app.worldDir = '/world-a';
+    app.scan = scanPlan('plan-a');
+    app.setIncludedMany(['old-a'], false);
+    app.scan = scanPlan('plan-b');
+    app.excluded.clear();
+    app.excluded.add('new-b');
+
+    expect(app.undoIncluded()).toBe(false);
+    expect([...app.excluded]).toEqual(['new-b']);
+
+    app.scan = scanPlan('plan-b');
+    app.excluded.clear();
+    app.setIncludedMany(['new-c'], false);
+    app.worldDir = '/world-b';
+    expect(app.undoIncluded()).toBe(false);
+    expect([...app.excluded]).toEqual(['new-c']);
+    app.destroy();
+  });
+
+  it('clears undo actions on resume application and restore', async () => {
+    const app = new AppState();
+    app.worldDir = '/world-a';
+    app.scan = scanPlan('plan-a');
+    app.setIncludedMany(['old-a'], false);
+    const resumedUndo = app.toasts.at(-1)?.action;
+    (app as any).applyResume({ available: false, lastJob: null, lastScan: null });
+    resumedUndo?.run();
+    expect([...app.excluded]).toEqual(['old-a']);
+    expect(app.toasts.some((toast) => toast.action)).toBe(false);
+
+    app.scan = scanPlan('plan-a');
+    app.setIncludedMany(['old-a'], false);
+    const restoreUndo = app.toasts.at(-1)?.action;
+    backend.mockImplementation(async (type: string) => type === 'restore.start'
+      ? { status: 'restored', recoverySetId: 'recovery' }
+      : type === 'backups.list' ? { backups: [] } : {});
+    expect(await app.restore('backup-a')).toBe(true);
+    restoreUndo?.run();
+    expect(app.scan).toBeNull();
+    expect(app.excluded.size).toBe(0);
+    expect(app.toasts.some((toast) => toast.action)).toBe(false);
+    app.destroy();
+  });
+
+  it('clears the previous world job and scan summary when selecting or removing a world', async () => {
+    backend.mockImplementation(async (type: string) => {
+      if (type === 'world.inspect') return { validJavaWorld: true, kind: 'java_world', writeBlockers: [] };
+      if (type === 'worlds.remember') return { worlds: [] };
+      if (type === 'worlds.forget') return { worlds: [] };
+      if (type === 'backups.list') return { backups: [] };
+      if (type === 'resume.status') return { available: false, lastJob: null, lastScan: null };
+      return {};
+    });
+    const app = new AppState();
+    app.worldDir = '/OldWorld';
+    app.scan = scanPlan('old-plan');
+    app.lastJob = previousJob;
+    app.lastScan = { at: 1790672000, candidateCount: 99 };
+    app.setIncludedMany(['old-a'], false);
+    const staleUndo = app.toasts.at(-1)?.action;
+
+    await app.useWorld('/NewWorld');
+    staleUndo?.run();
+    expect(app.lastJob).toBeNull();
+    expect(app.lastScan).toBeNull();
+    expect(app.scan).toBeNull();
+    expect(app.excluded.size).toBe(0);
+
+    app.lastJob = previousJob;
+    app.lastScan = { at: 1790672000, candidateCount: 99 };
+    await app.forgetWorld('/NewWorld');
+    expect(app.lastJob).toBeNull();
+    expect(app.lastScan).toBeNull();
+    app.destroy();
   });
 });
