@@ -7,7 +7,7 @@
   import { formatNumber } from '../lib/format';
   import Icon from './Icon.svelte';
 
-  let { review, row, showHeading = true }: { review: TranslationReview; row: TranslationRow | null; showHeading?: boolean } = $props();
+  let { review, row, onQuickAdd, showHeading = true }: { review: TranslationReview; row: TranslationRow | null; onQuickAdd?: (source: string, target: string) => void; showHeading?: boolean } = $props();
 
   const shown = $derived(row ? review.display(row) : null);
   const problem = $derived(row ? review.reasonFor(row.id) : '');
@@ -20,9 +20,10 @@
     translated: 'translationReview.state.translated.label',
     failed: 'translationReview.state.failed.label',
     kept: 'translationReview.state.kept.label',
-    edited: 'translationReview.state.edited.label'
+    edited: 'translationReview.state.edited.label',
+    glossary_mismatch: 'translationReview.state.glossaryMismatch'
   };
-  const statusPill: Record<TranslationRow['status'], string> = { translated: 'pill-success', failed: 'pill-danger', kept: '', edited: 'pill-accent' };
+  const statusPill: Record<TranslationRow['status'], string> = { translated: 'pill-success', failed: 'pill-danger', kept: '', edited: 'pill-accent', glossary_mismatch: 'pill-warning' };
 </script>
 
 <aside class="detail" aria-label={t('translationReview.detail.title')}>
@@ -37,6 +38,11 @@
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
       <p class="source" lang="en">{row.source}</p>
+      {#if onQuickAdd}
+        <button type="button" class="btn btn-secondary btn-sm revert" onclick={() => onQuickAdd(row.source, shown.text)}>
+          <Icon name="plus" size={14} /> {t('glossary.quickAdd')}
+        </button>
+      {/if}
       {#if tokens.length}
         <p class="tokens" role="note">
           {#each tokens as token (token)}<code>{token}</code>{/each}
@@ -55,6 +61,13 @@
           </details>
         {/if}
       </section>
+    {/if}
+
+    {#if row.status === 'glossary_mismatch'}
+      <p class="mismatch" role="note"><Icon name="alert-triangle" size={15} /> {t('glossary.mismatchHelp')}</p>
+    {/if}
+    {#if row.glossaryStale}
+      <p class="mismatch" role="note">{t('glossary.changedHelp', { count: 1 })}</p>
     {/if}
 
     <section class="block">
@@ -104,6 +117,8 @@
   .tokens { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); margin: 0; }
   .tokens code { padding: 1px 6px; border-radius: 4px; background: var(--warning-soft); color: var(--warning-text); font-weight: 700; }
   .failed { padding: var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger-text); }
+  .mismatch { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; padding: var(--space-3); border-radius: var(--radius-md); background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-sm); }
+  .mismatch :global(.icon) { flex: none; margin-top: 1px; }
   .why { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; font-weight: 600; font-size: var(--text-sm); }
   .why :global(.icon) { margin-top: 1px; }
   details { font-size: var(--text-sm); }

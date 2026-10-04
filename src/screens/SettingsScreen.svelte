@@ -10,6 +10,7 @@
   import ResourcePackSettings from '../components/ResourcePackSettings.svelte';
   import ExternalResourcePacks from '../components/ExternalResourcePacks.svelte';
   import SourceOverrides from '../components/SourceOverrides.svelte';
+  import GlossaryEditor from '../components/GlossaryEditor.svelte';
   import TargetLanguageSelect from '../components/TargetLanguageSelect.svelte';
   import { copySettings, defaultScanOptions, publicSettingsForExport, STYLE_PRESETS } from '../lib/settings';
   import { SETTINGS_TABS, pendingChanges, totalPending, type SettingsTab } from '../lib/settings-tabs';
@@ -69,6 +70,10 @@
   let importInput: HTMLInputElement;
   let importingSettings = $state(false);
   let overridesInvalid = $state(false);
+  let glossaryInvalid = $state(false);
+  let customPriceInput = $state('');
+  let customPriceOutput = $state('');
+  let lastPriceSelection = '';
   let packInvalid = $state(false);
   let usageSnapshots = $state<ProviderUsage[]>([]);
   let usageError = $state('');
@@ -153,6 +158,28 @@
   const isCustom = $derived(draft.provider === 'custom');
   const models = $derived(app.modelsFor(draft));
   const reasoningModel = $derived(models.find((model) => model.id === draft.model.trim()));
+  const selectedPriceKey = $derived(`${draft.provider}/${draft.model.trim()}`);
+  const hasCatalogPrice = (value: unknown): boolean => {
+    if ((typeof value !== 'number' && typeof value !== 'string') || (typeof value === 'string' && !value.trim())) return false;
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount >= 0;
+  };
+  const catalogPriceAvailable = $derived.by(() => {
+    const item = models.find((model) => model.id === draft.model.trim());
+    if (!item) return false;
+    return hasCatalogPrice(item.pricing_prompt) && hasCatalogPrice(item.pricing_completion);
+  });
+  const savedSelectedPrice = $derived(snapshot?.custom_prices?.[selectedPriceKey]);
+  const customPriceInvalid = $derived([customPriceInput, customPriceOutput].some((value) => {
+    if (!value.trim()) return false;
+    const amount = Number(value);
+    return !Number.isFinite(amount) || amount < 0 || amount > 1000;
+  }));
+  const customPriceIncomplete = $derived((customPriceInput.trim() === '') !== (customPriceOutput.trim() === ''));
+  const customPriceDraftDirty = $derived(!!snapshot && (
+    (customPriceInput.trim() ? Number(customPriceInput) : null) !== (savedSelectedPrice?.input ?? null) ||
+    (customPriceOutput.trim() ? Number(customPriceOutput) : null) !== (savedSelectedPrice?.output ?? null)
+  ));
   const reasoningMetadata = $derived(reasoningModel?.reasoning);
   const reasoningSupported = $derived(supportsReasoning(reasoningModel));
   const reasoningEfforts = $derived(supportedEfforts(reasoningModel));
@@ -161,7 +188,7 @@
   const hiddenReasoning = $derived(!['default', 'enabled', 'disabled', ...reasoningEfforts].includes(currentReasoning));
   const reasoningInvalid = $derived(REASONING_PROVIDERS.includes(draft.provider) && currentReasoning !== 'default' &&
     (!reasoningModel || !reasoningSupported || (currentReasoning === 'disabled' && !!reasoningMetadata?.mandatory) || hiddenReasoning));
-  const dirty = $derived(!!snapshot && (JSON.stringify(copySettings(draft)) !== JSON.stringify(copySettings(snapshot)) ||
+  const dirty = $derived(!!snapshot && (JSON.stringify(copySettings(draft)) !== JSON.stringify(copySettings(snapshot)) || customPriceDraftDirty ||
     !!apiKey.trim() || credentialMode !== savedCredentialMode));
   const pending = $derived(snapshot
     ? pendingChanges(draft, snapshot, { keyTyped: !!apiKey.trim(), storageModeChanged: credentialMode !== savedCredentialMode })
@@ -192,16 +219,17 @@
     rpm: !inRange(draft.rpm_limit, 0, 10000),
     tpm: !inRange(draft.tpm_limit, 0, 10000000),
     retries: !inRange(draft.max_batch_retries, 0, 10),
+    maxCost: !inRange(draft.max_cost_usd, 0, 1000),
     writeRetries: !inRange(draft.max_file_write_retries, 1, 10) || !Number.isInteger(draft.max_file_write_retries),
     concurrency: !inRange(draft.concurrency, 1, 8)
   }));
   const hasRangeError = $derived(Object.values(rangeInvalid).some(Boolean));
   // Input an editor holds but cannot hand to the draft yet (a half-written row): it exists only because someone typed it.
-  const incomplete = $derived(overridesInvalid || (!!draft.resource_pack_enabled && packInvalid));
-  const hasBlockingError = $derived(reasoningInvalid || hasRangeError || overridesInvalid || (draft.resource_pack_enabled && packInvalid) || (isCustom && !validBaseUrl(draft.base_url)));
+  const incomplete = $derived(overridesInvalid || glossaryInvalid || customPriceIncomplete || (!!draft.resource_pack_enabled && packInvalid));
+  const hasBlockingError = $derived(reasoningInvalid || hasRangeError || customPriceInvalid || customPriceIncomplete || overridesInvalid || glossaryInvalid || (draft.resource_pack_enabled && packInvalid) || (isCustom && !validBaseUrl(draft.base_url)));
   // The tabs that hold an error, so a blocked save says where to look.
   const errorTabs = $derived(SETTINGS_TABS.filter((name) =>
-    (name === 'translate' && reasoningInvalid) ||
+    (name === 'translate' && (reasoningInvalid || customPriceInvalid || customPriceIncomplete || glossaryInvalid || rangeInvalid.maxCost)) ||
     (name === 'scope' && (overridesInvalid || (draft.resource_pack_enabled && packInvalid))) ||
     (name === 'advanced' && (hasRangeError || baseUrlInvalid))));
   const showSaveBar = $derived(pending[tab] > 0 || errorTabs.includes(tab) ||
@@ -211,6 +239,30 @@
   const showCrossTabAttention = $derived(attentionTabs.length > 0 && pending[tab] === 0 &&
     !errorTabs.includes(tab) && !(tab === 'scope' && incomplete));
   const stored = $derived(credentialProvider === draft.provider ? credentialState : null);
+
+  $effect(() => {
+    const key = selectedPriceKey;
+    if (key === lastPriceSelection) return;
+    lastPriceSelection = key;
+    const price = draft.custom_prices?.[selectedPriceKey];
+    customPriceInput = price ? String(price.input) : '';
+    customPriceOutput = price ? String(price.output) : '';
+  });
+
+  function changeCustomPrice(which: 'input' | 'output', value: string): void {
+    if (which === 'input') customPriceInput = value;
+    else customPriceOutput = value;
+    const input = customPriceInput.trim() ? Number(customPriceInput) : null;
+    const output = customPriceOutput.trim() ? Number(customPriceOutput) : null;
+    const prices = { ...(draft.custom_prices ?? {}) };
+    if (input !== null && output !== null && Number.isFinite(input) && Number.isFinite(output) && input >= 0 && output >= 0 && input <= 1000 && output <= 1000) {
+      const current = prices[selectedPriceKey];
+      if (!current || current.input !== input || current.output !== output) prices[selectedPriceKey] = { input, output };
+    } else {
+      delete prices[selectedPriceKey];
+    }
+    draft.custom_prices = prices;
+  }
   const providerName = (provider: string): string => {
     const item = providers.find((choice) => choice.value === provider);
     if (!item) return provider;
@@ -368,6 +420,7 @@
 
   function discardDraft(): void {
     draftEpoch += 1;
+    lastPriceSelection = '';
     draft = copySettings(app.settings);
     snapshot = copySettings(app.settings);
     apiKey = '';
@@ -415,6 +468,7 @@
 
   function resetDraft(): void {
     draftEpoch += 1;
+    lastPriceSelection = '';
     draft = copySettings({ ...defaultSettings(), ui_language: app.locale, last_world_dir: app.worldDir });
     apiKey = '';
     showApiKey = false;
@@ -621,6 +675,30 @@
         {/if}
       </Disclosure>
 
+      {#if draft.model.trim() && !catalogPriceAvailable}
+        <Disclosure id="user-model-price" icon="dollar" title={t('settings.price.title')} subtitle={t('settings.price.subtitle')} forceOpen={customPriceInvalid || customPriceIncomplete}>
+          <p id="custom-price-help" class="hint">{t('settings.price.help')}</p>
+          <div class="fields two">
+            <div class="field">
+              <label class="label" for="custom-price-input">{t('settings.price.input')}</label>
+              <input id="custom-price-input" class="input" type="number" min="0" max="1000" step="any" value={customPriceInput}
+                aria-invalid={customPriceInvalid} aria-describedby="custom-price-help custom-price-input-error"
+                oninput={(event) => changeCustomPrice('input', event.currentTarget.value)} />
+              {#if customPriceInvalid && customPriceInput}<span id="custom-price-input-error" class="field-error" role="alert">{t('settings.price.range')}</span>{/if}
+            </div>
+            <div class="field">
+              <label class="label" for="custom-price-output">{t('settings.price.output')}</label>
+              <input id="custom-price-output" class="input" type="number" min="0" max="1000" step="any" value={customPriceOutput}
+                aria-invalid={customPriceInvalid} aria-describedby="custom-price-help custom-price-output-error"
+                oninput={(event) => changeCustomPrice('output', event.currentTarget.value)} />
+              {#if customPriceInvalid && customPriceOutput}<span id="custom-price-output-error" class="field-error" role="alert">{t('settings.price.range')}</span>{/if}
+              {#if customPriceIncomplete}<span class="field-error" role="alert">{t('settings.price.bothRequired')}</span>{/if}
+            </div>
+          </div>
+          {#if draft.custom_prices?.[selectedPriceKey]}<p class="hint">{t('settings.price.userBasis')}</p>{/if}
+        </Disclosure>
+      {/if}
+
       <Disclosure id="translation-settings" icon="language" title={t('settings.language.title')} subtitle={t('settings.language.subtitle')} open>
         <div class="fields two">
           <div class="field">
@@ -658,10 +736,25 @@
         </div>
       </Disclosure>
 
-      <!-- Extension point (translate tab): another change adds its rows here as `review_before_apply`
-           (a checkbox: review each translation before it is applied) and `max_cost_usd` (a number: the
-           estimated cost above which a run asks first). Use <div class="field full"> rows inside a new
-           <Disclosure> card, and add both fields to TAB_OF in src/lib/settings-tabs.ts as 'translate'. -->
+      <Disclosure id="cost-protection" icon="shield" title={t('settings.costProtection.title')} subtitle={t('settings.costProtection.subtitle')} open forceOpen={rangeInvalid.maxCost}>
+        <div class="fields two">
+          <label class="check">
+            <input type="checkbox" bind:checked={draft.review_before_apply} />
+            <span><strong>{t('settings.costProtection.review')}</strong><small>{t('settings.costProtection.reviewHelp')}</small></span>
+          </label>
+          <div class="field">
+            <label class="label" for="max-cost-usd">{t('settings.costProtection.cap')}</label>
+            <input id="max-cost-usd" class="input" type="number" min="0" max="1000" step="0.01" bind:value={draft.max_cost_usd}
+              aria-invalid={rangeInvalid.maxCost} aria-describedby="max-cost-help max-cost-error" />
+            <span id="max-cost-help" class="hint">{t('settings.costProtection.capHelp')}</span>
+            {#if rangeInvalid.maxCost}<span id="max-cost-error" class="field-error" role="alert">{t('settings.costProtection.capError')}</span>{/if}
+          </div>
+        </div>
+      </Disclosure>
+
+      <Disclosure id="global-glossary" icon="book" title={t('glossary.title')} subtitle={t('glossary.count', { count: draft.glossary?.length ?? 0 })} forceOpen={glossaryInvalid}>
+        <GlossaryEditor bind:entries={draft.glossary} bind:invalid={glossaryInvalid} resetKey={draftEpoch} />
+      </Disclosure>
     </div>
 
     <!-- 스캔 범위: what text is found, ZIP resource packs, saved manual translations -->
@@ -822,8 +915,10 @@
             <span id="ui-language-help" class="hint">{t('settings.app.languageHelp')}</span>
           </div>
         </div>
-        <!-- Extension point (app tab): another change adds `notify_on_finish` here, as an instant-apply
-             checkbox that saves through app.setPrefs (like update_auto_check), so it never needs the save bar. -->
+        <label class="check">
+          <input type="checkbox" checked={app.prefs.notify_on_finish} onchange={(event) => app.setPrefs({ notify_on_finish: event.currentTarget.checked })} />
+          <span><strong>{t('settings.app.notifyOnFinish')}</strong><small>{t('settings.app.notifyOnFinishHelp')}</small></span>
+        </label>
       </Disclosure>
 
       <AppMaintenance />

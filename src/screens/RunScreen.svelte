@@ -228,6 +228,7 @@
             {#if (estimate && estimate.requests > 0) || (!estimate && app.estimateLoading && !app.manualOnly)}
               <span class="sub">{estimate ? t('run.summary.tokens', { input: formatCompact(estimate.inputTokens, app.locale), output: formatCompact(estimate.outputTokens, app.locale) }) : '\u00a0'}</span>
               <span class="sub">{estimate ? (estimate.cost ? t('run.cost.note') : t('run.cost.unknownWhy')) : '\u00a0'}</span>
+              {#if estimate?.priceSource === 'user'}<span class="sub">{t('settings.price.userBasis')}</span>{/if}
               {#if showReasoningNote}<span class="sub">{estimate?.reasoningIncluded ? t('run.estimate.reasoning') : t('run.reasoning.cost')}</span>{/if}
             {/if}
           </dd>

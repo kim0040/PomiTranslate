@@ -22,6 +22,8 @@ describe('prices', () => {
     expect(perMillion('0')).toBe(0);
     expect(perMillion('')).toBeNull();
     expect(perMillion(undefined)).toBeNull();
+    expect(perMillion(null)).toBeNull();
+    expect(perMillion(0.000001)).toBe(1);
     expect(perMillion('free')).toBeNull();
     expect(perMillion('-1')).toBeNull();
   });
@@ -29,6 +31,7 @@ describe('prices', () => {
   it('reads both prices of a model', () => {
     expect(modelPrices(priced('a', '0.000001', '0.000005'))).toEqual({ input: 1, output: 5 });
     expect(modelPrices(model('a'))).toEqual({ input: null, output: null });
+    expect(modelPrices(model('a', { pricing_prompt: null, pricing_completion: null }))).toEqual({ input: null, output: null });
   });
 });
 

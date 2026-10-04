@@ -50,7 +50,7 @@ export const defaultSettings = (): Settings => ({
   provider: 'openai', model: '', base_url: '', wire_format: 'openai', target_language: '한국어', style_preset: 'neutral',
   openrouter_reasoning: 'default', style_prompt: '', custom_system_prompt: '', temperature: 0.3, batch_size: 40, request_timeout: 120, rpm_limit: 0,
   tpm_limit: 0, max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false, resource_pack_options: resourcePackOptions(), external_resource_pack_paths: [], skip_target_language_text: true,
-  max_file_write_retries: 2, continue_on_file_error: true, review_before_apply: true, max_cost_usd: 0, source_overrides: {},
+  max_file_write_retries: 2, continue_on_file_error: true, review_before_apply: true, max_cost_usd: 0, source_overrides: {}, glossary: [], custom_prices: {},
   ui_language: 'ko', last_world_dir: '', scan_options: normalizedScanOptions()
 });
 
@@ -117,6 +117,8 @@ export class AppState {
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
+  /** A glossary dialog owns its draft and must answer navigation/native close in place. */
+  glossaryGuard: { leave: (next: () => void) => void; close: (source: CloseSource) => void } | null = null;
   /** Draft values held by SetupWizard, including a key that has not been saved yet. */
   wizardDirty = $state(false);
   /** A move away from settings that waits until the user saves or drops the changes there. */
@@ -589,13 +591,18 @@ export class AppState {
       if (this.page === 'settings') this.returnStep = null;
       next();
     };
-    if (this.page === 'settings' && this.settingsDirty) this.pendingLeave = run;
+    if (this.glossaryGuard) this.glossaryGuard.leave(run);
+    else if (this.page === 'settings' && this.settingsDirty) this.pendingLeave = run;
     else run();
   }
 
   /** Show the existing unsaved-settings choice for a native X or app-quit request. */
   private handleCloseRequested(source: CloseSource): void {
     if (this.pendingCloseSource) return;
+    if (this.glossaryGuard) {
+      this.glossaryGuard.close(source);
+      return;
+    }
     if (this.showWizard) {
       this.pendingCloseSource = source;
       this.pendingCloseContext = 'wizard';
@@ -1034,6 +1041,10 @@ export class AppState {
         this.translationReview.setRefused(editErrors(cause.details));
         this.reviewOpen = true;
       }
+      if (cause instanceof BackendError && ['GLOSSARY_CHANGED', 'GLOSSARY_MISMATCH_UNCONFIRMED'].includes(cause.code)) {
+        this.translationReview.reset();
+        this.reviewOpen = true;
+      }
       this.fail(cause);
       this.step = kind === 'translate' || kind === 'resume' ? (this.scan ? 'run' : 'scan') : origin;
       return null;
@@ -1083,12 +1094,13 @@ export class AppState {
   }
 
   /** Send only the failed and unsent rows to the AI again. The result comes back for review. */
-  async retryFailed(options: { budgetOverride?: boolean } = {}): Promise<void> {
+  async retryFailed(options: { budgetOverride?: boolean; refreshGlossary?: boolean } = {}): Promise<void> {
     if (this.guarded) return;
     const outcome = await this.runOperation('retry', () => callBackend<TranslationResult>('translate.retry_failed', {
       ...this.identity,
       provider: this.settings.provider,
       model: this.settings.model,
+      ...(options.refreshGlossary ? { refreshGlossary: true } : {}),
       ...(options.budgetOverride ? { budgetOverride: true } : {})
     }), { persist: true, keepResult: true });
     if (outcome) await this.settle(outcome);
@@ -1102,7 +1114,8 @@ export class AppState {
     const outcome = await this.runOperation(corrections ? 'reapply' : 'apply', () => callBackend<TranslationResult>(corrections ? 'translate.reapply' : 'translate.apply', {
       ...this.identity,
       fingerprint: this.scan!.fingerprint,
-      edits: review.edits()
+      edits: review.edits(),
+      acknowledgeGlossaryMismatch: review.meta?.glossaryActive === true
     }), { persist: false, keepResult: true });
     if (outcome) await this.settle(outcome);
   }
@@ -1287,6 +1300,8 @@ export class AppState {
         continueOnFileError: s.continue_on_file_error,
         reviewBeforeApply: s.review_before_apply !== false,
         maxCostUsd: s.max_cost_usd ?? 0,
+        glossary: s.glossary ?? [],
+        customPrices: s.custom_prices ?? {},
         sourceOverrides: s.source_overrides ?? {},
         concurrency: s.concurrency,
         resourcePackEnabled: s.resource_pack_enabled,
@@ -1346,6 +1361,7 @@ export class AppState {
       }
       if (before.ui_language !== this.settings.ui_language) setLocale(this.locale);
       if (JSON.stringify(before.source_overrides) !== JSON.stringify(this.settings.source_overrides)) this.candidates.refetchSoon(0);
+      if (JSON.stringify(before.glossary ?? []) !== JSON.stringify(this.settings.glossary ?? [])) this.translationReview.reset();
       if (this.scan) void this.loadEstimate();
       this.notify(t('settings.saved'), 'success', 2600);
       return true;

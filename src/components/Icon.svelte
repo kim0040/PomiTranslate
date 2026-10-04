@@ -3,7 +3,7 @@
     | 'folder' | 'search' | 'list' | 'language' | 'check-circle' | 'archive' | 'sliders' | 'info' | 'chevron-right'
     | 'chevron-left' | 'chevron-down' | 'x' | 'check' | 'alert-triangle' | 'alert-circle' | 'refresh' | 'trash'
     | 'eye' | 'eye-off' | 'play' | 'stop' | 'sidebar' | 'pencil' | 'shield' | 'clock' | 'minus' | 'plus' | 'undo' | 'download' | 'help'
-    | 'key' | 'monitor' | 'gauge' | 'upload' | 'copy';
+    | 'key' | 'monitor' | 'gauge' | 'upload' | 'copy' | 'book' | 'dollar';
 </script>
 
 <script lang="ts">
@@ -45,7 +45,9 @@
     monitor: 'M4 5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM9 20h6M12 16v4',
     gauge: 'M3.5 17a8.5 8.5 0 1 1 17 0M12 17l4.5-5',
     upload: 'M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19.5h14',
-    copy: 'M8 8V4.5A1.5 1.5 0 0 1 9.5 3h9A1.5 1.5 0 0 1 20 4.5v12a1.5 1.5 0 0 1-1.5 1.5H15M5 7h8.5A1.5 1.5 0 0 1 15 8.5v12A1.5 1.5 0 0 1 13.5 22h-8A1.5 1.5 0 0 1 4 20.5v-12A1.5 1.5 0 0 1 5.5 7z'
+    copy: 'M8 8V4.5A1.5 1.5 0 0 1 9.5 3h9A1.5 1.5 0 0 1 20 4.5v12a1.5 1.5 0 0 1-1.5 1.5H15M5 7h8.5A1.5 1.5 0 0 1 15 8.5v12A1.5 1.5 0 0 1 13.5 22h-8A1.5 1.5 0 0 1 4 20.5v-12A1.5 1.5 0 0 1 5.5 7z',
+    book: 'M5 4.5A2.5 2.5 0 0 1 7.5 2H20v18H7.5A2.5 2.5 0 0 0 5 22zM5 4.5v15A2.5 2.5 0 0 1 7.5 17H20M9 6h7M9 9h7',
+    dollar: 'M12 2.5v19M17 6.5H9.5a3 3 0 0 0 0 6h5a3 3 0 0 1 0 6H7'
   };
   const filled = new Set<IconName>(['play']);
 </script>

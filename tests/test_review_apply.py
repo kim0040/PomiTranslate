@@ -129,6 +129,104 @@ class ReviewApplyTests(unittest.TestCase):
         bootstrap = self.ok("app.bootstrap")
         self.assertEqual(bootstrap["resume"]["status"], "awaiting_review")
 
+    def test_glossary_edit_blocks_apply_then_refreshes_only_affected_rows_without_a_new_scan(self):
+        self.scan(["Elder Mira arrives", "Other row"])
+        self.start()
+        before = self.hashes()
+        plan_id = self.plan["scanPlanId"]
+        glossary = [{"source": "Elder Mira", "target": "장로 미라", "mode": "translate", "note": "", "caseSensitive": False}]
+        self.ok("glossary.set", scope="world", world=str(self.world), entries=glossary)
+        page = self.page()
+        self.assertEqual(page["meta"]["glossaryStaleCount"], 1)
+        self.assertEqual([row["source"] for row in page["rows"] if row["glossaryStale"]], ["Elder Mira arrives"])
+        refused = self.call("translate.apply", **self.identity)
+        self.assertEqual(refused["error"]["code"], "GLOSSARY_CHANGED")
+        self.assertEqual(self.hashes(), before)
+        self.assertFalse(backup_store(self.world, self.data).exists())
+        self.calls.clear()
+        self.behavior = lambda values: {key: "장로 미라 등장" for key in values}
+        refreshed = self.ok("translate.retry_failed", scanPlanId=plan_id, refreshGlossary=True, apiKey="synthetic-test-key")
+        self.assertEqual(refreshed["status"], "awaiting_review")
+        self.assertEqual(self.calls, [["Elder Mira arrives"]])
+        self.assertEqual(self.page()["meta"]["glossaryStaleCount"], 0)
+        self.assertEqual(self.job()["translation_cache"]["Other row"], "번역 Other row")
+        self.assertEqual(self.hashes(), before)
+        self.assertTrue(entry._load_scan_plan(self.data, plan_id))
+        self.ok("translate.apply", **self.identity)
+        self.assertEqual(self.written(), ["장로 미라 등장", "번역 Other row"])
+
+    def test_settings_glossary_edit_and_removal_are_guarded_in_the_same_session(self):
+        glossary = [{"source": "Elder Mira", "target": "장로 미라", "mode": "translate", "note": "", "caseSensitive": False}]
+        self.settings(glossary=glossary)
+        self.scan(["Elder Mira"])
+        self.behavior = lambda values: {key: "장로 미라" for key in values}
+        self.start()
+        before = self.hashes()
+        self.settings(glossary=[])
+        self.assertEqual(self.call("translate.apply", **self.identity)["error"]["code"], "GLOSSARY_CHANGED")
+        self.assertEqual(self.page()["meta"]["glossaryStaleCount"], 1)
+        self.assertEqual(self.hashes(), before)
+        self.behavior = lambda values: {key: "미라 장로" for key in values}
+        self.ok("translate.retry_failed", scanPlanId=self.plan["scanPlanId"], apiKey="synthetic-test-key")
+        self.assertEqual(self.page()["meta"]["glossaryStaleCount"], 0)
+        self.ok("translate.apply", **self.identity)
+        self.assertEqual(self.written(), ["미라 장로"])
+
+    def test_legacy_job_without_glossary_snapshot_refuses_removal(self):
+        self.settings(glossary=[{"source": "Elder Mira", "target": "미라"}])
+        self.scan(["Elder Mira"])
+        self.behavior = lambda values: {key: "미라" for key in values}
+        self.start()
+        job = self.job()
+        job["resume"].pop("glossary_hash")
+        job["resume"].pop("glossary_row_hashes")
+        entry._checkpoint_path(self.data, self.plan["scanPlanId"]).write_text(json.dumps(job))
+        self.settings(glossary=[])
+        self.assertEqual(self.call("translate.apply", **self.identity)["error"]["code"], "GLOSSARY_CHANGED")
+
+    def test_glossary_edit_before_reapply_refuses_before_any_restore(self):
+        self.scan(["Elder Mira"])
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        before = self.hashes()
+        self.ok("glossary.set", scope="global", entries=[{"source": "Elder Mira", "target": "미라", "mode": "translate"}])
+        with patch.object(entry, "_restore_backup", side_effect=AssertionError("no restore before glossary check")):
+            refused = self.call("translate.reapply", **self.identity)
+        self.assertEqual(refused["error"]["code"], "GLOSSARY_CHANGED")
+        self.assertEqual(self.hashes(), before)
+        self.behavior = lambda values: {key: "미라" for key in values}
+        self.ok("translate.retry_failed", scanPlanId=self.plan["scanPlanId"], refreshGlossary=True, apiKey="synthetic-test-key")
+        self.assertTrue(self.page()["meta"]["glossaryRefreshed"])
+        self.ok("translate.reapply", **self.identity)
+        self.assertEqual(self.written(), ["미라"])
+
+    def test_unused_glossary_edit_does_not_block_apply_and_mismatch_requires_warning_acknowledgment(self):
+        self.scan(["Elder Mira"])
+        self.start()
+        self.ok("glossary.set", scope="global", entries=[{"source": "Unused", "target": "미사용"}])
+        self.assertEqual(self.page()["meta"]["glossaryStaleCount"], 0)
+        self.ok("translate.apply", **self.identity)
+        self.scan(["Elder Mira"])
+        self.ok("glossary.set", scope="global", entries=[{"source": "Elder Mira", "target": "미라"}])
+        self.start()
+        before = self.hashes()
+        self.assertEqual(self.page(state="glossary_mismatch")["total"], 1)
+        self.assertEqual(self.call("translate.apply", **self.identity)["error"]["code"], "GLOSSARY_MISMATCH_UNCONFIRMED")
+        self.assertEqual(self.hashes(), before)
+        self.ok("translate.apply", **self.identity, acknowledgeGlossaryMismatch=True)
+
+    def test_malformed_glossary_requests_are_atomically_rejected(self):
+        self.ok("glossary.set", scope="global", entries=[{"source": "Mira", "target": "미라"}])
+        saved = load_user_settings(self.data)
+        for scope in [None, {}, [], True, "unknown"]:
+            refused = self.call("glossary.set", scope=scope, entries=[])
+            self.assertEqual(refused["error"]["code"], "INVALID_REQUEST")
+        for entries in [None, {}, "wrong", [None], [{"source": "Mira", "target": "미라", "mode": []}], [{"source": "Mira", "target": "미라", "caseSensitive": "false"}]]:
+            refused = self.call("glossary.set", scope="global", entries=entries)
+            self.assertEqual(refused["error"]["code"], "GLOSSARY_INVALID")
+            self.assertIn("rows", refused["error"]["details"])
+        self.assertEqual(load_user_settings(self.data), saved)
+
     def test_manual_only_still_awaits_review_by_default(self):
         self.scan()
         before = self.hashes()
@@ -151,7 +249,7 @@ class ReviewApplyTests(unittest.TestCase):
         self.assertEqual(page["total"], 4)
         self.assertEqual(len(page["rows"]), 2)
         self.assertTrue(page["hasMore"])
-        self.assertEqual(page["counts"], {"all": 4, "translated": 1, "failed": 1, "kept": 1, "edited": 1, "unsent": 0, "errored": 1})
+        self.assertEqual(page["counts"], {"all": 4, "translated": 1, "failed": 1, "kept": 1, "edited": 1, "unsent": 0, "errored": 1, "glossary_mismatch": 0})
         for state, expected in {"translated": "Alpha", "failed": "Beta", "kept": "Gamma", "edited": "Delta"}.items():
             row = self.page(state=state)["rows"]
             self.assertEqual(len(row), 1)

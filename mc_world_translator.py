@@ -560,6 +560,10 @@ class BatchTranslator:
         self.failed: dict[str, str] = {}
         self.failed_codes: dict[str, str] = {}
         runtime = config.get("runtime") or {}
+        from mwt.glossary import normalize_entries
+
+        self.glossary_entries = normalize_entries(runtime.get("glossary_entries") or [], field="runtime glossary")
+        self.glossary_mismatches: set[str] = set(runtime.get("initial_glossary_mismatches") or [])
         self.max_cost_usd = max(0.0, float(runtime.get("max_cost_usd") or 0))
         self.price = runtime.get("price") if isinstance(runtime.get("price"), dict) else None
         self.consecutive_failures = 0
@@ -611,7 +615,9 @@ class BatchTranslator:
         if self.cancel_check is not None and self.cancel_check():
             raise TranslationCancelled("Translation was cancelled by the user.")
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, glossary_entries: list[dict[str, Any]] | None = None, *, reminder: bool = False) -> str:
+        from mwt.glossary import prompt_block
+
         prompt_config = self.config["prompt"]
         if prompt_config["custom_system_prompt"]:
             base = prompt_config["custom_system_prompt"].strip()
@@ -623,10 +629,57 @@ class BatchTranslator:
         if extra:
             base = f"{base}\n\n[추가 스타일 지시]\n{extra}"
 
-        return (
+        base = (
             f"{base}\n\n"
             "반드시 JSON 형식으로 반환해라. 키(Key)는 그대로 두고 값(Value)만 번역해라."
         )
+        return f"{base}{prompt_block(glossary_entries or [], reminder=reminder)}"
+
+    def _apply_glossary_check(self, texts: list[str], answers: dict[str, str]) -> dict[str, str]:
+        """Retry only rows that violate a matching term, once, without exposing terms in events."""
+        from mwt.glossary import contains_term, matching_entries, output_matches
+        from mwt.tokens import _without_trailing_reset, tokens_preserved
+
+        batch_entries = matching_entries(texts, self.glossary_entries)
+        for text in texts:
+            matched = [entry for entry in batch_entries if contains_term(text, entry)]
+            if not matched:
+                self.glossary_mismatches.discard(text)
+                continue
+            answer = answers.get(text, text)
+            if output_matches(text, answer, matched):
+                self.glossary_mismatches.discard(text)
+                continue
+            try:
+                self.ensure_not_cancelled()
+                self.throttle(1)
+                self.ensure_not_cancelled()
+                self._check_budget()
+                retry = self.client.translate_mapping(
+                    {"0": text},
+                    system_prompt=self.system_prompt(matched, reminder=True),
+                    temperature=float(self.config["temperature"]),
+                )
+                retried = retry.get("0", "")
+            except BudgetStopped:
+                # Preserve this batch's first answer; the ordinary post-batch budget check will
+                # checkpoint it and stop before another provider request is sent.
+                self.glossary_mismatches.add(text)
+                continue
+            except TranslationCancelled:
+                raise
+            except Exception:
+                # The first answer is still useful. A failed second request is reported as an
+                # unresolved glossary mismatch, while the ordinary run status handles its cost.
+                self.glossary_mismatches.add(text)
+                continue
+            if (isinstance(retried, str) and output_matches(text, retried, matched)
+                    and tokens_preserved(text, _without_trailing_reset(text, retried))):
+                answers[text] = retried
+                self.glossary_mismatches.discard(text)
+            else:
+                self.glossary_mismatches.add(text)
+        return answers
 
     def spent_usd(self) -> float | None:
         """Cost of this run so far: what the provider reported, else tokens at the model's list price."""
@@ -785,9 +838,12 @@ class BatchTranslator:
                 self.ensure_not_cancelled()
                 self._check_budget()
                 self.emit("translation_batch_start", batch_size=len(texts), attempt=attempt, max_attempts=max_retries)
+                from mwt.glossary import matching_entries
+
+                relevant_glossary = matching_entries(texts, self.glossary_entries)
                 parsed = self.client.translate_mapping(
                     payload,
-                    system_prompt=self.system_prompt(),
+                    system_prompt=self.system_prompt(relevant_glossary),
                     temperature=float(self.config["temperature"]),
                 )
                 self.emit("translation_batch_done", batch_size=len(texts), attempt=attempt)
@@ -796,10 +852,11 @@ class BatchTranslator:
                     for text in texts:
                         self.failed.pop(text, None)
                         self.failed_codes.pop(text, None)
-                return {
+                answers = {
                     text: parsed.get(str(i), text)
                     for i, text in enumerate(texts)
                 }
+                return self._apply_glossary_check(texts, answers)
             except (TranslationCancelled, ProviderUnavailable):
                 raise
             except Exception as exc:
@@ -839,9 +896,26 @@ class WorldTranslator(TextExtractionMixin):
         progress_callback: Any = None,
         cancel_check: Any = None,
     ) -> None:
-        self.config = config
+        self.config = dict(config)
         self.scan_config = config["scan"]
-        self.runtime_config = config["runtime"]
+        self.runtime_config = dict(config["runtime"])
+        self.config["runtime"] = self.runtime_config
+        from mwt.glossary import entries_hash, normalize_entries
+
+        if "glossary_entries" in self.runtime_config:
+            glossary_entries = normalize_entries(self.runtime_config.get("glossary_entries") or [], field="runtime glossary")
+        else:
+            from mwt.userdata import load_user_settings
+
+            try:
+                data_dir = self.runtime_config.get("data_dir")
+                glossary_entries = normalize_entries(
+                    load_user_settings(Path(data_dir) if data_dir else None).get("glossary", []), field="saved glossary"
+                )
+            except ValueError:
+                glossary_entries = []
+        self.runtime_config["glossary_entries"] = glossary_entries
+        self.runtime_config["glossary_hash"] = entries_hash(glossary_entries)
         self.external_pack_inputs: dict[str, str] = {}
         self.external_pack_parents: dict[str, str] = {}
         self.component_prefixes = tuple(self.scan_config["component_translate_key_prefixes"])
@@ -867,6 +941,7 @@ class WorldTranslator(TextExtractionMixin):
         self.applied: dict[str, Any] | None = None
         self.stop_code: str = ""
         self._adopted_failures: dict[str, Any] = {}
+        self._adopted_glossary_mismatches: set[str] = set()
         self._run_backup = None
         self._write_lock = None
         self._session_locks = None
@@ -880,6 +955,7 @@ class WorldTranslator(TextExtractionMixin):
             "resource_packs": [],
             "errors": [],
             "warnings": [],
+            "price_source": (self.runtime_config.get("price") or {}).get("source"),
         }
         self.load_checkpoint()
         adopted = self.runtime_config.get("adopt_checkpoint")
@@ -892,7 +968,7 @@ class WorldTranslator(TextExtractionMixin):
             else:
                 self.edits[source] = text
         self.translator = None if config["dry_run"] else BatchTranslator(
-            config,
+            self.config,
             progress_callback=lambda event: self.emit(
                 event["event"], **{key: value for key, value in event.items() if key != "event"}
             ),
@@ -904,6 +980,7 @@ class WorldTranslator(TextExtractionMixin):
                 if isinstance(info, dict):
                     self.translator.failed[text] = str(info.get("detail") or "")
                     self.translator.failed_codes[text] = str(info.get("reason") or "unknown")
+            self.translator.glossary_mismatches.update(self._adopted_glossary_mismatches)
 
     def emit(self, event: str, **payload: Any) -> None:
         if self.progress_callback is not None:
@@ -946,6 +1023,7 @@ class WorldTranslator(TextExtractionMixin):
                 "scan_plan_id": str(self.runtime_config.get("scan_plan_id") or ""),
                 "adapter_version": 1,
                 "translation_strategy_version": 2,
+                "glossary_hash": str(self.runtime_config.get("glossary_hash") or ""),
             },
         }
         encoded = json.dumps(relevant_config, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -953,6 +1031,7 @@ class WorldTranslator(TextExtractionMixin):
 
     def checkpoint_payload(self) -> dict[str, Any]:
         from mwt.safety import world_fingerprint
+        from mwt.glossary import row_hashes
 
         self.refresh_report_counts()
         return {
@@ -966,6 +1045,8 @@ class WorldTranslator(TextExtractionMixin):
             "resume": {
                 "scan_plan_id": str(self.runtime_config.get("scan_plan_id") or ""),
                 "translation_settings_fingerprint": str(self.runtime_config.get("translation_settings_fingerprint") or ""),
+                "glossary_hash": self.runtime_config["glossary_hash"],
+                "glossary_row_hashes": row_hashes(list(self.candidate_texts), self.runtime_config["glossary_entries"]),
                 "expected_world_fingerprint": str(self.runtime_config.get("expected_world_fingerprint") or ""),
                 "excluded_candidate_ids": list(self.runtime_config.get("excluded_candidate_ids") or []),
                 "manual_overrides": dict(self.scan_config.get("overrides") or {}),
@@ -982,6 +1063,7 @@ class WorldTranslator(TextExtractionMixin):
             "usage_total": self.usage_total(),
             "stop_code": self.stop_code,
             "applied": self.applied,
+            "glossary_refreshed": bool(self.runtime_config.get("glossary_refreshed")),
             "saved_at": time.time(),
         }
 
@@ -999,6 +1081,10 @@ class WorldTranslator(TextExtractionMixin):
         self.applied = checkpoint.get("applied") or None
         self.stop_code = str(checkpoint.get("stop_code") or "")
         self._adopted_failures = dict(checkpoint.get("failures") or {})
+        mismatch_rows = ((checkpoint.get("report") or {}).get("glossary_mismatches") or [])
+        self._adopted_glossary_mismatches = {
+            str(row.get("source")) for row in mismatch_rows if isinstance(row, dict) and isinstance(row.get("source"), str)
+        }
         if keep_report and isinstance(checkpoint.get("report"), dict):
             self.report.update(checkpoint["report"])
             self.completed_region_files = set(checkpoint.get("completed_region_files") or [])
@@ -1052,6 +1138,10 @@ class WorldTranslator(TextExtractionMixin):
         self.applied = checkpoint.get("applied") or None
         self.stop_code = str(checkpoint.get("stop_code") or "")
         self._adopted_failures = dict(checkpoint.get("failures") or {})
+        mismatch_rows = ((checkpoint.get("report") or {}).get("glossary_mismatches") or [])
+        self._adopted_glossary_mismatches = {
+            str(row.get("source")) for row in mismatch_rows if isinstance(row, dict) and isinstance(row.get("source"), str)
+        }
         saved_report = checkpoint.get("report")
         if isinstance(saved_report, dict):
             self.report.update(saved_report)
@@ -1742,6 +1832,7 @@ class WorldTranslator(TextExtractionMixin):
             translator.cache.pop(text, None)
             translator.failed.pop(text, None)
             translator.failed_codes.pop(text, None)
+            translator.glossary_mismatches.discard(text)
         batch_size = max(1, int(self.config["batch_size"]))
         self.emit(
             "phase_start",
@@ -1844,6 +1935,19 @@ class WorldTranslator(TextExtractionMixin):
             }
             for text, reason in list(self.translator.failed.items())[:20]
         ]
+        from mwt.glossary import output_matches
+        mismatches = sorted(text for text in ordered if text not in failed and text in cache
+                            and not output_matches(text, self.final_translations.get(text, cache[text]), self.translator.glossary_entries))
+        self.translator.glossary_mismatches = set(mismatches)
+        self.report["glossary_mismatch_count"] = len(mismatches)
+        self.report["glossary_mismatches"] = [
+            {"source": text, "reason": "glossary_mismatch"} for text in mismatches
+        ]
+        self.report["warnings"] = [
+            warning for warning in self.report.get("warnings", []) if warning.get("code") != "GLOSSARY_MISMATCH"
+        ]
+        if mismatches:
+            self.report["warnings"].append({"code": "GLOSSARY_MISMATCH", "count": len(mismatches)})
         # Strings no request has answered yet (a stop before the end): neither translated nor failed.
         pending = sum(1 for text in ordered if text not in failed and text not in cache)
         return {

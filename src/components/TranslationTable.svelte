@@ -35,10 +35,11 @@
     translated: 'translationReview.state.translated.label',
     failed: 'translationReview.state.failed.label',
     kept: 'translationReview.state.kept.label',
-    edited: 'translationReview.state.edited.label'
+    edited: 'translationReview.state.edited.label',
+    glossary_mismatch: 'translationReview.state.glossaryMismatch'
   };
   const statusPill: Record<TranslationRow['status'], string> = {
-    translated: 'pill-success', failed: 'pill-danger', kept: '', edited: 'pill-accent'
+    translated: 'pill-success', failed: 'pill-danger', kept: '', edited: 'pill-accent', glossary_mismatch: 'pill-warning'
   };
 
   /** Scroll to a row index and move the keyboard focus to it. */
@@ -138,9 +139,10 @@
               <span class="pill {statusPill[shown.status]}">
                 {#if shown.status === 'translated'}<Icon name="check" size={12} />
                 {:else if shown.status === 'failed'}<Icon name="alert-circle" size={12} />
+                {:else if shown.status === 'glossary_mismatch'}<Icon name="alert-triangle" size={12} />
                 {:else if shown.status === 'edited'}<Icon name="pencil" size={12} />
                 {:else}<Icon name="minus" size={12} />{/if}
-                {t(statusKey[shown.status])}
+                {row.glossaryStale ? t('glossary.needsCheck') : t(statusKey[shown.status])}
               </span>
               {#if problem}<span class="warn"><Icon name="alert-triangle" size={12} /> {t('translationReview.fixThis')}</span>{/if}
             </td>

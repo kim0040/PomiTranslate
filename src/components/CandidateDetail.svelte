@@ -5,7 +5,7 @@
   import { describeDetail, describeLocation, formatNumber, rawLocation, teleportCommand } from '../lib/format';
   import Icon from './Icon.svelte';
 
-  let { candidate, onClose, showHeading = true }: { candidate: Candidate | null; onClose?: () => void; showHeading?: boolean } = $props();
+  let { candidate, onClose, onQuickAdd, showHeading = true }: { candidate: Candidate | null; onClose?: () => void; onQuickAdd?: (source: string, target: string) => void; showHeading?: boolean } = $props();
 
   const included = $derived(candidate ? !app.excluded.has(candidate.id) : false);
   const manual = $derived(candidate ? app.manualTranslation(candidate) : '');
@@ -44,6 +44,11 @@
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
       <p class="source" lang="en">{candidate.source}</p>
+      {#if onQuickAdd}
+        <button type="button" class="btn btn-secondary btn-sm glossary-add" onclick={() => onQuickAdd(candidate.source, manual)}>
+          <Icon name="plus" size={14} /> {t('glossary.quickAdd')}
+        </button>
+      {/if}
       {#if tokens.length}
         <p class="tokens" role="note">
           {#each tokens as token (token)}<code>{token}</code>{/each}

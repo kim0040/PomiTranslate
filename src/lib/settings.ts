@@ -25,6 +25,8 @@ export function copySettings(value: Settings): Settings {
     max_file_write_retries: finite(value.max_file_write_retries, 2),
     continue_on_file_error: value.continue_on_file_error !== false,
     source_overrides: { ...value.source_overrides },
+    glossary: (value.glossary ?? []).map((entry) => ({ ...entry })),
+    custom_prices: Object.fromEntries(Object.entries(value.custom_prices ?? {}).map(([key, price]) => [key, { ...price }])),
     concurrency: finite(value.concurrency, 4),
     resource_pack_enabled: !!value.resource_pack_enabled,
     resource_pack_options: resourcePackOptions(value.resource_pack_options),
@@ -79,6 +81,8 @@ export function publicSettingsForExport(settings: Settings): Settings {
     rpm_limit: settings.rpm_limit, tpm_limit: settings.tpm_limit, max_batch_retries: settings.max_batch_retries,
     max_file_write_retries: settings.max_file_write_retries, continue_on_file_error: settings.continue_on_file_error,
     source_overrides: { ...settings.source_overrides },
+    glossary: (settings.glossary ?? []).map((entry) => ({ ...entry })),
+    custom_prices: Object.fromEntries(Object.entries(settings.custom_prices ?? {}).map(([key, price]) => [key, { ...price }])),
     concurrency: settings.concurrency, resource_pack_enabled: settings.resource_pack_enabled, resource_pack_options: resourcePackOptions(settings.resource_pack_options),
     skip_target_language_text: settings.skip_target_language_text, scan_options: normalizedScanOptions(settings.scan_options),
     ui_language: settings.ui_language, last_world_dir: settings.last_world_dir

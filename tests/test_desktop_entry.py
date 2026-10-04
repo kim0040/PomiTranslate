@@ -396,6 +396,7 @@ def main() -> None:
                     {"v": 1, "id": "rescan-same-scope", "type": "scan.start", "payload": {"worldDir": str(world)}},
                 )
                 assert rescan["payload"]["scanPlanId"] == scan["payload"]["scanPlanId"]
+                last_scan = rescan["payload"]["lastScan"]
                 exchange(
                     proc,
                     {

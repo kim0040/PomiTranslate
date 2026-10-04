@@ -79,7 +79,8 @@
     max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false,
     skip_target_language_text: true, ui_language: previewLocale, last_world_dir: worldDir,
     // `review=0` keeps the old single-pass behaviour for the specs written before review-before-apply.
-    review_before_apply: new URLSearchParams(location.search).get('review') !== '0', max_cost_usd: 0
+    review_before_apply: new URLSearchParams(location.search).get('review') !== '0', max_cost_usd: 0,
+    glossary: [], custom_prices: {}
   };
   // Saved manual translations from an earlier session, in the settings object format.
   if (new URLSearchParams(location.search).get('sourceOverrides') === '1') settings.source_overrides = { 'Welcome to Roguefire': '환영합니다', 'You are not ready yet.': '아직 준비가 안 됐군.' };
@@ -190,11 +191,13 @@
     else if (kind === 'review') {
       const count = Number(query.get('fail') || 0);
       rows.slice(0, count).forEach((row, index) => failRow(row, query.get('failCode') || failCodes[index % failCodes.length]));
+      if ((scenario() === 'glossary-mismatch' || query.get('glossaryMismatch') === '1') && rows[0]) rows[0].status = 'glossary_mismatch';
     }
     job = {
       kind, rows, status: kind === 'review' ? 'awaiting_review' : kind === 'success' ? 'completed' : kind, excluded: [...skip],
       applied: kind === 'success' || kind === 'partial', backupSetId: kind === 'success' || kind === 'partial' ? backups[0].backupSetId : '',
-      requests: 0, usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }
+      requests: 0, usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true },
+      glossaryHashes: Object.fromEntries(rows.map((row) => [row.source, glossaryHash(row.source)]))
     };
     return job;
   }
@@ -205,17 +208,33 @@
     // The result scenarios describe a job over all six sentences; the others leave the command text out.
     return makeJob(kind, current.startsWith('result-') ? [] : excluded ?? (['scanned', 'review', 'run', 'run-progress', 'dark-review'].includes(current) ? ['tellraw'] : []));
   }
+  function effectiveGlossary() {
+    const worldEntries = window.__pomiWorldGlossaries?.[worldDir] || [];
+    return [...(settings.glossary || []).filter((entry) => !worldEntries.some((other) =>
+      entry.source === other.source || ((!entry.caseSensitive || !other.caseSensitive) && entry.source.toLowerCase() === other.source.toLowerCase())
+    )), ...worldEntries];
+  }
+  function termMatches(text, entry) {
+    const source = entry.source;
+    if (!source) return false;
+    if (/[\u3040-\u30ff\u3400-\u9fff]/.test(source)) return (entry.caseSensitive ? text : text.toLowerCase()).includes(entry.caseSensitive ? source : source.toLowerCase());
+    const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?<!\\w)${escaped}(?!\\w)`, entry.caseSensitive ? '' : 'i').test(text);
+  }
+  function glossaryHash(source) { return JSON.stringify(effectiveGlossary().filter((entry) => termMatches(source, entry))); }
+  function glossaryStale(row) { return row.status !== 'failed' && job.glossaryHashes?.[row.source] !== glossaryHash(row.source); }
   const viewRow = (row, drafts = new Set()) => {
     const edited = row.edit !== undefined || drafts.has(row.id);
     return {
       id: row.id, source: row.source, kind: row.kind, occurrences: row.occurrences, ai: row.status === 'failed' ? '' : row.ai,
       translated: row.edit !== undefined ? row.edit : row.status === 'failed' ? '' : row.ai,
+      glossaryStale: glossaryStale(row),
       status: edited ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
       ...(row.status === 'failed' && row.edit === undefined ? { reason: row.reason, detail: row.detail } : {})
     };
   };
   function jobCounts(drafts) {
-    const counts = { all: 0, translated: 0, failed: 0, kept: 0, edited: 0, unsent: 0, errored: 0 };
+    const counts = { all: 0, translated: 0, failed: 0, kept: 0, edited: 0, unsent: 0, errored: 0, glossary_mismatch: 0 };
     for (const row of job.rows) {
       counts.all++;
       const view = viewRow(row, drafts);
@@ -242,16 +261,21 @@
     const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
     return {
       rows: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, counts: jobCounts(drafts),
-      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests },  retryEstimate: retryEstimate() }
+      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests }, retryEstimate: retryEstimate(),
+        glossaryActive: effectiveGlossary().length > 0, glossaryStaleCount: job.rows.filter(glossaryStale).length,
+        glossaryRefreshEstimate: job.rows.some(glossaryStale) ? { ...estimate, cost: { low: 0.00004, high: 0.00008 } } : null, glossaryRefreshed: !!job.glossaryRefreshed }
     };
   }
   function jobResult(status, extra = {}) {
     const unsent = job.rows.filter(isUnsent);
     const failed = job.rows.filter((row) => row.status === 'failed' && !isUnsent(row));
+    const mismatchRows = job.rows.filter((row) => row.status === 'glossary_mismatch').map((row) => ({ source: row.source, reason: 'glossary_mismatch' }));
     const unchanged = job.rows.filter((row) => row.status === 'translated' && row.ai === row.source && row.edit === undefined).length;
     return {
       status, candidateCount: candidates.length, changedFileCount: job.applied ? 8 : 0, providerRequests: 0, backupSetId: job.applied ? job.backupSetId : '', preTranslate: '', localhostServer: false,
-      errors: [], warnings: [],
+      errors: [], warnings: mismatchRows.length ? [{ code: 'GLOSSARY_MISMATCH', count: mismatchRows.length }] : [],
+      glossaryMismatchCount: mismatchRows.length, glossaryMismatches: mismatchRows,
+      priceSource: settings.custom_prices?.[`${settings.provider}/${settings.model}`] ? 'user' : null,
       translation: { unique: job.rows.length, translated: job.rows.length - failed.length - unsent.length - unchanged, failed: failed.length, kept_original: 0, unchanged, pending: unsent.length },
       translationFailures: failed.slice(0, 20).map((row) => ({ source: row.source, reason: row.reason, detail: row.detail })),
       translationSamples: job.rows.filter((row) => row.status !== 'failed').slice(0, 12).map((row) => ({ source: row.source, translated: row.edit ?? row.ai })), keptOriginalSamples: [],
@@ -344,13 +368,18 @@
     const body = request.payload || {};
     // A key (draft or stored) is recorded only as a flag and its length, never as text.
     const { apiKey: _hidden, draftApiKey: _draft, ...loggable } = body;
+    const loggedPayload = type.startsWith('glossary.')
+      ? { scope: body.scope, hasWorld: typeof body.world === 'string' && !!body.world, count: Array.isArray(body.entries) ? body.entries.length : undefined }
+      : type === 'settings.set'
+        ? { ...Object.fromEntries(Object.entries(loggable).filter(([key]) => !['glossary', 'customPrices'].includes(key))), glossaryCount: Array.isArray(body.glossary) ? body.glossary.length : undefined, customPriceCount: Object.keys(body.customPrices || {}).length }
+        : JSON.parse(JSON.stringify(loggable));
     window.__pomiRequests.push({
       type, provider: body.provider, publicCatalog: body.publicCatalog, connectionCheck: body.connectionCheck,
       baseUrl: body.baseUrl, wireFormat: body.wireFormat,
       hasDraftKey: typeof body.draftApiKey === 'string' && body.draftApiKey.length > 0,
       draftKeyLength: typeof body.draftApiKey === 'string' ? body.draftApiKey.length : undefined,
       hasApiKey: typeof body.apiKey === 'string' && body.apiKey.length > 0, apiKeyLength: typeof body.apiKey === 'string' ? body.apiKey.length : undefined,
-      payload: JSON.parse(JSON.stringify(loggable))
+      payload: loggedPayload
     });
     const current = scenario();
     if (type === 'app.bootstrap') {
@@ -389,8 +418,8 @@
       }
       if (new URLSearchParams(location.search).get('saveFails') === '1') return { v: 1, id: request.id, type: 'response.error', error: { code: 'SETTINGS_FAILED', message: 'Synthetic save failure' } };
       // What a save carried, without the key, so a test can check the exact payload.
-      window.__pomiSettingsSaves.push(Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'apiKey')));
-      const aliases = { reviewBeforeApply: 'review_before_apply', maxCostUsd: 'max_cost_usd', openrouterReasoning: 'openrouter_reasoning', externalResourcePackPaths: 'external_resource_pack_paths', resourcePackOptions: 'resource_pack_options', sourceOverrides: 'source_overrides', continueOnFileError: 'continue_on_file_error', maxFileWriteRetries: 'max_file_write_retries', targetLanguage: 'target_language', uiLanguage: 'ui_language', baseUrl: 'base_url', wireFormat: 'wire_format', resourcePackEnabled: 'resource_pack_enabled', skipTargetLanguageText: 'skip_target_language_text', scanOptions: 'scan_options' };
+      window.__pomiSettingsSaves.push({ ...Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'apiKey' && !['glossary', 'customPrices'].includes(key))), glossaryCount: Array.isArray(body.glossary) ? body.glossary.length : undefined, customPriceCount: Object.keys(body.customPrices || {}).length });
+      const aliases = { reviewBeforeApply: 'review_before_apply', maxCostUsd: 'max_cost_usd', customPrices: 'custom_prices', openrouterReasoning: 'openrouter_reasoning', externalResourcePackPaths: 'external_resource_pack_paths', resourcePackOptions: 'resource_pack_options', sourceOverrides: 'source_overrides', continueOnFileError: 'continue_on_file_error', maxFileWriteRetries: 'max_file_write_retries', targetLanguage: 'target_language', uiLanguage: 'ui_language', baseUrl: 'base_url', wireFormat: 'wire_format', resourcePackEnabled: 'resource_pack_enabled', skipTargetLanguageText: 'skip_target_language_text', scanOptions: 'scan_options' };
       for (const [key, value] of Object.entries(body)) {
         if (key !== 'apiKey' && key !== 'credentialMode') settings[aliases[key] || key] = value;
       }
@@ -398,9 +427,33 @@
       if (body.apiKey) freshKeySaved = true;
       return ok(request, { settings: { ...settings }, apiKeyStored: !fresh || freshKeySaved, credentialMode: body.credentialMode || 'local' });
     }
+    if (type === 'glossary.get') {
+      const worldEntries = window.__pomiWorldGlossaries?.[body.world] || [];
+      const globalEntries = settings.glossary || [];
+      const effective = [...globalEntries];
+      for (const entry of worldEntries) {
+        for (let index = effective.length - 1; index >= 0; index--) {
+          const item = effective[index];
+          const exact = item.source === entry.source;
+          const insensitiveMatch = (!item.caseSensitive || !entry.caseSensitive) && item.source.toLocaleLowerCase() === entry.source.toLocaleLowerCase();
+          if (exact || insensitiveMatch) effective.splice(index, 1);
+        }
+        effective.push(entry);
+      }
+      return ok(request, { global: globalEntries, world: worldEntries, effective });
+    }
+    if (type === 'glossary.set') {
+      if (!Array.isArray(body.entries) || body.entries.length > 2000) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_INVALID', message: 'Invalid glossary entries', details: { rows: [] } } };
+      if (body.scope === 'global') settings.glossary = body.entries;
+      else {
+        if (!body.world) return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'A world folder is required' } };
+        window.__pomiWorldGlossaries = { ...(window.__pomiWorldGlossaries || {}), [body.world]: body.entries };
+      }
+      return ok(request, { scope: body.scope, entries: body.entries, count: body.entries.length });
+    }
     if (type === 'prefs.set') {
       window.__pomiPrefs = { ...(window.__pomiPrefs || {}), ...(body.prefs || {}) };
-      return ok(request, { prefs: { ...({ theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' }), ...window.__pomiPrefs } });
+      return ok(request, { prefs: { ...({ theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true }), ...window.__pomiPrefs } });
     }
     if (type === 'app.reset') {
       if (body.confirm !== 'reset') return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'Reset needs an explicit confirmation' } };
@@ -428,7 +481,9 @@
       if (new URLSearchParams(location.search).get('slowEstimate') === '1') await new Promise((resolve) => setTimeout(resolve, 600));
       const excluded = new Set([...(body.excludedCandidateIds || []), ...(body.overrideCandidateIds || [])]);
       const count = candidates.filter((row) => !excluded.has(row.id) && !settings.source_overrides?.[row.source]).length;
-      return ok(request, { ...estimate, candidateCount: count, requests: Math.ceil(count / 40) });
+      const userPrice = settings.custom_prices?.[`${settings.provider}/${settings.model}`];
+      const cost = userPrice ? { low: 0.0001 * (userPrice.input + userPrice.output), high: 0.0002 * (userPrice.input + userPrice.output) } : estimate.cost;
+      return ok(request, { ...estimate, priceSource: userPrice ? 'user' : estimate.priceSource, candidateCount: count, requests: Math.ceil(count / 40), cost });
     }
     if (type === 'candidates.page') return ok(request, filteredPage(body));
     if (type === 'provider.usage') return ok(request, { provider: 'openrouter', checkedAt: '2026-10-01T00:00:00Z', usage: 0.123456, byokUsage: 0, limit: null, limitRemaining: null });
@@ -450,7 +505,7 @@
         await new Promise((resolve) => setTimeout(resolve, 80));
       }
       const catalog = [
-        { id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash' },
+        { id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash', pricing_prompt: null, pricing_completion: null },
         { id: 'deepseek/deepseek-v4.1-flash', supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'high', supported_efforts: ['max', 'high', 'low'] } },
         { id: 'mandatory-fixture', reasoning: { mandatory: true, supported_efforts: ['high'] } },
         { id: 'google/gemini-2.5-flash-lite', display_name: 'Gemini 2.5 Flash Lite', pricing_prompt: '0.0000001', pricing_completion: '0.0000004', context_length: 1048576 },
@@ -527,6 +582,14 @@
       ]);
       await sleep(80);
       job.requests += 1;
+      const stale = job.rows.filter(glossaryStale);
+      for (const row of stale) {
+        row.ai = effectiveGlossary().filter((entry) => termMatches(row.source, entry)).reduce((answer, entry) =>
+          entry.mode === 'keep' ? answer : answer.replaceAll(entry.source, entry.target), row.source);
+        row.status = 'translated';
+      }
+      if (stale.length && job.applied) job.glossaryRefreshed = true;
+      job.glossaryHashes = Object.fromEntries(job.rows.map((row) => [row.source, glossaryHash(row.source)]));
       if (query.get('retryFail') !== '1') job.rows.forEach((row) => { if (row.status === 'failed' && row.edit === undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; } });
       job.status = 'awaiting_review';
       job.usage = { ...job.usage, prompt_tokens: job.usage.prompt_tokens + 120, completion_tokens: job.usage.completion_tokens + 40, cost: job.usage.cost + 0.00006 };
@@ -535,6 +598,8 @@
     if (type === 'translate.apply' || type === 'translate.reapply') {
       ensureJob(['tellraw']);
       const reapply = type === 'translate.reapply';
+      if (job.rows.some(glossaryStale)) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_CHANGED', message: 'Re-check glossary', recoverable: true } };
+      if (job.rows.some((row) => row.status === 'glossary_mismatch') && !body.acknowledgeGlossaryMismatch) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_MISMATCH_UNCONFIRMED', message: 'Review mismatches', recoverable: true } };
       if (!reapply && job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'ALREADY_APPLIED', message: 'Use reapply', recoverable: true } };
       if (reapply && !job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'NOTHING_TO_REAPPLY', message: 'Nothing to reapply', recoverable: true } };
       if (query.get('worldChanged') === '1' && reapply) return { v: 1, id: request.id, type: 'response.error', error: { code: 'WORLD_CHANGED_SINCE_APPLY', message: 'World changed', recoverable: true } };

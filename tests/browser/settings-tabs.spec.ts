@@ -338,7 +338,7 @@ test('the translation tab checks a typed key without saving it', async ({ page }
   await expect(page.getByText('API 키가 올바르지 않거나')).toHaveCount(0);
   await check.click();
   await expect(page.getByText('연결됨 · 모델 7개')).toBeVisible();
-  const lookups = (await page.evaluate(() => (window as unknown as { __pomiRequests: any[] }).__pomiRequests)).filter((request) => request.type === 'models.list');
+  const lookups = (await page.evaluate(() => (window as unknown as { __pomiRequests: any[] }).__pomiRequests)).filter((request) => request.type === 'models.list' && request.connectionCheck === true);
   expect(lookups.map((request) => [request.connectionCheck, request.hasDraftKey])).toEqual([[true, true], [true, true]]);
   expect(await requests(page, 'settings.set')).toHaveLength(0);
   // A saved key is checked without sending anything typed.

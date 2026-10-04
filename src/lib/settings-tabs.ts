@@ -12,6 +12,7 @@ type Field = keyof Settings;
  */
 const TAB_OF: Partial<Record<Field, SettingsTab>> = {
   provider: 'translate', model: 'translate', openrouter_reasoning: 'translate',
+  review_before_apply: 'translate', max_cost_usd: 'translate', glossary: 'translate', custom_prices: 'translate',
   target_language: 'translate', style_preset: 'translate', style_prompt: 'translate', custom_system_prompt: 'translate',
   resource_pack_enabled: 'scope', resource_pack_options: 'scope', external_resource_pack_paths: 'scope',
   skip_target_language_text: 'scope', source_overrides: 'scope',

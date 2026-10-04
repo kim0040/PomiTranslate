@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
-  import type { Candidate } from '../lib/api';
+  import type { Candidate, GlossaryEntry } from '../lib/api';
   import type { SortMode, StateFilter } from '../lib/candidates.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
@@ -9,6 +9,7 @@
   import CandidateDetail from '../components/CandidateDetail.svelte';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
+  import GlossarySheet from '../components/GlossarySheet.svelte';
 
   const source = app.candidates;
   let selected = $state<Candidate | null>(null);
@@ -28,6 +29,13 @@
   let workarea: HTMLElement | undefined = $state();
   let busyBulk = $state(false);
   let query = $state(source.query);
+  let glossaryOpen = $state(false);
+  let glossaryEntry = $state<GlossaryEntry | null>(null);
+
+  function openGlossary(sourceText = '', targetText = ''): void {
+    glossaryEntry = sourceText ? { source: sourceText, target: targetText, mode: 'translate', note: '', caseSensitive: false } : null;
+    glossaryOpen = true;
+  }
 
   async function setWide(next: boolean): Promise<void> {
     if (next === wide) return;
@@ -170,6 +178,9 @@
         <option value="kind">{t('review.sort')}: {t('review.sort.kind')}</option>
       </select>
     </label>
+    <button type="button" class="btn btn-secondary btn-sm" disabled={!app.worldDir} onclick={() => openGlossary()}>
+      <Icon name="book" size={15} /> {t('glossary.worldButton')}
+    </button>
   </div>
 
   <div class="chips" role="group" aria-label={t('scan.summary.kinds')}>
@@ -186,11 +197,11 @@
   <div class="workarea" class:wide class:compact={workareaWidth < PANEL_FULL} class:empty-compact={!selected && workareaWidth < PANEL_FULL} bind:this={workarea}>
     <div class="tablewrap"><CandidateTable selectedId={selected?.id ?? ''} onSelect={select} /></div>
     {#if wide && selected}
-      <div class="detailwrap"><CandidateDetail candidate={selected} /></div>
+      <div class="detailwrap"><CandidateDetail candidate={selected} onQuickAdd={openGlossary} /></div>
     {:else if wide && workareaWidth < PANEL_FULL}
       <div class="detail-hint" role="status" title={t('review.detail.emptyShort')}><Icon name="list" size={17} /><span class="sr-only">{t('review.detail.emptyShort')}</span></div>
     {:else if wide}
-      <div class="detailwrap"><CandidateDetail candidate={null} /></div>
+      <div class="detailwrap"><CandidateDetail candidate={null} onQuickAdd={openGlossary} /></div>
     {/if}
   </div>
 
@@ -213,10 +224,12 @@
 
 {#if !wide && selected && detailOpen}
   <Dialog title={t('review.detail.title')} onClose={() => (detailOpen = false)}>
-    <CandidateDetail candidate={selected} showHeading={false} />
+    <CandidateDetail candidate={selected} onQuickAdd={openGlossary} showHeading={false} />
     {#snippet actions()}<button type="button" class="btn btn-primary" onclick={() => (detailOpen = false)}>{t('common.close')}</button>{/snippet}
   </Dialog>
 {/if}
+
+<GlossarySheet bind:open={glossaryOpen} world={app.worldDir} initialEntry={glossaryEntry} initialScope="world" />
 
 <style>
   .review { animation: pomi-enter var(--dur-base) var(--ease-out) backwards; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: var(--space-3); height: 100%; min-height: 460px; }
