@@ -88,8 +88,9 @@
 /* Page structure */
 /* A screen settles in instead of snapping: a short fade with a 4px rise, the same for every screen. */
 .page { animation: pomi-enter var(--dur-base) var(--ease-out) backwards; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-content: start; min-width: 0; }
-/* Content keeps a readable measure; bars pinned to the pane still span the whole window. */
-.page > * { min-width: 0; max-width: 1120px; }
+/* Content keeps a readable measure, centred once the window is wider than it; bars pinned to the
+   pane still span the whole window. */
+.page > * { min-width: 0; max-width: 1120px; width: 100%; margin-inline: auto; }
 .page > .action-bar { max-width: none; }
 .page-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-1); min-width: 0; }
 .page-head.with-actions { grid-template-columns: minmax(0, 1fr) auto; align-items: end; column-gap: var(--space-4); }

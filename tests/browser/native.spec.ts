@@ -22,8 +22,9 @@ test('review keeps the source column readable at the default window size with a 
   await expect(page.locator('#manual-translation')).toBeVisible();
   for (const width of [1180, 1100, 1024]) {
     await page.setViewportSize({ width, height: 800 });
-    const source = await page.locator('td.c-source').first().evaluate((cell) => cell.getBoundingClientRect().width);
-    expect(source, `source column at ${width}px`).toBeGreaterThan(200);
+    // Columns follow the measured table width, which settles one frame after the resize.
+    await expect.poll(() => page.locator('td.c-source').first().evaluate((cell) => cell.getBoundingClientRect().width),
+      { message: `source column at ${width}px` }).toBeGreaterThan(200);
     await expect(page.locator('td.c-source').first()).toContainText('Welcome to Roguefire');
   }
 });

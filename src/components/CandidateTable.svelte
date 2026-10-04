@@ -204,26 +204,35 @@
       void openEditor(candidate);
     }
   }
+  // Which columns fit is decided from the measured width and the cells are left out entirely.
+  // Hiding cells of a fixed-layout table with CSS (container queries + display:none) makes WebKit,
+  // the engine of the macOS app, shrink the whole table instead of giving the space to the text.
+  let tableWidth = $state(0);
+  const showWhere = $derived(tableWidth === 0 || tableWidth > 800); // the source text keeps 200px+ beside it
+  const showKind = $derived(tableWidth === 0 || tableWidth > 480);
+  const showState = $derived(tableWidth === 0 || tableWidth > 400);
+  const columnCount = $derived(2 + (showKind ? 1 : 0) + (showWhere ? 1 : 0) + (showState ? 1 : 0));
 </script>
 
 <div
   class="viewport"
   bind:this={viewport}
   bind:clientHeight={height}
+  bind:clientWidth={tableWidth}
   onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
 >
-  <table role="grid" aria-label={t('review.title')} aria-rowcount={source.total + 1} aria-colcount="5">
+  <table role="grid" aria-label={t('review.title')} aria-rowcount={source.total + 1} aria-colcount={columnCount}>
     <thead>
       <tr aria-rowindex="1">
         <th class="c-include" scope="col"><span class="sr-only">{t('review.col.include')}</span></th>
         <th class="c-source" scope="col">{t('review.col.source')}</th>
-        <th class="c-kind" scope="col">{t('review.col.kind')}</th>
-        <th class="c-where" scope="col">{t('review.col.where')}</th>
-        <th class="c-state" scope="col">{t('review.col.state')}</th>
+        {#if showKind}<th class="c-kind" class:narrow={!showWhere} scope="col">{t('review.col.kind')}</th>{/if}
+        {#if showWhere}<th class="c-where" scope="col">{t('review.col.where')}</th>{/if}
+        {#if showState}<th class="c-state" class:narrow={!showKind} scope="col">{t('review.col.state')}</th>{/if}
       </tr>
     </thead>
     <tbody>
-      {#if win.padTop > 0}<tr aria-hidden="true" class="pad" style:height="{win.padTop}px"><td colspan="5"></td></tr>{/if}
+      {#if win.padTop > 0}<tr aria-hidden="true" class="pad" style:height="{win.padTop}px"><td colspan={columnCount}></td></tr>{/if}
       {#each indexes as index (index)}
         {@const candidate = source.rowAt(index)}
         {#if candidate}
@@ -252,31 +261,31 @@
               />
             </td>
             <td class="c-source"><span class="src">{candidate.source}</span></td>
-            <td class="c-kind">
+            {#if showKind}<td class="c-kind" class:narrow={!showWhere}>
               <span class="kind">{kindLabel(candidate.kind)}</span>
               {#if detailText(candidate)}<span class="detail">{detailText(candidate)}</span>{/if}
-            </td>
-            <td class="c-where">
+            </td>{/if}
+            {#if showWhere}<td class="c-where">
               <span class="where" title={candidate.locations?.[0] ? rawLocation(candidate.locations[0]) : candidate.location}>{placeText(candidate)}</span>
               {#if candidate.occurrences > 1}<span class="detail num">{t('common.places', { count: formatNumber(candidate.occurrences, app.locale) })}</span>{/if}
-            </td>
-            <td class="c-state">
+            </td>{/if}
+            {#if showState}<td class="c-state" class:narrow={!showKind}>
               {#if state === 'manual'}<span class="pill pill-accent"><Icon name="pencil" size={12} /> {t('review.state.manual.label')}</span>
               {:else if state === 'excluded'}<span class="pill"><Icon name="minus" size={12} /> {t('review.state.excluded.label')}</span>
               {:else}<span class="pill pill-success"><Icon name="check" size={12} /> {t('review.state.included.label')}</span>{/if}
-            </td>
+            </td>{/if}
           </tr>
         {:else}
           <tr class="skeleton" aria-rowindex={index + 2} aria-busy="true" style:height="{ROW}px">
             <td class="c-include"></td>
             <td class="c-source"><span class="bone" style:width="{50 + ((index * 37) % 40)}%"></span></td>
-            <td class="c-kind"><span class="bone short"></span></td>
-            <td class="c-where"><span class="bone short"></span></td>
-            <td class="c-state"></td>
+            {#if showKind}<td class="c-kind" class:narrow={!showWhere}><span class="bone short"></span></td>{/if}
+            {#if showWhere}<td class="c-where"><span class="bone short"></span></td>{/if}
+            {#if showState}<td class="c-state" class:narrow={!showKind}></td>{/if}
           </tr>
         {/if}
       {/each}
-      {#if win.padBottom > 0}<tr aria-hidden="true" class="pad" style:height="{win.padBottom}px"><td colspan="5"></td></tr>{/if}
+      {#if win.padBottom > 0}<tr aria-hidden="true" class="pad" style:height="{win.padBottom}px"><td colspan={columnCount}></td></tr>{/if}
     </tbody>
   </table>
   {#if source.total === 0 && !source.loading && !source.error}
@@ -304,8 +313,8 @@
 {/if}
 
 <style>
-  /* Columns follow the table's own width, not the window's: the detail pane takes 360px of it. */
-  .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); overscroll-behavior: contain; container: candidates / inline-size; }
+  /* Columns follow the table's own width (measured in the script), not the window's. */
+  .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); overscroll-behavior: contain; }
   table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-sm); }
   th { position: sticky; top: 0; z-index: 2; height: 30px; padding: 0 var(--space-3); text-align: start; font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); background: var(--bg-sunken); border-bottom: 1px solid var(--border); }
   td { padding: 0 var(--space-3); border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
@@ -333,7 +342,6 @@
   .candidate-menu button { min-height: 36px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); text-align: start; font: inherit; font-size: var(--text-sm); }
   .candidate-menu button:hover, .candidate-menu button:focus-visible { background: var(--bg-hover); outline: none; }
   /* The source column always keeps at least ~280px; lower-value columns give way first. */
-  @container candidates (max-width: 760px) { .c-where { display: none; } .c-kind { width: 120px; } }
-  @container candidates (max-width: 480px) { .c-kind { display: none; } .c-state { width: 96px; } }
-  @container candidates (max-width: 400px) { .c-state { display: none; } }
+  .c-kind.narrow { width: 120px; }
+  .c-state.narrow { width: 96px; }
 </style>

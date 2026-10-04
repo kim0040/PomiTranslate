@@ -184,7 +184,7 @@
 </div>
 
 <style>
-  .about { max-width: 1040px; }
+  .about > * { max-width: 1040px; }
   .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 0.62fr); align-items: center; gap: var(--space-5); padding: var(--space-5); overflow: hidden; }
   .identity { display: flex; align-items: center; gap: var(--space-5); min-width: 0; }
   .mascot { width: clamp(88px, 13vw, 128px); height: auto; object-fit: contain; flex: none; }

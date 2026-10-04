@@ -997,9 +997,9 @@
   .settings > :global(*), .settings-form > fieldset { max-width: 920px; }
   .settings > .settings-form { max-width: none; }
   .settings-form { display: grid; gap: var(--space-4); }
-  .settings-form > fieldset { display: grid; min-width: 0; margin: 0; padding: 0; border: 0; max-width: 920px; }
+  .settings-form > fieldset { display: grid; min-width: 0; margin: 0 auto; padding: 0; border: 0; max-width: 920px; width: 100%; }
   .settings-form > fieldset :global(input), .settings-form > fieldset :global(select), .settings-form > fieldset :global(textarea), .settings-form > fieldset :global(button), .settings-form > fieldset :global(summary) { scroll-margin-block-end: calc(var(--settings-save-height) + var(--space-4)); }
-  .tabs { display: flex; gap: var(--space-1); max-width: 920px; overflow-x: auto; border-block-end: 1px solid var(--border); }
+  .tabs { display: flex; gap: var(--space-1); max-width: 920px; width: 100%; margin-inline: auto; overflow-x: auto; border-block-end: 1px solid var(--border); }
   .tab { background: none; border: 0; position: relative; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 var(--space-4); border-radius: var(--radius-md) var(--radius-md) 0 0; color: var(--text-secondary); font-size: var(--text-md); font-weight: 600; white-space: nowrap; }
   .tab[aria-selected='true'] { color: var(--accent-text); }
   .tab[aria-selected='true']::after { content: ''; position: absolute; inset-inline: var(--space-2); inset-block-end: -1px; height: 2px; border-radius: 2px; background: var(--accent); }

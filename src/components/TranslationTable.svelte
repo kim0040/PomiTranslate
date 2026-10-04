@@ -95,24 +95,30 @@
       void openEditor(row);
     }
   }
+  // Columns come from the measured width, never from CSS-hidden cells: WebKit (the macOS app's
+  // engine) shrinks a fixed-layout table when its cells are hidden by a container query.
+  let tableWidth = $state(0);
+  const compact = $derived(tableWidth > 0 && tableWidth <= 480);
+  const showState = $derived(tableWidth === 0 || tableWidth > 400);
 </script>
 
 <div
   class="viewport"
   bind:this={viewport}
   bind:clientHeight={height}
+  bind:clientWidth={tableWidth}
   onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
 >
-  <table role="grid" aria-label={t('translationReview.table')} aria-rowcount={review.total + 1} aria-colcount="3">
+  <table role="grid" aria-label={t('translationReview.table')} aria-rowcount={review.total + 1} aria-colcount={showState ? 3 : 2}>
     <thead>
       <tr aria-rowindex="1">
-        <th class="c-source" scope="col">{t('result.before')}</th>
+        <th class="c-source" class:compact class:wide={!showState} scope="col">{t('result.before')}</th>
         <th class="c-target" scope="col">{t('result.after')}</th>
-        <th class="c-state" scope="col">{t('review.col.state')}</th>
+        {#if showState}<th class="c-state" class:compact scope="col">{t('review.col.state')}</th>{/if}
       </tr>
     </thead>
     <tbody>
-      {#if win.padTop > 0}<tr aria-hidden="true" class="pad" style:height="{win.padTop}px"><td colspan="3"></td></tr>{/if}
+      {#if win.padTop > 0}<tr aria-hidden="true" class="pad" style:height="{win.padTop}px"><td colspan={showState ? 3 : 2}></td></tr>{/if}
       {#each indexes as index (index)}
         {@const row = review.rowAt(index)}
         {#if row}
@@ -135,7 +141,7 @@
               {#if shown.text}<span class="txt">{shown.text}</span>
               {:else}<span class="txt none">{shown.status === 'failed' ? t('translationReview.noTranslation') : ''}</span>{/if}
             </td>
-            <td class="c-state">
+            {#if showState}<td class="c-state" class:compact>
               {#if row.edited || shown.status === 'edited'}<span class="pill pill-accent"><Icon name="pencil" size={12} /> {t(statusKey.edited)}</span>{/if}
               {#if row.glossaryMismatch}<span class="pill pill-warning"><Icon name="alert-triangle" size={12} /> {t(statusKey.glossary_mismatch)}</span>{/if}
               {#if !row.edited && !row.glossaryMismatch && shown.status !== 'edited'}
@@ -147,17 +153,17 @@
                 </span>
               {/if}
               {#if problem}<span class="warn"><Icon name="alert-triangle" size={12} /> {t('translationReview.fixThis')}</span>{/if}
-            </td>
+            </td>{/if}
           </tr>
         {:else}
           <tr class="skeleton" aria-rowindex={index + 2} aria-busy="true" style:height="{ROW}px">
             <td class="c-source"><span class="bone" style:width="{50 + ((index * 37) % 40)}%"></span></td>
             <td class="c-target"><span class="bone" style:width="{40 + ((index * 53) % 40)}%"></span></td>
-            <td class="c-state"></td>
+            {#if showState}<td class="c-state" class:compact></td>{/if}
           </tr>
         {/if}
       {/each}
-      {#if win.padBottom > 0}<tr aria-hidden="true" class="pad" style:height="{win.padBottom}px"><td colspan="3"></td></tr>{/if}
+      {#if win.padBottom > 0}<tr aria-hidden="true" class="pad" style:height="{win.padBottom}px"><td colspan={showState ? 3 : 2}></td></tr>{/if}
     </tbody>
   </table>
   {#if review.total === 0 && !review.loading && !review.error && review.loaded}
@@ -176,7 +182,7 @@
 </div>
 
 <style>
-  .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); overscroll-behavior: contain; container: translations / inline-size; }
+  .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); overscroll-behavior: contain; }
   table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-sm); }
   th { position: sticky; top: 0; z-index: 2; height: 30px; padding: 0 var(--space-3); text-align: start; font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); background: var(--bg-sunken); border-bottom: 1px solid var(--border); }
   td { padding: 0 var(--space-3); border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
@@ -196,6 +202,7 @@
   @keyframes shimmer { to { background-position: -200% 0; } }
   .empty { position: absolute; inset: 40px 0 0; display: grid; place-content: center; text-align: center; gap: var(--space-1); padding: var(--space-5); }
   .strong { font-weight: 700; }
-  @container translations (max-width: 480px) { .c-source { width: 38%; } .c-state { width: 96px; } }
-  @container translations (max-width: 400px) { .c-state { display: none; } .c-source { width: 50%; } }
+  .c-state.compact { width: 96px; }
+  .c-source.compact { width: 38%; }
+  .c-source.wide { width: 50%; }
 </style>
