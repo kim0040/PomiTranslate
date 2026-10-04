@@ -159,12 +159,15 @@
   const models = $derived(app.modelsFor(draft));
   const reasoningModel = $derived(models.find((model) => model.id === draft.model.trim()));
   const selectedPriceKey = $derived(`${draft.provider}/${draft.model.trim()}`);
+  const hasCatalogPrice = (value: unknown): boolean => {
+    if ((typeof value !== 'number' && typeof value !== 'string') || (typeof value === 'string' && !value.trim())) return false;
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount >= 0;
+  };
   const catalogPriceAvailable = $derived.by(() => {
     const item = models.find((model) => model.id === draft.model.trim());
     if (!item) return false;
-    const input = Number(item.pricing_prompt);
-    const output = Number(item.pricing_completion);
-    return Number.isFinite(input) && input >= 0 && Number.isFinite(output) && output >= 0;
+    return hasCatalogPrice(item.pricing_prompt) && hasCatalogPrice(item.pricing_completion);
   });
   const savedSelectedPrice = $derived(snapshot?.custom_prices?.[selectedPriceKey]);
   const customPriceInvalid = $derived([customPriceInput, customPriceOutput].some((value) => {

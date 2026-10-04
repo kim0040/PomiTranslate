@@ -397,9 +397,12 @@
       const globalEntries = settings.glossary || [];
       const effective = [...globalEntries];
       for (const entry of worldEntries) {
-        const key = entry.caseSensitive ? entry.source : entry.source.toLocaleLowerCase();
-        const matches = (item) => (item.caseSensitive ? item.source === entry.source : item.source.toLocaleLowerCase() === key) || (!entry.caseSensitive && item.source.toLocaleLowerCase() === key);
-        for (let index = effective.length - 1; index >= 0; index--) if (matches(effective[index])) effective.splice(index, 1);
+        for (let index = effective.length - 1; index >= 0; index--) {
+          const item = effective[index];
+          const exact = item.source === entry.source;
+          const insensitiveMatch = (!item.caseSensitive || !entry.caseSensitive) && item.source.toLocaleLowerCase() === entry.source.toLocaleLowerCase();
+          if (exact || insensitiveMatch) effective.splice(index, 1);
+        }
         effective.push(entry);
       }
       return ok(request, { global: globalEntries, world: worldEntries, effective });
@@ -467,7 +470,7 @@
         await new Promise((resolve) => setTimeout(resolve, 80));
       }
       const catalog = [
-        { id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash' },
+        { id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash', pricing_prompt: null, pricing_completion: null },
         { id: 'deepseek/deepseek-v4.1-flash', supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'high', supported_efforts: ['max', 'high', 'low'] } },
         { id: 'mandatory-fixture', reasoning: { mandatory: true, supported_efforts: ['high'] } },
         { id: 'google/gemini-2.5-flash-lite', display_name: 'Gemini 2.5 Flash Lite', pricing_prompt: '0.0000001', pricing_completion: '0.0000004', context_length: 1048576 },

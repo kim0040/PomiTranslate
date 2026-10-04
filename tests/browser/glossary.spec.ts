@@ -98,8 +98,7 @@ test('translation review filters and badges glossary mismatches and can quick-ad
 test('a saved user-entered model price appears in the run estimate', async ({ page }) => {
   await open(page, 'scenario=run');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#provider').selectOption('openai');
-  await page.locator('#model').fill('fixture-unpriced-model');
+  await expect.poll(async () => (await requests(page, 'models.list')).length).toBeGreaterThan(0);
   await expect(page.getByRole('heading', { name: '단가 직접 입력 (USD / 1M 토큰)' })).toBeVisible();
   await page.getByRole('button', { name: /^단가 직접 입력/ }).click();
   await page.locator('#custom-price-input').fill('2.5');
