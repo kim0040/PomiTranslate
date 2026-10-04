@@ -285,7 +285,7 @@ def annotate_suitability(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         outputs = record.get("output_modalities")
         probe = {"architecture": {"output_modalities": outputs}} if isinstance(outputs, list) and outputs else None
-        annotated.append({**record, "suitable": is_translation_suitable(str(record.get("id", "")), probe)})
+        annotated.append({**record, "suitable": record.get("text") is not False and is_translation_suitable(str(record.get("id", "")), probe)})
     return annotated
 
 
@@ -442,6 +442,7 @@ class LLMProviderClient:
         self._catalog_checked = False
         self._catalog_error: ModelCatalogError | None = None
         self._catalog: list[dict[str, Any]] = []
+        self.catalog_cached = False
 
     def _family_for(self) -> str:
         if self.provider in {"custom", "custom_openai", "custom_anthropic"}:
@@ -466,7 +467,7 @@ class LLMProviderClient:
         raise RuntimeError(f"Unsupported provider family: {self.family}")
 
     def check_connection(self) -> list[dict[str, Any]]:
-        """List text models with the key, failing loudly: no cache and no silent empty list.
+        """List the full catalog with the key, failing loudly: no cache and no silent empty list.
 
         OpenRouter publishes its catalog without authentication, so listing alone would call a wrong
         key fine. Its ``/key`` endpoint is what actually checks the key.
@@ -474,7 +475,7 @@ class LLMProviderClient:
         self.ensure_ready(require_model=False)
         if self.provider == "openrouter":
             self._request_json("GET", f"{self.base_url}/key", headers=self._openai_headers())
-        return [item for item in self.list_models() if item.get("text")]
+        return self.list_models()
 
     def list_public_models(self) -> list[dict[str, Any]]:
         """Read OpenRouter's pinned catalog without authenticating or generating text."""
@@ -482,37 +483,32 @@ class LLMProviderClient:
             raise ValueError("Public catalog is only available at the OpenRouter endpoint")
         return self._list_models_openai_compatible(public=True)
 
+    def try_refresh_model_catalog(self) -> list[dict[str, Any]]:
+        """Catalog view retains non-text records; only the run path filters them out."""
+        from pathlib import Path
+        from mwt.userdata import load_model_catalog, remember_model_catalog
+
+        self.catalog_cached = False
+        try:
+            models = self.list_models()
+        except Exception:
+            models = load_model_catalog(self.provider, root=Path(self.data_dir)) if self.data_dir else []
+            self.catalog_cached = bool(models)
+        else:
+            if self.data_dir and models:
+                remember_model_catalog(self.provider, models, root=Path(self.data_dir))
+        return models
+
     def try_refresh_text_models(self) -> list[dict[str, Any]]:
         """Fetch text models once and pin the configured id to a published model."""
         if self._catalog_error is not None:
             raise self._catalog_error
         if self._catalog_checked:
             return self._catalog
-        fetched: list[dict[str, Any]] | None = None
-        try:
-            fetched = [item for item in self.list_models() if item.get("text")]
-        except Exception:
-            fetched = None
-        if fetched:
-            self._catalog = fetched
-            if self.data_dir:
-                from pathlib import Path
-
-                from mwt.userdata import remember_model_catalog
-
-                remember_model_catalog(self.provider, fetched, root=Path(self.data_dir))
-        elif self.data_dir:
-            from pathlib import Path
-
-            from mwt.userdata import load_model_catalog
-
-            self._catalog = [
-                item
-                for item in load_model_catalog(self.provider, root=Path(self.data_dir))
-                if item.get("text", True)
-            ]
+        catalog = self.try_refresh_model_catalog()
+        self._catalog = [item for item in catalog if item.get("text", True)]
         self._catalog_checked = True
-        if self.model and self._catalog:
+        if self.model and catalog:
             match = next((item for item in self._catalog if item.get("id") == self.model), None)
             if match is None:
                 self._catalog_error = ModelCatalogError(
@@ -716,8 +712,6 @@ class LLMProviderClient:
 
     def _list_models_openai_compatible(self, *, public: bool = False) -> list[dict[str, Any]]:
         url = f"{self.base_url}/models"
-        if self.provider == "openrouter":
-            url = f"{url}?output_modalities=text"
         response = self._request_json("GET", url, headers={"Accept": "application/json"} if public else self._openai_headers())
         data = response.get("data") or []
         models: list[dict[str, Any]] = []
@@ -734,8 +728,7 @@ class LLMProviderClient:
                 display_name=str(item.get("name") or model_id),
                 description=description,
             )
-            if record["text"]:
-                models.append(record)
+            models.append(record)
         return models
 
     def _complete_gemini(
@@ -818,9 +811,9 @@ class LLMProviderClient:
         data = response.get("models") or []
         models: list[dict[str, Any]] = []
         for item in data:
-            methods = item.get("supportedGenerationMethods") or []
-            if "generateContent" not in methods:
+            if not isinstance(item, dict):
                 continue
+            methods = item.get("supportedGenerationMethods") or []
             model_id = str(item.get("baseModelId") or item.get("name", "")).strip()
             if model_id.startswith("models/"):
                 model_id = model_id.split("/", 1)[1]
@@ -835,12 +828,13 @@ class LLMProviderClient:
                 display_name=str(item.get("displayName") or model_id),
                 description=" | ".join(part for part in description_parts if part),
             )
+            if "generateContent" not in methods:
+                record.update(text=False, suitable=False, output_modalities=[])
             thinking = gemini_reasoning(model_id, item.get("thinking"))
             if thinking is not None:
                 record["reasoning"] = thinking
                 record["supported_parameters"] = [*record["supported_parameters"], "reasoning"]
-            if record["text"]:
-                models.append(record)
+            models.append(record)
         return models
 
     def _anthropic_headers(self) -> dict[str, str]:
@@ -883,6 +877,8 @@ class LLMProviderClient:
         data = response.get("data") or []
         models: list[dict[str, Any]] = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
             model_id = str(item.get("id", "")).strip()
             if not model_id:
                 continue
@@ -892,8 +888,7 @@ class LLMProviderClient:
                 display_name=str(item.get("display_name") or model_id),
                 description=str(item.get("description") or item.get("created_at") or ""),
             )
-            if record["text"]:
-                models.append(record)
+            models.append(record)
         return models
 
 

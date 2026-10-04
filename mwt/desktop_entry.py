@@ -143,6 +143,40 @@ def _scan_plan_path(data_dir: Path, scan_plan_id: str) -> Path:
     return data_dir / "scans" / f"{scan_plan_id}.json"
 
 
+def _world_identity(world: Path) -> str:
+    """A stable, non-reversible local identity for associating saved scan plans with a folder."""
+    normalized = os.path.normcase(str(world.expanduser().resolve()))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _last_scan_summary(data_dir: Path, world: Path | None) -> dict | None:
+    """Return the newest completed scan saved for this world, independent of translation history."""
+    if world is None:
+        return None
+    scans = data_dir / "scans"
+    if not scans.is_dir():
+        return None
+    identity = _world_identity(world)
+    latest: dict | None = None
+    for path in scans.glob("*.summary.json"):
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(plan, dict) or plan.get("worldIdentity") != identity:
+                continue
+            created_at = float(plan.get("createdAt") or 0)
+            at = int(created_at)
+            candidate_count = int(plan.get("candidateCount"))
+            if created_at <= 0 or candidate_count < 0:
+                continue
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        if latest is None or created_at > latest["createdAt"]:
+            latest = {"at": at, "candidateCount": candidate_count, "createdAt": created_at}
+    if latest is not None:
+        latest.pop("createdAt")
+    return latest
+
+
 def _checkpoint_path(data_dir: Path, scan_plan_id: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{64}", scan_plan_id):
         raise ValueError("Invalid scan plan ID")
@@ -354,6 +388,7 @@ def _save_scan_plan(
     world_fingerprint: str,
     scope_fingerprint: str,
     candidates: list[dict],
+    world_dir: Path | None = None,
     external_pack_fingerprints: dict | None = None,
 ) -> None:
     path = _scan_plan_path(data_dir, scan_plan_id)
@@ -363,12 +398,25 @@ def _save_scan_plan(
         "scanPlanId": scan_plan_id,
         "worldFingerprint": world_fingerprint,
         "scopeFingerprint": scope_fingerprint,
+        "createdAt": time.time(),
+        "candidateCount": len(candidates),
+        "worldIdentity": _world_identity(world_dir) if world_dir is not None else None,
         "candidates": candidates,
         "externalPackFingerprints": external_pack_fingerprints or {},
     }
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, path)
+    summary = {
+        "scanPlanId": scan_plan_id,
+        "worldIdentity": document["worldIdentity"],
+        "createdAt": document["createdAt"],
+        "candidateCount": document["candidateCount"],
+    }
+    summary_path = path.with_name(f"{path.stem}.summary.json")
+    summary_temporary = summary_path.with_suffix(".json.tmp")
+    summary_temporary.write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
+    os.replace(summary_temporary, summary_path)
 
 
 def _load_scan_plan(data_dir: Path, scan_plan_id: str) -> dict:
@@ -857,6 +905,10 @@ def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyri
     valid_world = bool(world and inspection and inspection.get("validJavaWorld"))
     from mwt.userdata import load_app_prefs, load_last_job
 
+    last_scan = _last_scan_summary(data_dir, world) if valid_world else None
+    resumable = (_resume_candidate(data_dir, world) or {"available": False}) if valid_world else {"available": False}
+    resumable["lastScan"] = last_scan
+
     return {
         "notices": payload(),
         **settings,
@@ -864,8 +916,9 @@ def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyri
         "worlds": list_recent_worlds(data_dir),
         "worldInspection": inspection,
         "backups": list_backup_sets(world, _backup_stores(world, data_dir)) if valid_world else [],
-        "resume": (_resume_candidate(data_dir, world) or {"available": False}) if valid_world else {"available": False},
+        "resume": resumable,
         "lastJob": load_last_job(world, data_dir) if valid_world else None,
+        "lastScan": last_scan,
     }
 
 
@@ -1349,12 +1402,17 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         from mwt.userdata import load_last_job
 
         candidate = _resume_candidate(data_dir, world)
+        last_scan = _last_scan_summary(data_dir, world)
         emit(
             {
                 "v": 1,
                 "id": request_id,
                 "type": "response.ok",
-                "payload": {**(candidate or {"available": False}), "lastJob": load_last_job(world, data_dir)},
+                "payload": {
+                    **(candidate or {"available": False}),
+                    "lastJob": load_last_job(world, data_dir),
+                    "lastScan": last_scan,
+                },
             }
         )
         return
@@ -1412,7 +1470,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 models = LLMProviderClient(config).check_connection()
                 remember_model_catalog(provider, models, root=data_dir)
             else:
-                models = LLMProviderClient(config).try_refresh_text_models()
+                client = LLMProviderClient(config)
+                models = client.try_refresh_model_catalog()
+                cached = client.catalog_cached
         except Exception as exc:
             from llm_backends import ProviderError
 
@@ -1529,8 +1589,10 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 world_fingerprint=fingerprint,
                 scope_fingerprint=scope_fingerprint,
                 candidates=records,
+                world_dir=world,
                 external_pack_fingerprints={item["path"]: {"sha256": item["sha256"], "parentIdentity": item["parentIdentity"]} for item in pack_inputs if "sha256" in item},
             )
+        last_scan = _last_scan_summary(data_dir, world) if report.get("status") == "completed" else None
         saved = _saved(data_dir)
         estimate = _estimate(records, saved, data_dir)
         kind_counts: dict[str, int] = {}
@@ -1549,6 +1611,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "providerRequests": report.get("provider_requests", 0),
                     "fingerprint": fingerprint,
                     "scanPlanId": scan_plan_id,
+                    "lastScan": last_scan,
                     "dryRun": True,
                     "localhostServer": False,
                     "preTranslate": PRE_TRANSLATE,

@@ -189,6 +189,24 @@ fn provider_key(
     }
 }
 
+/// Own the cleanup obligation before any fallible sidecar preparation. The payload's plain copy
+/// is scrubbed even when validation, data paths, command creation, spawn or serialization fail.
+struct PayloadSecretGuard<'a>(&'a mut Value);
+
+impl PayloadSecretGuard<'_> {
+    fn scrub(&mut self) {
+        if let Some(Value::String(secret)) = self.0.get_mut("payload").and_then(|p| p.get_mut("apiKey")) {
+            zeroize::Zeroize::zeroize(secret);
+        }
+    }
+}
+
+impl Drop for PayloadSecretGuard<'_> {
+    fn drop(&mut self) {
+        self.scrub();
+    }
+}
+
 /// Remove and return every complete line in `buffer`, without its trailing whitespace.
 /// A partial last line stays in the buffer for the next chunk.
 fn drain_complete_lines(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
@@ -376,10 +394,12 @@ async fn exchange_sidecar(
     state: &ActiveSidecar,
     mut request: Value,
 ) -> Result<Value, String> {
+    let mut request = PayloadSecretGuard(&mut request);
     let deadlines = startup::StartupDeadlines::new(
-        request.get("type").and_then(Value::as_str).unwrap_or(""),
+        request.0.get("type").and_then(Value::as_str).unwrap_or(""),
     );
     let id = request
+        .0
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| coded("INVALID_REQUEST", "Missing request id"))?
@@ -411,16 +431,8 @@ async fn exchange_sidecar(
             .spawn()
             .map_err(|_| coded("CORE_START_FAILED", "Could not start the translation core"))?;
         let mut line =
-            zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| coded("INVALID_REQUEST", "Invalid request"))?);
-        if let Some(secret) = request
-            .get_mut("payload")
-            .and_then(Value::as_object_mut)
-            .and_then(|p| p.get_mut("apiKey"))
-        {
-            if let Value::String(value) = secret {
-                zeroize::Zeroize::zeroize(value);
-            }
-        }
+            zeroize::Zeroizing::new(serde_json::to_vec(&*request.0).map_err(|_| coded("INVALID_REQUEST", "Invalid request"))?);
+        request.scrub();
         line.push(b'\n');
         if child.write(&line).is_err() {
             let _ = child.kill();
@@ -527,6 +539,8 @@ async fn update_install(app: tauri::AppHandle, state: State<'_, ActiveSidecar>) 
         .request_gate
         .try_lock()
         .map_err(|_| "UPDATE_BUSY")?;
+    let close_guard = app.state::<close_guard::CloseGuard>();
+    let _restart_scope = close_guard.updater_restart_scope();
     updates::install(&app).await
 }
 
@@ -560,6 +574,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(window_state::flags())
+                .skip_initial_state("main")
                 .build(),
         )
         .manage(ActiveSidecar::default())
@@ -605,10 +620,11 @@ pub fn run() {
                 window_state::save_normal_geometry(window);
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let job_running = window.state::<ActiveSidecar>().request_gate.try_lock().is_err();
-                let unsaved = window.state::<close_guard::CloseGuard>().unsaved();
-                match close_guard::decide(job_running, unsaved, close_guard::Source::Window) {
-                    close_guard::Decision::Allow => {}
+                let state = window.state::<ActiveSidecar>();
+                let gate = state.request_gate.try_lock();
+                let guard = window.state::<close_guard::CloseGuard>();
+                match guard.boundary(gate.is_err(), close_guard::Source::Window) {
+                    close_guard::Decision::Allow => window_state::flush_normal_geometry(window),
                     close_guard::Decision::BlockJob => {
                         api.prevent_close();
                         // Tell the window why it did not close, instead of ignoring the click.
@@ -626,13 +642,21 @@ pub fn run() {
         .run(|app, event| {
             // Quitting (Cmd+Q, the app menu, a session logout) skips CloseRequested. Hold it the same
             // way while a scan, write or restore owns the core, instead of killing it mid-write.
-            // A request with an exit code came from the app itself (an update restart, or the
-            // answer to the unsaved-settings question): it always goes through.
-            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = &event {
-                let job_running = app.state::<ActiveSidecar>().request_gate.try_lock().is_err();
-                let unsaved = app.state::<close_guard::CloseGuard>().unsaved();
-                match close_guard::decide(job_running, unsaved, close_guard::Source::Quit) {
-                    close_guard::Decision::Allow => {}
+            // Explicit exits obey the same guard. Only an updater holding the gate may request
+            // the dedicated restart code; ordinary app.exit(0) never bypasses a running job.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                let guard = app.state::<close_guard::CloseGuard>();
+                if guard.permits_restart(*code) { return; }
+                let state = app.state::<ActiveSidecar>();
+                let gate = state.request_gate.try_lock();
+                match guard.boundary(gate.is_err(), close_guard::Source::Quit) {
+                    close_guard::Decision::Allow => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            window_state::flush_normal_geometry(&window.as_ref().window());
+                        } else {
+                            window_state::flush_pending_geometry(app);
+                        }
+                    }
                     close_guard::Decision::BlockJob => {
                         api.prevent_exit();
                         if let Some(window) = app.get_webview_window("main") {
@@ -665,6 +689,29 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_payload_secrets_are_scrubbed_on_every_early_error() {
+        fn fail(request: &mut Value, error: &str) -> Result<(), String> {
+            let guard = PayloadSecretGuard(request);
+            // These seams model returns before startup and a failed serializer. Value itself
+            // cannot fail JSON serialization, so inject the serializer's error explicitly.
+            let result: Result<Vec<u8>, String> = if error == "INVALID_REQUEST" {
+                Err(error.into())
+            } else {
+                assert!(guard.0["payload"]["apiKey"].is_string());
+                return Err(error.into());
+            };
+            let _line = zeroize::Zeroizing::new(result?);
+            Ok(())
+        }
+        for error in ["BUSY", "DATA_DIR_UNAVAILABLE", "CORE_UNAVAILABLE", "CORE_START_FAILED", "INVALID_REQUEST"] {
+            let mut request = serde_json::json!({"payload": {"apiKey": "synthetic-only", "provider": "openai"}});
+            assert_eq!(fail(&mut request, error), Err(error.into()));
+            assert_eq!(request["payload"]["apiKey"].as_str(), Some(""));
+            assert_eq!(request["payload"]["provider"], "openai");
+        }
+    }
 
     fn payload(value: Value) -> serde_json::Map<String, Value> {
         value.as_object().unwrap().clone()

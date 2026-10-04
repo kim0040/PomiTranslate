@@ -43,9 +43,9 @@
   };
   const knownBlockers = ['bedrock', 'mcr', 'linear', 'world_in_use', 'not_writable', 'not_readable', 'missing'];
   const requestEstimate = $derived(app.estimate?.requests ?? scan?.estimate?.requests ?? scan?.requestEstimate);
-  const lastScanDate = $derived(app.resume?.savedAt
-    ? formatDate(new Date(app.resume.savedAt * 1000).toISOString(), app.locale)
-    : app.lastJob?.at ? formatDate(new Date(app.lastJob.at * 1000).toISOString(), app.locale) : t('common.unknown'));
+  const lastScanDate = $derived(app.lastScan?.at
+    ? formatDate(new Date(app.lastScan.at * 1000).toISOString(), app.locale)
+    : t('common.unknown'));
   const lastJobDate = $derived(app.lastJob?.at ? formatDate(new Date(app.lastJob.at * 1000).toISOString(), app.locale) : t('common.unknown'));
   const lastJobStatus = $derived(app.lastJob?.status === 'completed' ? t('scan.home.status.completed')
     : app.lastJob?.status === 'partial' ? t('scan.home.status.partial')
@@ -70,7 +70,7 @@
       </div>
       <dl class="home-facts">
         <div><dt>{t('scan.home.lastScan')}</dt><dd>{lastScanDate}</dd></div>
-        <div><dt>{t('scan.home.candidates')}</dt><dd class="num">{formatNumber(app.resume?.candidateCount ?? app.scan?.candidateCount ?? app.lastJob?.candidateCount ?? 0, app.locale)}</dd></div>
+        <div><dt>{t('scan.home.candidates')}</dt><dd class="num">{app.lastScan ? formatNumber(app.lastScan.candidateCount, app.locale) : t('common.unknown')}</dd></div>
         {#if app.lastJob}
           <div><dt>{t('scan.home.lastTranslation')}</dt><dd>{lastJobDate} · {lastJobStatus} · {t('scan.home.jobCounts', { translated: formatNumber(app.lastJob.translated, app.locale), failed: formatNumber(app.lastJob.failed, app.locale) })}</dd></div>
         {:else}

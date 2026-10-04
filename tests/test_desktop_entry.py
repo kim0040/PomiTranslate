@@ -116,19 +116,20 @@ def main() -> None:
             cancel_path = tmp / "operation.cancel"
             env = os.environ.copy()
             env.update({"POMI_API_KEY": "desktop-test-key", "POMI_API_BASE": base_url, "POMI_MODEL": "fixture"})
+            command = [
+                PY,
+                "-m",
+                "mwt.desktop_entry",
+                "--jsonl",
+                "--report-dir",
+                str(tmp / "reports"),
+                "--data-dir",
+                str(tmp / "userdata"),
+                "--cancel-file",
+                str(cancel_path),
+            ]
             proc = subprocess.Popen(
-                [
-                    PY,
-                    "-m",
-                    "mwt.desktop_entry",
-                    "--jsonl",
-                    "--report-dir",
-                    str(tmp / "reports"),
-                    "--data-dir",
-                    str(tmp / "userdata"),
-                    "--cancel-file",
-                    str(cancel_path),
-                ],
+                command,
                 cwd=ROOT,
                 env=env,
                 stdin=subprocess.PIPE,
@@ -201,6 +202,44 @@ def main() -> None:
                 assert scan["payload"]["writeBlockers"] == []
                 assert scan["payload"]["scanPlanId"]
                 assert any(item["type"] == "scan.progress" for item in scan_events)
+                last_scan = scan["payload"]["lastScan"]
+                assert last_scan["at"] > 0
+                assert last_scan["candidateCount"] == scan["payload"]["candidateCount"]
+                scan_plan_path = tmp / "userdata" / "scans" / f"{scan['payload']['scanPlanId']}.json"
+                scan_summary_path = tmp / "userdata" / "scans" / f"{scan['payload']['scanPlanId']}.summary.json"
+                saved_plan = json.loads(scan_plan_path.read_text(encoding="utf-8"))
+                saved_summary = json.loads(scan_summary_path.read_text(encoding="utf-8"))
+                assert saved_plan["createdAt"] > 0 and saved_plan["candidateCount"] == 1
+                assert saved_summary["worldIdentity"] == saved_plan["worldIdentity"]
+
+                # Scan Only has no job checkpoint. Restart the sidecar and load the saved scan summary.
+                assert proc.stdin is not None
+                proc.stdin.close()
+                assert proc.wait(timeout=5) == 0
+                proc = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=env,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                hello = exchange(proc)
+                assert hello["type"] == "system.hello"
+                scan_only_bootstrap = exchange(
+                    proc,
+                    {"v": 1, "id": "scan-only-bootstrap", "type": "app.bootstrap", "payload": {"worldDir": str(world), "credentialOwner": "rust"}},
+                )
+                assert scan_only_bootstrap["payload"]["resume"]["available"] is False
+                assert scan_only_bootstrap["payload"]["lastScan"] == last_scan
+                assert scan_only_bootstrap["payload"]["resume"]["lastScan"] == last_scan
+                scan_only_resume = exchange(
+                    proc,
+                    {"v": 1, "id": "scan-only-resume", "type": "resume.status", "payload": {"worldDir": str(world)}},
+                )
+                assert scan_only_resume["payload"]["lastScan"] == last_scan
+                assert scan_only_resume["payload"]["lastJob"] is None
                 page = exchange(
                     proc,
                     {
@@ -415,6 +454,8 @@ def main() -> None:
                     {"v": 1, "id": "last-job-bootstrap", "type": "app.bootstrap", "payload": {"worldDir": str(world), "credentialOwner": "rust"}},
                 )
                 last_job = job_bootstrap["payload"]["lastJob"]
+                assert job_bootstrap["payload"]["lastScan"] == last_scan
+                assert job_bootstrap["payload"]["resume"]["lastScan"] == last_scan
                 assert last_job["world"] == world.name
                 assert last_job["at"] > 0 and last_job["status"] == "completed"
                 assert last_job["translated"] == 1 and last_job["failed"] == 0

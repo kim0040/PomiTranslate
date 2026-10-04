@@ -141,6 +141,7 @@ export type ScanResult = {
   estimate?: Estimate;
   coverage?: CoverageItem[];
   candidates?: Candidate[];
+  lastScan?: LastScan | null;
 };
 
 export type CandidatePage = {
@@ -244,7 +245,10 @@ export type ResumeStatus = {
   reason?: string;
   backupSetId?: string;
   lastJob?: LastJob | null;
+  lastScan?: LastScan | null;
 };
+
+export type LastScan = { at: number; candidateCount: number };
 
 export type LastJob = {
   world: string;
@@ -280,6 +284,7 @@ export type BootstrapPayload = {
   backups: BackupSummary[];
   resume: ResumeStatus;
   lastJob?: LastJob | null;
+  lastScan?: LastScan | null;
 };
 
 export type ProviderUsage = {

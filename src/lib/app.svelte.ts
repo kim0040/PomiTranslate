@@ -12,6 +12,7 @@ import {
   type BootstrapPayload,
   type Estimate,
   type LastJob,
+  type LastScan,
   type ModelInfo,
   type Notices,
   type RecentWorld,
@@ -116,10 +117,13 @@ export class AppState {
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
+  /** Draft values held by SetupWizard, including a key that has not been saved yet. */
+  wizardDirty = $state(false);
   /** A move away from settings that waits until the user saves or drops the changes there. */
   pendingLeave = $state<(() => void) | null>(null);
   /** Set while the pending settings decision was requested by a window close or app quit. */
   pendingCloseSource = $state<CloseSource | null>(null);
+  pendingCloseContext = $state<'settings' | 'wizard' | null>(null);
   /** The workflow step that sent the user to settings, so settings can offer the way back. */
   returnStep = $state<Step | null>(null);
   /** The settings tab shown. It is kept for the session, and a fix-it link picks the tab it needs. */
@@ -173,11 +177,14 @@ export class AppState {
   failures = $state<FailureList>(emptyFailures());
   resume = $state<ResumeStatus | null>(null);
   lastJob = $state<LastJob | null>(null);
+  lastScan = $state<LastScan | null>(null);
   /** The recovery snapshot of the last restore, until the next scan or world change replaces the job. */
   lastRestoreId = $state('');
 
   private toastSerial = 0;
-  private includedUndo: Set<string> | null = null;
+  private includedUndo: { excluded: Set<string>; scanPlanId: string; worldDir: string; revision: number } | null = null;
+  private undoRevision = 0;
+  private undoToastId: number | null = null;
   private clock: ReturnType<typeof setInterval> | null = null;
   private failuresRevision = 0;
   private estimateRevision = 0;
@@ -258,10 +265,11 @@ export class AppState {
 
   // --- feedback ----------------------------------------------------------------------------
 
-  notify(message: string, tone: Tone = 'info', ms = 5200, action?: ToastAction): void {
+  notify(message: string, tone: Tone = 'info', ms = 5200, action?: ToastAction): number {
     const id = ++this.toastSerial;
     this.toasts = [...this.toasts, { id, tone, message, action }];
     if (ms > 0) setTimeout(() => this.dismissToast(id), ms);
+    return id;
   }
 
   dismissToast(id: number): void {
@@ -362,9 +370,10 @@ export class AppState {
       this.inspection = boot.worldInspection;
       this.backups = boot.backups;
       this.lastJob = boot.lastJob ?? boot.resume?.lastJob ?? null;
+      this.lastScan = boot.lastScan ?? boot.resume?.lastScan ?? null;
       this.applyPrefs(boot);
       if (this.worldDir && this.inspection?.validJavaWorld) this.step = 'scan';
-      this.applyResume(boot.resume);
+      this.applyResume(boot.resume, { lastJob: boot.lastJob, lastScan: boot.lastScan });
       // Translations that were never written wait in the review: the user lands back in it.
       if (this.resume?.status === 'awaiting_review') {
         this.reviewResumed = true;
@@ -459,6 +468,7 @@ export class AppState {
    */
   dismissWizard(): void {
     this.showWizard = false;
+    this.wizardDirty = false;
     if (!this.prefs.setup_dismissed) void this.setPrefs({ setup_dismissed: true });
     if (!this.prefs.tutorial_seen && !this.showNotice) this.showTour = true;
   }
@@ -466,6 +476,7 @@ export class AppState {
   /** The wizard finished and saved: the guide counts as seen, and the next stop is the world step. */
   finishSetup(openTour = false): void {
     this.showWizard = false;
+    this.wizardDirty = false;
     const seen: Partial<AppPrefs> = {};
     if (!this.prefs.setup_dismissed) seen.setup_dismissed = true;
     if (!this.prefs.tutorial_seen) seen.tutorial_seen = true;
@@ -584,14 +595,22 @@ export class AppState {
 
   /** Show the existing unsaved-settings choice for a native X or app-quit request. */
   private handleCloseRequested(source: CloseSource): void {
+    if (this.pendingCloseSource) return;
+    if (this.showWizard) {
+      this.pendingCloseSource = source;
+      this.pendingCloseContext = 'wizard';
+      return;
+    }
     if (!this.settingsDirty) {
       void finishClose(source);
       return;
     }
     this.page = 'settings';
     this.pendingCloseSource = source;
+    this.pendingCloseContext = 'settings';
     this.pendingLeave = () => {
       this.pendingCloseSource = null;
+      this.pendingCloseContext = null;
       void finishClose(source);
     };
   }
@@ -602,10 +621,37 @@ export class AppState {
     this.pendingLeave = null;
     if (!proceed || !next) {
       this.pendingCloseSource = null;
+      this.pendingCloseContext = null;
       return;
     }
     this.settingsDirty = false;
     next();
+  }
+
+  continueWizardClose(): void {
+    if (this.pendingCloseContext !== 'wizard') return;
+    this.pendingCloseSource = null;
+    this.pendingCloseContext = null;
+  }
+
+  discardWizardAndClose(): void {
+    if (this.pendingCloseContext !== 'wizard' || !this.pendingCloseSource) return;
+    const source = this.pendingCloseSource;
+    this.showWizard = false;
+    this.wizardDirty = false;
+    this.pendingCloseSource = null;
+    this.pendingCloseContext = null;
+    void finishClose(source);
+  }
+
+  finishWizardAndClose(): void {
+    if (this.pendingCloseContext !== 'wizard' || !this.pendingCloseSource) return;
+    const source = this.pendingCloseSource;
+    this.finishSetup(false);
+    this.wizardDirty = false;
+    this.pendingCloseSource = null;
+    this.pendingCloseContext = null;
+    void finishClose(source);
   }
 
   goto(page: Page): void {
@@ -708,6 +754,7 @@ export class AppState {
   }
 
   private resetJob(): void {
+    this.clearIncludedUndo();
     this.lastRestoreId = '';
     this.estimateRevision++;
     this.estimateLoading = false;
@@ -749,7 +796,11 @@ export class AppState {
       const changed = path !== this.worldDir;
       this.worldDir = path;
       this.inspection = inspected;
-      if (changed) this.resetJob();
+      if (changed) {
+        this.lastJob = null;
+        this.lastScan = null;
+        this.resetJob();
+      }
       this.recent = (await callBackend<{ worlds: RecentWorld[] }>('worlds.remember', { worldDir: path })).worlds;
       await this.loadBackups();
       if (changed) this.applyResume(await callBackend<ResumeStatus>('resume.status', { worldDir: path }));
@@ -766,6 +817,8 @@ export class AppState {
         this.worldDir = '';
         this.inspection = null;
         this.backups = [];
+        this.lastJob = null;
+        this.lastScan = null;
         this.resetJob();
         this.step = 'world';
       }
@@ -784,8 +837,10 @@ export class AppState {
 
   // --- resume ------------------------------------------------------------------------------
 
-  private applyResume(resumable: ResumeStatus): void {
-    if (resumable?.lastJob) this.lastJob = resumable.lastJob;
+  private applyResume(resumable: ResumeStatus | null | undefined, fallback: { lastJob?: LastJob | null; lastScan?: LastScan | null } = {}): void {
+    this.clearIncludedUndo();
+    this.lastJob = resumable?.lastJob ?? fallback.lastJob ?? null;
+    this.lastScan = resumable?.lastScan ?? fallback.lastScan ?? null;
     if (!resumable?.available || !resumable.scanPlanId || !resumable.fingerprint) {
       this.resume = null;
       return;
@@ -824,6 +879,9 @@ export class AppState {
     try {
       await this.persistSettings();
       this.scan = await callBackend<ScanResult>('scan.start', { worldDir: this.worldDir });
+      if (this.scan.status === 'completed') {
+        this.lastScan = this.scan.lastScan ?? { at: Math.floor(Date.now() / 1000), candidateCount: this.scan.candidateCount };
+      }
       notificationStatus = this.scan.status === 'completed' ? 'completed' : this.scan.status;
       this.estimate = this.scan.estimate ?? null;
       this.candidates.reset(this.scan.scanPlanId, this.scan.candidates, this.scan.candidateCount);
@@ -865,33 +923,58 @@ export class AppState {
 
   setIncluded(id: string, included: boolean): void {
     if (this.excluded.has(id) === !included) return;
-    this.includedUndo = new Set(this.excluded);
+    this.recordIncludedUndo();
     this.estimate = null;
     if (included) this.excluded.delete(id);
     else this.excluded.add(id);
   }
 
   setIncludedMany(ids: string[], included: boolean): void {
-    this.includedUndo = new Set(this.excluded);
+    const revision = this.recordIncludedUndo();
     this.estimate = null;
     for (const id of ids) {
       if (included) this.excluded.delete(id);
       else this.excluded.add(id);
     }
-    this.notify(t('review.bulkUndoReady'), 'info', 10000, {
+    this.undoToastId = this.notify(t('review.bulkUndoReady'), 'info', 10000, {
       label: t('review.undo'),
-      run: () => { this.undoIncluded(); }
+      run: () => { this.undoIncludedFor(revision); }
     });
   }
 
   undoIncluded(): boolean {
-    if (!this.includedUndo) return false;
+    return this.undoIncludedFor();
+  }
+
+  private undoIncludedFor(revision?: number): boolean {
+    const record = this.includedUndo;
+    if (!record || (revision !== undefined && record.revision !== revision)) return false;
+    if (!this.scan || record.scanPlanId !== this.scan.scanPlanId || record.worldDir !== this.worldDir) {
+      this.clearIncludedUndo();
+      return false;
+    }
     this.excluded.clear();
-    for (const id of this.includedUndo) this.excluded.add(id);
-    this.includedUndo = null;
+    for (const id of record.excluded) this.excluded.add(id);
+    this.clearIncludedUndo();
     this.estimate = null;
     void this.loadEstimate();
     return true;
+  }
+
+  private recordIncludedUndo(): number {
+    this.clearIncludedUndo();
+    const revision = ++this.undoRevision;
+    this.includedUndo = {
+      excluded: new Set(this.excluded), scanPlanId: this.scan?.scanPlanId ?? '', worldDir: this.worldDir, revision
+    };
+    return revision;
+  }
+
+  private clearIncludedUndo(): void {
+    this.includedUndo = null;
+    this.undoRevision += 1;
+    if (this.undoToastId !== null) this.dismissToast(this.undoToastId);
+    this.undoToastId = null;
   }
 
   setOverride(id: string, value: string): void {
@@ -1321,9 +1404,9 @@ export class AppState {
   }
 
   /** `checkConnection` for a form: the outcome as a value, with the provider's error code on failure. */
-  async testConnection(selection: Settings, draftApiKey = ''): Promise<{ ok: true; count: number } | { ok: false; code: string }> {
+  async testConnection(selection: Settings, draftApiKey = '', isCurrent: () => boolean = () => true): Promise<{ ok: true; count: number } | { ok: false; code: string }> {
     try {
-      return { ok: true, count: await this.checkConnection(selection, draftApiKey) };
+      return { ok: true, count: await this.checkConnection(selection, draftApiKey, isCurrent) };
     } catch (cause) {
       return { ok: false, code: cause instanceof BackendError ? cause.code : '' };
     }
@@ -1334,7 +1417,7 @@ export class AppState {
    * the stored key. Always asks the provider and never falls back to a cached list, so a wrong key
    * cannot look like a working connection.
    */
-  async checkConnection(selection: Settings, draftApiKey = ''): Promise<number> {
+  async checkConnection(selection: Settings, draftApiKey = '', isCurrent: () => boolean = () => true): Promise<number> {
     const scope = this.modelScope(selection);
     if (this.busy) throw new Error(t('settings.model.wait'));
     this.busy = 'models';
@@ -1348,6 +1431,7 @@ export class AppState {
         connectionCheck: true,
         ...(draft ? { draftApiKey: draft } : {})
       });
+      if (!isCurrent()) return 0;
       const hidden = listed.hiddenCount ?? listed.models.filter((model) => model.suitable === false).length;
       this.models = listed.models;
       this.modelsScope = scope;

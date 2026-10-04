@@ -68,7 +68,7 @@ test('the full path: draft key checked on paste, model prefilled, saved once, la
   const lookups = (await requests(page, 'models.list')).filter((request) => request.hasDraftKey);
   expect(lookups).toEqual([expect.objectContaining({ provider: 'openrouter', connectionCheck: true, draftKeyLength: 22 })]);
   expect(await requests(page, 'settings.set')).toHaveLength(0);
-  await expect(wizard(page)).toContainText('암호화해 저장합니다');
+  await expect(wizard(page)).toContainText('현재 저장 방식: 로컬 암호화 저장 (기본)');
   await expect(wizard(page).getByRole('button', { name: /저장 방식 자세히 보기/ })).toBeVisible();
   await axe(page);
   await wizard(page).getByRole('button', { name: /^다음/ }).click();
@@ -355,4 +355,104 @@ test('the wizard passes contrast and axe checks in dark mode', async ({ page }) 
   await expect(wizard(page)).toContainText('API 키가 올바르지 않거나');
   await axe(page);
   await page.screenshot({ path: 'output/playwright/setup-wizard-dark.png' });
+});
+
+test('the visible connection button retries a transient failure for the same key', async ({ page }) => {
+  await firstRun(page);
+  await toKeyStep(page);
+  const input = page.locator('#setup-api-key');
+  await input.fill('offline-key-value');
+  await input.blur();
+  await expect(wizard(page)).toContainText('네트워크에 연결하지 못했습니다');
+  const before = await requests(page, 'models.list');
+
+  await wizard(page).getByRole('button', { name: '연결 확인', exact: true }).click();
+
+  await expect(wizard(page)).toContainText('연결됨 · 모델 7개');
+  expect(await requests(page, 'models.list')).toHaveLength(before.length + 1);
+});
+
+test('custom endpoint changes reset the connection result and use the new identity', async ({ page }) => {
+  await firstRun(page);
+  await wizard(page).getByRole('button', { name: '확인하고 시작하기' }).click();
+  await wizard(page).getByRole('button', { name: /고급: 직접 지정/ }).click();
+  await wizard(page).getByRole('radio', { name: /사용자 지정 엔드포인트/ }).check();
+  await page.locator('#setup-base-url').fill('https://one.example.test/v1');
+  await wizard(page).getByRole('button', { name: /^다음/ }).click();
+  const input = page.locator('#setup-api-key');
+  await input.fill('custom-fixture-key');
+  await input.blur();
+  await expect(wizard(page)).toContainText('연결됨');
+  const firstLookupCount = (await requests(page, 'models.list')).length;
+
+  await wizard(page).getByRole('button', { name: /뒤로/ }).click();
+  await page.locator('#setup-base-url').fill('https://two.example.test/v1');
+  await wizard(page).getByRole('button', { name: /^다음/ }).click();
+  await expect(wizard(page)).not.toContainText('연결됨');
+  await wizard(page).getByRole('button', { name: '연결 확인', exact: true }).click();
+
+  await expect(wizard(page)).toContainText('연결됨');
+  const lookups = await requests(page, 'models.list');
+  expect(lookups).toHaveLength(firstLookupCount + 1);
+  expect(lookups.at(-1)).toMatchObject({ provider: 'custom', baseUrl: 'https://two.example.test/v1', wireFormat: 'openai' });
+});
+
+test('a native close request keeps the wizard draft in place and offers wizard choices', async ({ page }) => {
+  await firstRun(page);
+  await toKeyStep(page);
+  await page.locator('#setup-api-key').fill('synthetic-close-draft');
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiUnsavedSettings)).toBe(true);
+
+  const requestClose = () => page.evaluate(() => (window as any).__pomiEmit('pomi-close-requested', 'window'));
+  await requestClose();
+  let closeDialog = page.getByRole('dialog', { name: '설정 마법사 내용을 어떻게 할까요?' });
+  await expect(closeDialog).toBeVisible();
+  await expect(closeDialog.locator('.close')).toHaveCount(0);
+  await expect(closeDialog.getByRole('button', { name: '저장하고 닫기', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1, name: '환경 설정' })).toHaveCount(0);
+  await closeDialog.getByRole('button', { name: '설정 계속하기', exact: true }).click();
+  await expect(page.locator('#setup-api-key')).toHaveValue('synthetic-close-draft');
+
+  await requestClose();
+  closeDialog = page.getByRole('dialog', { name: '설정 마법사 내용을 어떻게 할까요?' });
+  await closeDialog.getByRole('button', { name: '버리고 닫기', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await requests(page, 'settings.set')).toHaveLength(0);
+  expect(await page.evaluate(() => (window as any).__pomiNativeCalls.some((call: any) => call.command === 'finish_close' && call.args.source === 'window'))).toBe(true);
+});
+
+test('the wizard saves a valid setup before completing a native close request', async ({ page }) => {
+  await firstRun(page);
+  await wizard(page).getByRole('button', { name: '확인하고 시작하기' }).click();
+  await wizard(page).getByRole('button', { name: /^다음/ }).click();
+  await page.locator('#setup-api-key').fill('sk-or-fixture-good-key');
+  await page.locator('#setup-api-key').blur();
+  await expect(wizard(page)).toContainText('연결됨');
+  await wizard(page).getByRole('button', { name: /^다음/ }).click();
+  await wizard(page).getByRole('button', { name: /^다음/ }).click();
+  await page.evaluate(() => (window as any).__pomiEmit('pomi-close-requested', 'quit'));
+  const closeDialog = page.getByRole('dialog', { name: '설정 마법사 내용을 어떻게 할까요?' });
+  await expect(closeDialog.getByRole('button', { name: '저장하고 닫기', exact: true })).toBeVisible();
+  await closeDialog.getByRole('button', { name: '저장하고 닫기', exact: true }).click();
+
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiNativeCalls.some((call: any) => call.command === 'finish_close' && call.args.source === 'quit'))).toBe(true);
+  const saves = await page.evaluate(() => (window as any).__pomiSettingsSaves);
+  expect(saves).toHaveLength(1);
+  expect(saves[0]).toMatchObject({ provider: 'openrouter', model: 'google/gemini-2.5-flash-lite', credentialMode: 'local' });
+  expect(saves[0]).not.toHaveProperty('apiKey');
+});
+
+test('reopened setup explains the active Session and OS keychain storage modes', async ({ page }) => {
+  for (const [mode, label] of [['session', '이번 실행에서만 사용'], ['keychain', 'OS 키체인']] as const) {
+    await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
+    await page.goto(`/?scenario=review&credentialMode=${mode}`);
+    await page.getByRole('button', { name: '도움말', exact: true }).click();
+    await page.getByRole('button', { name: '설정 도우미 열기' }).click();
+    await wizard(page).getByRole('button', { name: /^다음/ }).click();
+    await wizard(page).getByRole('button', { name: /^다음/ }).click();
+    await expect(wizard(page)).toHaveAccessibleName('API 키');
+    await expect(wizard(page)).toContainText(`현재 저장 방식: ${label}`);
+    await wizard(page).getByRole('button', { name: /^뒤로/ }).click();
+    await wizard(page).getByRole('button', { name: '나중에' }).click();
+  }
 });

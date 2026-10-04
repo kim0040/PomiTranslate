@@ -17,6 +17,8 @@
   let height = $state(420);
   let active = $state(0);
   let menu = $state<{ candidate: Candidate; index: number; x: number; y: number } | null>(null);
+  let menuActive = $state(0);
+  let menuElement: HTMLDivElement | undefined = $state();
 
   const win = $derived(visibleWindow({ scrollTop, viewportHeight: height, rowHeight: ROW, total: source.total }));
   const indexes = $derived(Array.from({ length: Math.max(0, win.end - win.start) }, (_, i) => win.start + i));
@@ -84,8 +86,9 @@
     const y = event instanceof MouseEvent ? event.clientY : rect?.top ?? 12;
     active = index;
     onSelect(candidate, false);
+    menuActive = 0;
     menu = { candidate, index, x: Math.max(8, Math.min(x, window.innerWidth - 248)), y: Math.max(8, Math.min(y, window.innerHeight - 176)) };
-    void tick().then(() => document.querySelector<HTMLElement>('.candidate-menu [role="menuitem"]')?.focus());
+    void tick().then(() => menuElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
   }
 
   function toggleFromMenu(): void {
@@ -94,10 +97,19 @@
     closeMenu();
   }
 
-  function closeMenu(): void {
+  function closeMenu(restoreFocus = true): void {
     const index = menu?.index;
     menu = null;
-    if (index !== undefined) void tick().then(() => viewport?.querySelector<HTMLElement>(`[data-index="${index}"]`)?.focus());
+    if (restoreFocus && index !== undefined) void tick().then(() => viewport?.querySelector<HTMLElement>(`[data-index="${index}"]`)?.focus());
+  }
+
+  function editFromMenu(): void {
+    if (!menu) return;
+    const candidate = menu.candidate;
+    const wasExcluded = app.excluded.has(candidate.id);
+    closeMenu();
+    if (wasExcluded) app.setIncluded(candidate.id, true);
+    void openEditor(candidate);
   }
 
   async function copySourceFromMenu(): Promise<void> {
@@ -113,13 +125,48 @@
   }
 
   function handleDocumentPointer(event: PointerEvent): void {
-    if (menu && !(event.target as HTMLElement | null)?.closest('.candidate-menu')) menu = null;
+    const target = event.target;
+    if (menu && (!(target instanceof HTMLElement) || !target.closest('.candidate-menu'))) closeMenu(false);
   }
 
   function handleDocumentKey(event: KeyboardEvent): void {
     if (!menu || event.key !== 'Escape') return;
     event.preventDefault();
     closeMenu();
+  }
+
+  async function focusMenuItem(index: number): Promise<void> {
+    const items = menuElement?.querySelectorAll<HTMLElement>('[role="menuitem"]');
+    if (!items?.length) return;
+    menuActive = Math.max(0, Math.min(items.length - 1, index));
+    await tick();
+    menuElement?.querySelectorAll<HTMLElement>('[role="menuitem"]')[menuActive]?.focus();
+  }
+
+  function handleMenuKey(event: KeyboardEvent): void {
+    if (!menu) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? 2
+        : menuActive + (event.key === 'ArrowDown' ? 1 : -1);
+      void focusMenuItem(next);
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      closeMenu();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      menuElement?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')[menuActive]?.click();
+    }
+  }
+
+  function handleMenuFocusout(event: FocusEvent): void {
+    if (!menu) return;
+    const next = event.relatedTarget;
+    if (next instanceof Node && menuElement?.contains(next)) return;
+    const row = menu.index;
+    const nextRow = next instanceof HTMLElement && next.matches(`[data-index="${row}"]`);
+    closeMenu(!nextRow);
   }
 
   onMount(() => {
@@ -248,10 +295,11 @@
 </div>
 
 {#if menu}
-  <div class="candidate-menu" role="menu" aria-label={t('review.context.label')} tabindex="-1" style:left="{menu.x}px" style:top="{menu.y}px" oncontextmenu={(event) => event.preventDefault()}>
-    <button type="button" role="menuitem" onclick={toggleFromMenu}>{app.excluded.has(menu.candidate.id) ? t('review.context.include') : t('review.context.exclude')}</button>
-    <button type="button" role="menuitem" onclick={() => { const candidate = menu!.candidate; closeMenu(); void openEditor(candidate); }}>{t('review.context.manual')}</button>
-    <button type="button" role="menuitem" onclick={copySourceFromMenu}>{t('review.context.copy')}</button>
+  <div bind:this={menuElement} class="candidate-menu" role="menu" aria-label={t('review.context.label')} tabindex="-1" style:left="{menu.x}px" style:top="{menu.y}px"
+    oncontextmenu={(event) => event.preventDefault()} onkeydown={handleMenuKey} onfocusout={handleMenuFocusout}>
+    <button type="button" role="menuitem" tabindex={menuActive === 0 ? 0 : -1} onclick={toggleFromMenu}>{app.excluded.has(menu.candidate.id) ? t('review.context.include') : t('review.context.exclude')}</button>
+    <button type="button" role="menuitem" tabindex={menuActive === 1 ? 0 : -1} onclick={editFromMenu}>{t('review.context.manual')}</button>
+    <button type="button" role="menuitem" tabindex={menuActive === 2 ? 0 : -1} onclick={copySourceFromMenu}>{t('review.context.copy')}</button>
   </div>
 {/if}
 
