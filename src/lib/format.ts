@@ -24,8 +24,11 @@ export function formatBytes(bytes: number, locale: Locale): string {
 /** Dollars, with as many decimals as it takes to show the first significant digits of a tiny amount. */
 export function formatUsd(amount: number, locale: Locale): string {
   const abs = Math.abs(amount);
-  const digits = abs === 0 ? 2 : abs >= 1 ? 2 : abs >= 0.01 ? 3 : 4;
-  return new Intl.NumberFormat(BCP47[locale], { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: digits }).format(amount);
+  const options: Intl.NumberFormatOptions = { style: 'currency', currency: 'USD' };
+  // Under a cent, fixed decimals would round a real amount to "$0.00": keep two significant digits instead.
+  if (abs > 0 && abs < 0.01) options.maximumSignificantDigits = 2;
+  else { options.minimumFractionDigits = 2; options.maximumFractionDigits = abs >= 1 ? 2 : 3; }
+  return new Intl.NumberFormat(BCP47[locale], options).format(amount);
 }
 
 export function formatDuration(seconds: number, locale: Locale): string {

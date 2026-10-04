@@ -72,10 +72,47 @@ test('stepper shows the current label and step count at 840px while keeping acce
   await expect(stepper.getByRole('button', { name: /월드 선택/ })).toHaveCount(1);
 });
 
+test('stepper keeps all five step names at the default window and only compacts when they cannot fit', async ({ page }) => {
+  await boot(page, 'selected', 1180, 800);
+  const stepper = page.getByRole('navigation', { name: '작업 단계' });
+  await expect(stepper.locator('.name')).toHaveText(['월드 선택', '월드 스캔', '후보 검토', '번역 진행', '완료 결과']);
+  await expect(stepper.locator('.step-count')).toHaveCount(0);
+  expect(await page.locator('.toolbar').evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  // Any window above the minimum band keeps the names.
+  await page.setViewportSize({ width: 1100, height: 700 });
+  await expect(stepper.locator('.name')).toHaveCount(5);
+  // The minimum window is where they stop fitting: current name and a count remain.
+  await page.setViewportSize({ width: 840, height: 620 });
+  await expect(stepper.locator('.name')).toHaveCount(1);
+  await expect(stepper.locator('.step-count')).toHaveText('2/5');
+  // Growing back restores the names without a reload.
+  await page.setViewportSize({ width: 1180, height: 800 });
+  await expect(stepper.locator('.name')).toHaveCount(5);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+});
+
+for (const [locale, scheme] of [['en', 'light'], ['ja', 'dark'], ['ko', 'dark']] as const) {
+  test(`stepper shows all five names at 1180px in ${locale} (${scheme})`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.setViewportSize({ width: 1180, height: 800 });
+    await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
+    await page.goto(`/?scenario=selected&locale=${locale}`);
+    await expect(page.locator('.boot')).toHaveCount(0);
+    const stepper = page.getByRole('navigation').filter({ has: page.locator('.step') });
+    await expect(stepper.locator('.name')).toHaveCount(5);
+    await expect(stepper.locator('.step-count')).toHaveCount(0);
+    expect(await page.locator('.toolbar').evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  });
+}
+
 test('scan home explains scanning and shows the latest saved job and resume action', async ({ page }) => {
   await boot(page, 'selected');
   await expect(page.getByText('월드 파일을 읽어 번역 후보를 찾으며 API는 호출하지 않습니다.')).toBeVisible();
   const latest = page.getByRole('region', { name: '이 월드의 최근 작업' });
+  // The scan card below already names the world, so the summary does not repeat it.
+  await expect(latest.getByRole('heading', { level: 2 })).toHaveText('이 월드의 최근 작업');
+  await expect(latest).not.toContainText('Roguefire');
+  await expect(page.locator('main').getByRole('heading', { level: 2, name: /^Roguefire/ })).toHaveCount(1);
   await expect(latest).toContainText('최근 번역');
   await expect(latest).toContainText('번역 4개 · 실패 2개');
   await expect(latest).toContainText('6');
@@ -242,8 +279,11 @@ test('an empty narrow review area collapses its unused side panel', async ({ pag
   await boot(page, 'review', 840, 620);
   await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^후보 검토/ }).click();
   await expect(page.locator('.detailwrap')).toHaveCount(0);
+  // The panel is the 40px hint at once: no frame may show the old 340px column (reduced-motion transitions used to).
   const hint = page.locator('.detail-hint');
-  if (await hint.count()) expect(await hint.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(48);
+  await expect(hint).toBeVisible();
+  expect(await hint.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThanOrEqual(48);
+  expect(await page.locator('.workarea').evaluate((element) => getComputedStyle(element).transitionProperty)).toBe('none');
   expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
 });
 

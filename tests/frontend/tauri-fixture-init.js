@@ -157,8 +157,11 @@
     timeout: 'ReadTimeout: read timed out (120s) while waiting for the provider', rate_limit: 'HTTP 429 Too Many Requests: rate limit reached for requests',
     invalid_response: 'Expected 6 items but the model returned 5', network: 'ConnectError: [Errno 8] nodename nor servname provided, or not known',
     quota: 'HTTP 402 Payment Required: insufficient credits', content_filter: 'The response was blocked by the safety system',
-    auth: 'HTTP 401 Unauthorized: invalid api key', provider_error: 'HTTP 503 Service Unavailable: upstream connect error', unknown: 'Not translated yet.'
+    auth: 'HTTP 401 Unauthorized: invalid api key', provider_error: 'HTTP 503 Service Unavailable: upstream connect error', unknown: 'Not translated yet.', budget_unsent: '', unsent: ''
   };
+  // Rows no request has answered: not failures of the AI; a retry sends them.
+  const UNSENT = ['budget_unsent', 'unsent'];
+  const isUnsent = (row) => row.status === 'failed' && UNSENT.includes(row.reason);
   const koText = {
     'Welcome to Roguefire': '로그파이어에 오신 것을 환영합니다', 'The Lost Key Shop': '잃어버린 열쇠 상점',
     'Find the keeper beyond the old bridge.': '낡은 다리 너머의 수호자를 찾아라.', 'A blade that remembers every battle': '모든 전투를 기억하는 검',
@@ -178,7 +181,7 @@
     const rows = candidates.filter((item) => !skip.has(item.id)).map((item) => ({
       id: item.id, source: item.source, kind: item.kind, occurrences: item.occurrences, ai: aiFor(item.source), status: 'translated', reason: '', detail: '', edit: undefined
     }));
-    const pending = (row) => failRow(row, 'unknown');
+    const pending = (row) => failRow(row, kind === 'budget_stopped' ? 'budget_unsent' : 'unsent');
     const spread = (row, index) => failRow(row, failCodes[index % 6]);
     if (kind === 'partial') rows.slice(0, 2).forEach((row) => failRow(row, 'provider_error'));
     else if (kind === 'failed' || kind === 'needs_retry') rows.forEach(spread);
@@ -191,7 +194,7 @@
     job = {
       kind, rows, status: kind === 'review' ? 'awaiting_review' : kind === 'success' ? 'completed' : kind, excluded: [...skip],
       applied: kind === 'success' || kind === 'partial', backupSetId: kind === 'success' || kind === 'partial' ? backups[0].backupSetId : '',
-      usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }
+      requests: 0, usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }
     };
     return job;
   }
@@ -212,8 +215,13 @@
     };
   };
   function jobCounts(drafts) {
-    const counts = { all: 0, translated: 0, failed: 0, kept: 0, edited: 0 };
-    for (const row of job.rows) { counts.all++; counts[viewRow(row, drafts).status]++; }
+    const counts = { all: 0, translated: 0, failed: 0, kept: 0, edited: 0, unsent: 0, errored: 0 };
+    for (const row of job.rows) {
+      counts.all++;
+      const view = viewRow(row, drafts);
+      counts[view.status]++;
+      if (view.status === 'failed') counts[isUnsent(row) ? 'unsent' : 'errored']++;
+    }
     return counts;
   }
   function retryEstimate() {
@@ -226,24 +234,29 @@
     let rows = job.rows.map((row) => viewRow(row, drafts));
     const text = String(body.query || '').trim().toLocaleLowerCase();
     if (text) rows = rows.filter((row) => row.source.toLocaleLowerCase().includes(text) || row.translated.toLocaleLowerCase().includes(text));
-    if (body.state && body.state !== 'all') rows = rows.filter((row) => row.status === body.state);
+    const unsentIds = new Set(job.rows.filter(isUnsent).map((row) => row.id));
+    if (body.state === 'unsent') rows = rows.filter((row) => row.status === 'failed' && unsentIds.has(row.id));
+    else if (body.state === 'errored') rows = rows.filter((row) => row.status === 'failed' && !unsentIds.has(row.id));
+    else if (body.state && body.state !== 'all') rows = rows.filter((row) => row.status === body.state);
     const offset = Number(body.offset || 0);
     const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
     return {
       rows: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, counts: jobCounts(drafts),
-      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, usage: job.usage, retryEstimate: retryEstimate() }
+      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests },  retryEstimate: retryEstimate() }
     };
   }
   function jobResult(status, extra = {}) {
-    const failed = job.rows.filter((row) => row.status === 'failed');
+    const unsent = job.rows.filter(isUnsent);
+    const failed = job.rows.filter((row) => row.status === 'failed' && !isUnsent(row));
     const unchanged = job.rows.filter((row) => row.status === 'translated' && row.ai === row.source && row.edit === undefined).length;
     return {
       status, candidateCount: candidates.length, changedFileCount: job.applied ? 8 : 0, providerRequests: 0, backupSetId: job.applied ? job.backupSetId : '', preTranslate: '', localhostServer: false,
       errors: [], warnings: [],
-      translation: { unique: job.rows.length, translated: job.rows.length - failed.length - unchanged, failed: failed.length, kept_original: 0, unchanged, pending: failed.filter((row) => row.reason === 'unknown').length },
+      translation: { unique: job.rows.length, translated: job.rows.length - failed.length - unsent.length - unchanged, failed: failed.length, kept_original: 0, unchanged, pending: unsent.length },
       translationFailures: failed.slice(0, 20).map((row) => ({ source: row.source, reason: row.reason, detail: row.detail })),
       translationSamples: job.rows.filter((row) => row.status !== 'failed').slice(0, 12).map((row) => ({ source: row.source, translated: row.edit ?? row.ai })), keptOriginalSamples: [],
-      usage: job.usage, ...extra
+      // The job's own totals, like the usage: this call's providerRequests is in `extra`.
+      jobProviderRequests: job.requests, usage: { ...job.usage, requests: job.requests }, ...extra
     };
   }
   function progressEvents(request, type, names) {
@@ -278,29 +291,32 @@
 
   function resultPayload(status) {
     if (status === 'partial') return {
-      status, candidateCount: candidates.length, changedFileCount: 4, providerRequests: 2,
+      status, candidateCount: candidates.length, changedFileCount: 4, providerRequests: 2, jobProviderRequests: 2,
       backupSetId: backups[0].backupSetId,
       translation: { unique: 6, translated: 4, failed: 2, kept_original: 0, unchanged: 0 },
-      translationSamples: [{ source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }],
+      translationSamples: [
+        { source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }, { source: 'Find the keeper beyond the old bridge.', translated: '낡은 다리 너머의 수호자를 찾아라.' },
+        { source: 'A blade that remembers every battle', translated: '모든 전투를 기억하는 검' }, { source: 'You are not ready yet.', translated: '아직 준비가 되지 않았습니다.' }
+      ],
       translationFailures: [{ source: 'Welcome to Roguefire', reason: 'provider_error', detail: 'HTTP 503 Service Unavailable: upstream connect error' }],
       usage: { prompt_tokens: 540, completion_tokens: 180, cost: 0.00018, cost_reported: true }
     };
     if (status === 'failed' || status === 'needs_retry') return {
-      status, candidateCount: candidates.length, changedFileCount: 0, providerRequests: 3,
+      status, candidateCount: candidates.length, changedFileCount: 0, providerRequests: 3, jobProviderRequests: 3,
       errors: [{ code: 'PROVIDER_ERROR', message: 'Provider requests failed repeatedly.' }],
       translation: { unique: 6, translated: 0, failed: 6, kept_original: 0, unchanged: 0 },
       translationFailures: [{ source: 'Welcome to Roguefire', reason: 'provider_error', detail: 'HTTP 503 Service Unavailable: upstream connect error' }],
       usage: { prompt_tokens: 680, completion_tokens: 0, cost: 0.0002, cost_reported: true }
     };
     if (status === 'budget_stopped') return {
-      status, candidateCount: candidates.length, changedFileCount: 0, providerRequests: 1, backupSetId: '',
-      translation: { unique: 6, translated: 3, failed: 3, kept_original: 0, unchanged: 0, pending: 3 },
+      status, candidateCount: candidates.length, changedFileCount: 0, providerRequests: 1, jobProviderRequests: 1, backupSetId: '',
+      translation: { unique: 6, translated: 3, failed: 0, kept_original: 0, unchanged: 0, pending: 3 },
       usage: { prompt_tokens: 380, completion_tokens: 120, cost: 0.0001, cost_reported: true }
     };
     if (status === 'cancelled') return {
-      status, candidateCount: candidates.length, changedFileCount: 2, providerRequests: 1,
+      status, candidateCount: candidates.length, changedFileCount: 2, providerRequests: 1, jobProviderRequests: 1,
       backupSetId: backups[0].backupSetId,
-      translation: { unique: 6, translated: 2, failed: 0, kept_original: 0, unchanged: 0 },
+      translation: { unique: 6, translated: 2, failed: 0, kept_original: 0, unchanged: 0, pending: 4 },
       usage: { prompt_tokens: 280, completion_tokens: 80, cost: 0.00008, cost_reported: true }
     };
     if (status === 'invalidated') return {
@@ -312,7 +328,7 @@
       translation: { unique: 0, translated: 0, failed: 0, kept_original: 0, unchanged: 0 }
     };
     return {
-      status: 'completed', candidateCount: candidates.length, changedFileCount: 8, providerRequests: 1,
+      status: 'completed', candidateCount: candidates.length, changedFileCount: 8, providerRequests: 1, jobProviderRequests: 1,
       backupSetId: backups[0].backupSetId,
       translation: { unique: 6, translated: 5, failed: 0, kept_original: 0, unchanged: 1 },
       translationSamples: [
@@ -471,16 +487,19 @@
       }
       if (current.startsWith('result-')) {
         ensureJob(body.excludedCandidateIds);
-        return ok(request, resultPayload(current.slice('result-'.length)));
+        const staged = resultPayload(current.slice('result-'.length));
+        job.requests = staged.jobProviderRequests ?? 0;
+        return ok(request, staged);
       }
       const resuming = type === 'translate.resume';
       const budgetStop = query.get('budget') === '1' && !body.budgetOverride && !job;
       if (!resuming || !job) makeJob('review', body.excludedCandidateIds);
       if (budgetStop) {
-        makeJob('budget_stopped', body.excludedCandidateIds);
-        return ok(request, resultPayload('budget_stopped'));
+        makeJob('budget_stopped', body.excludedCandidateIds).requests = 1;
+        return ok(request, jobResult('budget_stopped', { providerRequests: 1 }));
       }
       if (job.status === 'budget_stopped') job.rows.forEach((row) => { row.status = 'translated'; row.reason = ''; row.detail = ''; });
+      job.requests += 1;
       progressEvents(request, 'translate.progress', [
         [10, { event: 'phase_start', phase: 'translate', total: job.rows.length, requests_estimate: 1 }],
         [30, { event: 'translation_progress', completed: job.rows.length, total: job.rows.length, failed: 0, batch: 1, batches: 1, requests: 1 }]
@@ -507,6 +526,7 @@
         [10, { event: 'phase_start', phase: 'translate', total: job.rows.filter((row) => row.status === 'failed').length, requests_estimate: 1 }]
       ]);
       await sleep(80);
+      job.requests += 1;
       if (query.get('retryFail') !== '1') job.rows.forEach((row) => { if (row.status === 'failed' && row.edit === undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; } });
       job.status = 'awaiting_review';
       job.usage = { ...job.usage, prompt_tokens: job.usage.prompt_tokens + 120, completion_tokens: job.usage.completion_tokens + 40, cost: job.usage.cost + 0.00006 };

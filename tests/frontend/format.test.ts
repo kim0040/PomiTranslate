@@ -40,6 +40,11 @@ describe('format helpers', () => {
     expect(formatUsd(0.01234, 'en')).toBe('$0.012');
     expect(formatUsd(-0.0001, 'en')).toBe('-$0.0001');
     expect(formatUsd(1.25, 'ko')).toContain('US$');
+    // Estimates and caps under a cent never collapse to "$0.00".
+    expect(formatUsd(0.00004, 'en')).toBe('$0.00004');
+    expect(formatUsd(0.00018, 'en')).toBe('$0.00018');
+    expect(formatUsd(0.005, 'en')).toBe('$0.005');
+    expect(formatUsd(0.00004, 'ko')).toBe('US$0.00004');
   });
 
   it('formats duration with the correct unit and clamps negative input', () => {

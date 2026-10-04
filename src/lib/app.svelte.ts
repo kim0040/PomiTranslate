@@ -1167,7 +1167,7 @@ export class AppState {
     if (!more) this.failures = { ...emptyFailures(), loading: true };
     else this.failures.loading = true;
     try {
-      const page = await fetchTranslationPage(this.identity, { state: 'failed', offset, limit: FAILURE_PAGE });
+      const page = await fetchTranslationPage(this.identity, { state: 'errored', offset, limit: FAILURE_PAGE });
       if (revision !== this.failuresRevision) return;
       this.failures = {
         loading: false, checkpoint: true, rows: more ? [...this.failures.rows, ...page.rows] : page.rows,

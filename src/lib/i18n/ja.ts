@@ -359,7 +359,7 @@ export const ja: Record<MessageKey, string> = {
   'result.stat.failed': '失敗',
   'result.stat.kept': '書式保護による原文維持',
   'result.stat.files': '変更されたファイル',
-  'result.stat.requests': 'APIリクエスト数',
+  'result.stat.requests': 'APIリクエスト数（作業全体）',
   'result.stat.tokens': '使用トークン数',
   'result.stat.cost': '実際の請求費用',
   'result.tokensValue': '入力 {input} · 出力 {output} トークン',
@@ -1045,4 +1045,9 @@ export const ja: Record<MessageKey, string> = {
   "error.ALREADY_APPLIED": "この翻訳はすでにワールドに適用されています。修正は「再適用」で反映してください。",
   "translationReview.resumed": "前回の作業の翻訳がまだ適用されていません",
   "translationReview.resumedHelp": "翻訳は完了していますが、ワールドには何も書き込んでいません。結果を確認して適用するか、あとで戻ってきて続けられます。",
+  "result.stat.unsent": "未送信",
+  "result.stat.unsentBudget": "費用上限のため未送信",
+  "result.viewAll": "すべての翻訳を見る",
+  "failure.budget_unsent": "費用上限のため送信しませんでした。続行すると翻訳します。",
+  "failure.unsent": "作業が止まったため、まだ送信していません。続行すると翻訳します。",
 };

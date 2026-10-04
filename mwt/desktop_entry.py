@@ -921,12 +921,22 @@ def _load_job(data_dir: Path, scan_plan_id: str, world: Path) -> dict:
     return job if same_world else {}
 
 
+def _job_requests(report: dict) -> int:
+    usage = report.get("job_usage") or {}
+    try:
+        return max(int(usage["requests"]), int(report.get("provider_requests", 0)))
+    except (KeyError, TypeError, ValueError):
+        return int(report.get("provider_requests", 0) or 0)
+
+
 def _translate_payload(report: dict) -> dict:
     return {
         "status": report.get("status"),
         "candidateCount": report.get("candidate_text_count", 0),
         "changedFileCount": report.get("changed_file_count", 0),
         "providerRequests": report.get("provider_requests", 0),
+        # Requests across every run of the job, like the usage below; providerRequests is this call only.
+        "jobProviderRequests": _job_requests(report),
         "backupSetId": report.get("backup_set_id", ""),
         "preTranslate": PRE_TRANSLATE,
         "localhostServer": False,
@@ -942,15 +952,14 @@ def _translate_payload(report: dict) -> dict:
 
 
 def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_dir: Path) -> dict:
-    from mwt.desktop_review import job_rows, translations_page
+    from mwt.desktop_review import UNSENT_REASONS, job_rows, translations_page
 
     if not job:
         raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
     overrides = normalize_source_overrides(saved.get("source_overrides", {}), field="saved source_overrides")
     page = translations_page(plan, job, overrides, body)
-    failed_records = [
-        {"source": row["source"]} for row in job_rows(plan, job, overrides) if row["status"] == "failed"
-    ]
+    rows = [row for row in job_rows(plan, job, overrides) if row["status"] == "failed"]
+    failed_records = [{"source": row["source"]} for row in rows]
     applied = job.get("applied") or {}
     report = job.get("report") or {}
     page["meta"] = {
@@ -958,6 +967,7 @@ def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_d
         "applied": bool(applied),
         "backupSetId": str(applied.get("backup_set_id") or ""),
         "failedCount": len(failed_records),
+        "unsentCount": sum(1 for row in rows if row.get("reason") in UNSENT_REASONS),
         "usage": job.get("usage_total") or {},
         "retryEstimate": _estimate(failed_records, saved, data_dir) if failed_records else None,
     }

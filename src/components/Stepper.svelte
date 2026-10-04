@@ -7,21 +7,46 @@
   const isDone = (step: Step) => STEPS.indexOf(step) < order && app.stepReached[step];
   const label = (step: Step) => t(`step.${step}` as MessageKey);
   let nav: HTMLElement | undefined = $state();
-  let width = $state(1200);
-  const compact = $derived(width < 980);
+  let list: HTMLElement | undefined = $state();
+  // Names collapse only when the toolbar is narrower than the minimum window leaves, or when all five
+  // really do not fit: the room is compared with the width the full stepper measured when it last
+  // rendered whole (0 = not measured yet).
+  let available = $state(Number.POSITIVE_INFINITY);
+  let fullWidth = $state(0);
+  let measuredLocale = '';
+  // Below this the names are dropped even when they would just fit: the window is at its minimum and the
+  // toolbar must keep room for the sidebar toggle and a long step name.
+  const COMPACT_BELOW = 760;
+  const compact = $derived(available < COMPACT_BELOW || (fullWidth > 0 && available < fullWidth));
 
   $effect(() => {
     const toolbar = nav?.parentElement;
     if (!toolbar) return;
-    width = toolbar.clientWidth;
-    const observer = new ResizeObserver(([entry]) => { width = entry.contentRect.width; });
+    const room = () => {
+      const style = getComputedStyle(toolbar);
+      return toolbar.clientWidth - parseFloat(style.paddingInlineStart) - parseFloat(style.paddingInlineEnd);
+    };
+    available = room();
+    const observer = new ResizeObserver(() => { available = room(); });
     observer.observe(toolbar);
     return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    const locale = app.locale;
+    const collapsed = compact;
+    if (!list) return;
+    // The names change with the language, so a compact stepper re-measures after rendering whole once.
+    if (locale !== measuredLocale) {
+      measuredLocale = locale;
+      if (collapsed) { fullWidth = 0; return; }
+    }
+    if (!collapsed) fullWidth = Math.ceil(list.getBoundingClientRect().width);
   });
 </script>
 
 <nav bind:this={nav} class="stepper" class:compact aria-label={t('step.list')}>
-  <ol>
+  <ol bind:this={list}>
     {#each STEPS as step, index (step)}
       {@const current = app.step === step}
       {@const reachable = app.stepReached[step] && !app.isBusy}

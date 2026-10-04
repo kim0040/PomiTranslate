@@ -16,7 +16,9 @@ from mwt.tokens import _without_trailing_reset, preserve_tokens, tokens_preserve
 # NBT stores a string with a 16-bit length; the core keeps the original instead of writing more.
 MAX_EDIT_BYTES = 30_000
 MAX_EDIT_CHARS = 32_000
-STATES = {"all", "translated", "failed", "kept", "edited"}
+STATES = {"all", "translated", "failed", "kept", "edited", "unsent", "errored"}
+# Failed rows that were never sent to the AI: not failures of the AI, and a retry sends them.
+UNSENT_REASONS = {"budget_unsent", "unsent"}
 
 
 def load_job(checkpoint_path: Path) -> dict[str, Any]:
@@ -93,8 +95,9 @@ def _effective(
         info = failures.get(source) if isinstance(failures.get(source), dict) else None
         if info:
             return "failed", "", str(info.get("reason") or "unknown"), str(info.get("detail") or ""), ""
-        # Never answered: the run stopped before this string was sent, or it was cut off.
-        return "failed", "", "unknown", "Not translated yet.", ""
+        # Never answered: the run stopped before this string was sent. The cost cap is its own reason.
+        stopped_by_budget = (job.get("report") or {}).get("status") == "budget_stopped"
+        return "failed", "", "budget_unsent" if stopped_by_budget else "unsent", "", ""
     shown = preserve_tokens(source, ai)
     if ai and not tokens_preserved(source, _without_trailing_reset(source, ai)):
         # The AI's answer lost or added a format code, so the original was kept.
@@ -158,10 +161,17 @@ def translations_page(
     counts = {"all": len(rows)}
     for name in ("translated", "failed", "kept", "edited"):
         counts[name] = sum(1 for row in rows if row["status"] == name)
+    # "failed" keeps meaning every row a retry would send; these two split it for the result.
+    counts["unsent"] = sum(1 for row in rows if row["status"] == "failed" and row.get("reason") in UNSENT_REASONS)
+    counts["errored"] = counts["failed"] - counts["unsent"]
     state = str(body.get("state") or "all")
     if state not in STATES:
         raise ValueError("Unknown translation state filter")
-    if state != "all":
+    if state == "unsent":
+        rows = [row for row in rows if row["status"] == "failed" and row.get("reason") in UNSENT_REASONS]
+    elif state == "errored":
+        rows = [row for row in rows if row["status"] == "failed" and row.get("reason") not in UNSENT_REASONS]
+    elif state != "all":
         rows = [row for row in rows if row["status"] == state]
     query = str(body.get("query") or "").strip().casefold()
     if query:

@@ -1021,6 +1021,8 @@ class WorldTranslator(TextExtractionMixin):
             "completion_tokens": int(prior.get("completion_tokens") or 0) + int(current.get("completion_tokens") or 0),
             "cost": float(prior.get("cost") or 0) + float(current.get("cost") or 0),
             "cost_reported": bool(prior.get("cost_reported") or current.get("cost_reported")),
+            # Requests of the whole job too, so a result never pairs one call's count with the job's cost.
+            "requests": int(prior.get("requests") or 0) + int(LLMProviderClient.request_count),
         }
 
     def load_checkpoint(self) -> None:

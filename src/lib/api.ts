@@ -156,20 +156,25 @@ export type CandidateQuery = {
   overrideCandidateIds?: string[];
 };
 
-export type TranslationStats = { unique: number; translated: number; failed: number; kept_original: number; unchanged: number };
+export type TranslationStats = { unique: number; translated: number; failed: number; kept_original: number; unchanged: number; /** Strings no request answered before the run stopped. */ pending: number };
 
 export type FailureCode =
-  | 'timeout' | 'auth' | 'rate_limit' | 'quota' | 'invalid_response' | 'content_filter' | 'network' | 'provider_error' | 'unknown';
+  | 'timeout' | 'auth' | 'rate_limit' | 'quota' | 'invalid_response' | 'content_filter' | 'network' | 'provider_error' | 'unknown'
+  // Never sent to the AI because the run stopped first (the cost cap, or a cancel): not a failure of the AI.
+  | 'budget_unsent' | 'unsent';
 
 export type TranslationFailure = { source: string; reason: FailureCode | string; detail?: string };
 
-export type TranslationUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean };
+/** What the whole job has used so far, `requests` included, however many runs it took. */
+export type TranslationUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean; requests?: number };
 
 export type TranslationResult = {
   status: 'awaiting_review' | 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'budget_stopped' | 'locked' | 'invalidated' | 'unsupported' | string;
   candidateCount: number;
   changedFileCount: number;
+  /** Requests of this call only; `jobProviderRequests` counts every run of the job, like `usage`. */
   providerRequests?: number;
+  jobProviderRequests?: number;
   backupSetId?: string;
   recoverySetId?: string;
   errors?: { scope?: string; code?: string; message?: string; file?: string }[];
@@ -196,7 +201,8 @@ export type TranslationRow = {
   detail?: string;
 };
 
-export type TranslationCounts = Record<TranslationState, number>;
+/** `failed` is every row a retry would send; `unsent` of them were never sent and `errored` are the rest. */
+export type TranslationCounts = Record<TranslationState, number> & { unsent?: number; errored?: number };
 
 export type TranslationPageMeta = {
   status: string;
@@ -204,6 +210,8 @@ export type TranslationPageMeta = {
   applied: boolean;
   backupSetId: string;
   failedCount: number;
+  /** Failed rows that were never sent (a cost cap or cancel stopped the run first). */
+  unsentCount?: number;
   usage: TranslationUsage;
   retryEstimate: Estimate | null;
 };

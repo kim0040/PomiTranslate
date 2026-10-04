@@ -359,7 +359,7 @@ export const en: Record<MessageKey, string> = {
   'result.stat.failed': 'Failed',
   'result.stat.kept': 'Preserved for Safety (Formatting)',
   'result.stat.files': 'Modified Files',
-  'result.stat.requests': 'API Requests',
+  'result.stat.requests': 'API Requests (Whole Job)',
   'result.stat.tokens': 'Tokens Used',
   'result.stat.cost': 'Actual Cost',
   'result.tokensValue': '{input} input · {output} output tokens',
@@ -1045,4 +1045,9 @@ export const en: Record<MessageKey, string> = {
   "error.ALREADY_APPLIED": "These translations are already in the world. Use \"Apply again\" to include edits.",
   "translationReview.resumed": "Translations from an earlier session were not applied yet",
   "translationReview.resumedHelp": "They are finished, but nothing has been written to the world. Review and apply them now, or come back later.",
+  "result.stat.unsent": "Not Sent",
+  "result.stat.unsentBudget": "Not Sent (Cost Cap)",
+  "result.viewAll": "View All Translations",
+  "failure.budget_unsent": "Not sent because of the cost cap. Continuing will translate it.",
+  "failure.unsent": "Not sent yet because the run stopped. Continuing will translate it.",
 };

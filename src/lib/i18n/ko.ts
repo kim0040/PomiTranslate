@@ -360,7 +360,7 @@ export const ko = {
   'result.stat.failed': '번역 실패',
   'result.stat.kept': '서식 보호로 원문 유지',
   'result.stat.files': '변경된 파일',
-  'result.stat.requests': 'API 요청 수',
+  'result.stat.requests': 'API 요청 수 (작업 전체)',
   'result.stat.tokens': '사용된 토큰',
   'result.stat.cost': '실제 청구 비용',
   'result.tokensValue': '입력 {input}개 · 출력 {output}개',
@@ -1046,6 +1046,11 @@ export const ko = {
   "error.ALREADY_APPLIED": "이미 월드에 적용된 번역입니다. 수정은 \"다시 적용\"으로 반영해 주세요.",
   "translationReview.resumed": "지난 작업의 번역이 아직 적용되지 않았습니다",
   "translationReview.resumedHelp": "번역은 끝났지만 월드에는 아무것도 쓰지 않았습니다. 결과를 검토하고 적용하거나, 나중에 다시 와서 이어서 할 수 있습니다.",
+  "result.stat.unsent": "보내지 않은 문장",
+  "result.stat.unsentBudget": "비용 한도로 보내지 않음",
+  "result.viewAll": "전체 번역문 보기",
+  "failure.budget_unsent": "비용 한도로 보내지 않았습니다. 이어서 진행하면 번역합니다.",
+  "failure.unsent": "작업이 멈춰 아직 보내지 않았습니다. 이어서 진행하면 번역합니다.",
 } as const;
 
 export type MessageKey = keyof typeof ko;

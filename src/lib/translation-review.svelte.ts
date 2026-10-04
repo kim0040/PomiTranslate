@@ -14,7 +14,7 @@ export type TranslationPlan = { worldDir: string; scanPlanId: string };
 /** One page of the complete translation table, for the review view and for the result's failure list. */
 export function fetchTranslationPage(
   plan: TranslationPlan,
-  params: { query?: string; state?: TranslationState; offset?: number; limit?: number; draftIds?: string[] }
+  params: { query?: string; state?: TranslationState | 'unsent' | 'errored'; offset?: number; limit?: number; draftIds?: string[] }
 ): Promise<TranslationPage> {
   return callBackend<TranslationPage>('translations.page', {
     worldDir: plan.worldDir,
