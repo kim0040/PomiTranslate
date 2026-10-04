@@ -5,6 +5,7 @@
   const previewLanguages = { ko: '한국어', en: 'English', ja: '日本語' };
   const previewTranslations = { ko: '잃어버린 열쇠 상점', en: 'The Lost Key Shop', ja: '失われた鍵の店' };
   window.__pomiRequests = [];
+  window.__pomiSettingsSaves = [];
   const callbacks = new Map();
   const listeners = new Map();
   let callbackId = 0;
@@ -46,11 +47,13 @@
   const credentialModes = new Map();
   const settings = {
     provider: 'openrouter', model: new URLSearchParams(location.search).get('model') || 'xiaomi/mimo-v2.6-flash', base_url: '', wire_format: 'openai',
-    target_language: previewLanguages[previewLocale], style_preset: 'neutral', style_prompt: '', custom_system_prompt: '',
+    target_language: new URLSearchParams(location.search).get('targetLanguage') || previewLanguages[previewLocale], style_preset: 'neutral', style_prompt: '', custom_system_prompt: '',
     temperature: 0.3, batch_size: 40, request_timeout: 120, rpm_limit: 0, tpm_limit: 0,
     max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false,
     skip_target_language_text: true, ui_language: previewLocale, last_world_dir: worldDir
   };
+  // Saved manual translations from an earlier session, in the settings object format.
+  if (new URLSearchParams(location.search).get('sourceOverrides') === '1') settings.source_overrides = { 'Welcome to Roguefire': '환영합니다', 'You are not ready yet.': '아직 준비가 안 됐군.' };
   // A fresh install: no model chosen and no key saved yet.
   const fresh = new URLSearchParams(location.search).get('fresh') === '1';
   if (fresh) Object.assign(settings, { provider: 'openai', model: '' });
@@ -157,7 +160,13 @@
   async function sidecar(request) {
     const type = request.type;
     const body = request.payload || {};
-    window.__pomiRequests.push({ type, provider: body.provider, publicCatalog: body.publicCatalog });
+    // A draft key is recorded only as a flag and its length, never as text.
+    window.__pomiRequests.push({
+      type, provider: body.provider, publicCatalog: body.publicCatalog, connectionCheck: body.connectionCheck,
+      hasDraftKey: typeof body.draftApiKey === 'string' && body.draftApiKey.length > 0,
+      draftKeyLength: typeof body.draftApiKey === 'string' ? body.draftApiKey.length : undefined,
+      hasApiKey: typeof body.apiKey === 'string' && body.apiKey.length > 0, apiKeyLength: typeof body.apiKey === 'string' ? body.apiKey.length : undefined
+    });
     const current = scenario();
     if (type === 'app.bootstrap') {
       bootstrapAttempts++;
@@ -174,7 +183,7 @@
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
-        ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
+        ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
         apiKeyStored: !fresh || freshKeySaved, credentialMode: 'local', worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
         worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
         resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false }
@@ -187,6 +196,9 @@
     }
     if (type === 'settings.set') {
       if (new URLSearchParams(location.search).get('slowSettings') === '1') await new Promise((resolve) => setTimeout(resolve, 1500));
+      if (new URLSearchParams(location.search).get('saveFails') === '1') return { v: 1, id: request.id, type: 'response.error', error: { code: 'SETTINGS_FAILED', message: 'Synthetic save failure' } };
+      // What a save carried, without the key, so a test can check the exact payload.
+      window.__pomiSettingsSaves.push(Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'apiKey')));
       const aliases = { openrouterReasoning: 'openrouter_reasoning', externalResourcePackPaths: 'external_resource_pack_paths', resourcePackOptions: 'resource_pack_options', sourceOverrides: 'source_overrides', continueOnFileError: 'continue_on_file_error', maxFileWriteRetries: 'max_file_write_retries', targetLanguage: 'target_language', uiLanguage: 'ui_language', baseUrl: 'base_url', wireFormat: 'wire_format', resourcePackEnabled: 'resource_pack_enabled', skipTargetLanguageText: 'skip_target_language_text', scanOptions: 'scan_options' };
       for (const [key, value] of Object.entries(body)) {
         if (key !== 'apiKey' && key !== 'credentialMode') settings[aliases[key] || key] = value;
@@ -197,7 +209,7 @@
     }
     if (type === 'prefs.set') {
       window.__pomiPrefs = { ...(window.__pomiPrefs || {}), ...(body.prefs || {}) };
-      return ok(request, { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', ...window.__pomiPrefs } });
+      return ok(request, { prefs: { ...({ theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' }), ...window.__pomiPrefs } });
     }
     if (type === 'app.reset') {
       if (body.confirm !== 'reset') return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'Reset needs an explicit confirmation' } };
@@ -229,7 +241,29 @@
     if (type === 'models.list') {
       if (new URLSearchParams(location.search).get('slowModels') === '1') await new Promise((resolve) => setTimeout(resolve, 700));
       if (new URLSearchParams(location.search).get('modelError') === '1') return { v: 1, id: request.id, type: 'response.error', error: { code: 'MODELS_FAILED', message: 'Synthetic metadata lookup failure' } };
-      return ok(request, { cached: new URLSearchParams(location.search).get('cachedModels') === '1', models: [{ id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash' }, { id: 'deepseek/deepseek-v4.1-flash', supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'high', supported_efforts: ['max', 'high', 'low'] } }, { id: 'mandatory-fixture', reasoning: { mandatory: true, supported_efforts: ['high'] } }] });
+      const fail = (code, message) => ({ v: 1, id: request.id, type: 'response.error', error: { code, message } });
+      if (body.connectionCheck) {
+        // The key text decides the outcome, so a test can reach every failure the real core reports.
+        const draft = typeof body.draftApiKey === 'string' ? body.draftApiKey : '';
+        const storedKey = (!fresh || freshKeySaved) && new URLSearchParams(location.search).get('missingKey') !== '1';
+        if (!draft && !storedKey) return fail('KEY_MISSING', 'API key is missing');
+        const failures = { 'bad-': ['AUTH_FAILED', 'HTTP 401'], 'nocredit-': ['NO_CREDIT', 'HTTP 402'], 'rate-': ['RATE_LIMITED', 'HTTP 429'], 'down-': ['PROVIDER_ERROR', 'HTTP 503'], 'offline-': ['NETWORK_ERROR', 'request failed'], 'timeout-': ['TIMEOUT', 'timed out'] };
+        for (const [prefix, [code, message]] of Object.entries(failures)) if (draft.startsWith(prefix)) return fail(code, message);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      const catalog = [
+        { id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash' },
+        { id: 'deepseek/deepseek-v4.1-flash', supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'high', supported_efforts: ['max', 'high', 'low'] } },
+        { id: 'mandatory-fixture', reasoning: { mandatory: true, supported_efforts: ['high'] } },
+        { id: 'google/gemini-2.5-flash-lite', display_name: 'Gemini 2.5 Flash Lite', pricing_prompt: '0.0000001', pricing_completion: '0.0000004', context_length: 1048576 },
+        { id: 'openai/gpt-5-mini', display_name: 'GPT-5 Mini', pricing_prompt: '0.00000025', pricing_completion: '0.000002', context_length: 400000, supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'medium', supported_efforts: ['high', 'medium', 'low'] } },
+        { id: 'anthropic/claude-haiku-4.5', display_name: 'Claude Haiku 4.5', pricing_prompt: '0.000001', pricing_completion: '0.000005', context_length: 200000 },
+        { id: 'openai/gpt-5.1', display_name: 'GPT-5.1', pricing_prompt: '0.00000125', pricing_completion: '0.00001', context_length: 400000 },
+        { id: 'openai/gpt-image-1', display_name: 'GPT Image 1', suitable: false },
+        { id: 'openai/whisper-1', display_name: 'Whisper', suitable: false },
+        { id: 'openai/text-embedding-3-large', display_name: 'Text Embedding 3 Large', suitable: false }
+      ].map((model) => ({ suitable: true, ...model }));
+      return ok(request, { cached: new URLSearchParams(location.search).get('cachedModels') === '1', hiddenCount: catalog.filter((model) => !model.suitable).length, models: catalog });
     }
     if (type === 'prompt.enhance') return ok(request, { enhancedPrompt: '중세 판타지 분위기에 맞추어 짧고 자연스럽게 번역하세요.' });
     if (type === 'scan.start') {

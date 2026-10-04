@@ -11,12 +11,24 @@ async function boot(page: Page, query: string) {
 }
 const emit = (page: Page, name: string, payload: unknown) => page.evaluate(([n, p]) => (window as any).__pomiEmit(n, p), [name, payload] as const);
 const prefs = (page: Page) => page.evaluate(() => (window as any).__pomiPrefs ?? {});
+// Settings is a set of tabs; the app tab holds updates, the data folder and reset, each in its own card.
+async function appTab(page: Page, card?: RegExp) {
+  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱' }).click();
+  if (card) {
+    const toggle = page.getByRole('button', { name: card });
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  }
+}
 
-test('a first launch shows the notice, then a short tour, and remembers both in the settings file', async ({ page }) => {
+test('a first launch shows the notice in the setup wizard, then a short tour, and remembers all of it in the settings file', async ({ page }) => {
   await boot(page, 'scenario=first-run');
-  const notice = page.getByRole('dialog');
+  const notice = page.getByRole('dialog', { name: '환영합니다' });
   await expect(notice).toContainText('NOT AN OFFICIAL MINECRAFT PRODUCT');
   await notice.getByRole('button', { name: /확인/ }).click();
+  await expect.poll(() => prefs(page)).toMatchObject({ notice_accepted: true });
+  // Putting the wizard off ("later") leads on to the tour that a first launch shows.
+  await page.getByRole('dialog', { name: 'AI 제공사 선택' }).getByRole('button', { name: '나중에' }).click();
   const tour = page.getByRole('dialog', { name: '시작 안내' });
   await expect(tour).toContainText('PomiTranslate에 오신 것을 환영합니다');
   for (let i = 0; i < 4; i++) await tour.getByRole('button', { name: /^다음/ }).click();
@@ -24,13 +36,13 @@ test('a first launch shows the notice, then a short tour, and remembers both in 
   expect((await new AxeBuilder({ page }).include('dialog').analyze()).violations).toEqual([]);
   await tour.getByRole('button', { name: '시작하기', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect.poll(() => prefs(page)).toMatchObject({ notice_accepted: true, tutorial_seen: true });
+  await expect.poll(() => prefs(page)).toMatchObject({ notice_accepted: true, tutorial_seen: true, setup_dismissed: true });
 });
 
 test('an existing install carries its notice answer and theme over without showing the tour', async ({ page }) => {
   await boot(page, 'scenario=selected');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect.poll(() => prefs(page)).toMatchObject({ notice_accepted: true, tutorial_seen: true, theme: 'light' });
+  await expect.poll(() => prefs(page)).toMatchObject({ notice_accepted: true, tutorial_seen: true, setup_dismissed: true, theme: 'light' });
 });
 
 test('the Help menu opens help, shortcuts, the tour, licenses and a problem report', async ({ page }) => {
@@ -72,7 +84,10 @@ test('web links open in the system browser, not inside the app window', async ({
 test('a signed update installs from settings with progress', async ({ page }) => {
   await boot(page, 'scenario=selected&update=available');
   await emit(page, 'pomi-menu', 'updates');
-  await expect(page.getByRole('heading', { name: '업데이트', exact: true })).toBeInViewport();
+  // The menu lands on the app tab, with the updates card open and in view.
+  await expect(page.getByRole('tab', { name: '앱', selected: true })).toBeVisible();
+  await expect(page.locator('#updates')).toBeInViewport();
+  await expect(page.getByRole('button', { name: /^업데이트/, expanded: true })).toBeVisible();
   await expect(page.getByText('새 버전 0.2.0을 사용할 수 있습니다.')).toBeVisible();
   await page.getByRole('button', { name: '설치하고 다시 시작' }).click();
   await expect(page.getByText('내려받는 중… 50%')).toBeVisible();
@@ -81,7 +96,7 @@ test('a signed update installs from settings with progress', async ({ page }) =>
 
 test('an unsigned build never installs and offers the download page; offline reads as offline', async ({ page }) => {
   await boot(page, 'scenario=selected&update=unsigned');
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await appTab(page, /^업데이트/);
   await page.getByRole('button', { name: '지금 확인' }).click();
   await expect(page.getByText('새 버전 0.2.0을 사용할 수 있습니다.')).toBeVisible();
   await expect(page.getByRole('button', { name: '설치하고 다시 시작' })).toHaveCount(0);
@@ -92,7 +107,7 @@ test('an unsigned build never installs and offers the download page; offline rea
   await expect.poll(() => prefs(page)).toMatchObject({ update_skipped_version: '0.2.0' });
 
   await boot(page, 'scenario=selected&update=offline');
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await appTab(page, /^업데이트/);
   await page.getByRole('button', { name: '지금 확인' }).click();
   await expect(page.getByText('업데이트 서버에 연결하지 못했습니다.', { exact: false })).toBeVisible();
 });
@@ -102,12 +117,13 @@ test('an automatic check runs once a day after start and shows a quiet badge', a
   await expect(page.getByRole('button', { name: '업데이트 0.2.0' })).toBeVisible({ timeout: 8000 });
   await expect.poll(() => prefs(page)).toMatchObject({ update_last_check: expect.any(Number) });
   await page.getByRole('button', { name: '업데이트 0.2.0' }).click();
-  await expect(page.getByRole('heading', { name: '업데이트', exact: true })).toBeInViewport();
+  await expect(page.getByRole('tab', { name: '앱', selected: true })).toBeVisible();
+  await expect(page.locator('#updates')).toBeInViewport();
 });
 
 test('the data folder is shown and can be revealed', async ({ page }) => {
   await boot(page, 'scenario=selected');
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await appTab(page, /^데이터 보관 위치/);
   await expect(page.getByText('/Users/fixture/Library/Application Support/PomiTranslate', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '폴더 열기' }).click();
   expect(await page.evaluate(() => (window as any).__pomiRevealed)).toBe(1);
@@ -116,7 +132,7 @@ test('the data folder is shown and can be revealed', async ({ page }) => {
 
 test('reset asks twice, keeps backups, can keep keys, and restarts at first launch', async ({ page }) => {
   await boot(page, 'scenario=selected');
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await appTab(page, /^초기화/);
   await page.getByRole('button', { name: '초기화…' }).click();
   let dialog = page.getByRole('dialog', { name: '앱을 초기화할까요?' });
   await expect(dialog).toContainText('월드 백업');
@@ -138,7 +154,7 @@ test('reset asks twice, keeps backups, can keep keys, and restarts at first laun
 
 test('reset with keys deletes every provider key', async ({ page }) => {
   await boot(page, 'scenario=selected');
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await appTab(page, /^초기화/);
   await page.getByRole('button', { name: '초기화…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: '계속', exact: true }).click();
   const confirm = page.getByRole('dialog', { name: '정말 초기화할까요?' });

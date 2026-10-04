@@ -2,6 +2,17 @@ import { test, expect, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 
+// Settings is a set of tabs; these open one, and a disclosure card by its title.
+async function settingsTab(page: Page, name: '번역' | '스캔 범위' | '고급' | '앱') {
+  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name }).click();
+}
+async function card(page: Page, title: RegExp) {
+  const toggle = page.getByRole('button', { name: title });
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
+const settingsSaves = (page: Page) => page.evaluate(() => (window as unknown as { __pomiSettingsSaves: Record<string, any>[] }).__pomiSettingsSaves);
+
 async function review(page: Page, count = 0) {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
   await page.goto(`/?scenario=review&count=${count}`);
@@ -20,7 +31,8 @@ test('settings save shows pending state and blocks duplicate writes and draft ed
   await expect(page.locator('#model')).toBeDisabled();
   await expect(page.getByRole('button', { name: '키 변경', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: '번역 작업', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+  // Once saved there is nothing left to save: the bar is gone.
+  await expect(page.locator('.save-bar')).toHaveCount(0);
   await expect(page.locator('#model')).toHaveValue('pending-save-fixture');
   await expect(page.locator('#model')).toBeEnabled();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
@@ -34,6 +46,8 @@ test(`custom endpoint validation at ${width}px explains rejected addresses befor
   await review(page);
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
   await page.locator('#provider').selectOption('custom');
+  // The endpoint of a custom provider is on the advanced tab.
+  await page.getByRole('tab', { name: '고급' }).click();
   const endpoint = page.locator('#base-url');
   const save = page.getByRole('button', { name: '저장', exact: true });
   for (const address of ['https://user:pass@example.test/v1', 'https://example.test/v1?key=fake',
@@ -55,8 +69,9 @@ test(`custom endpoint validation at ${width}px explains rejected addresses befor
 test('resource pack locale settings validate inline and invalidate the reviewed scope', async ({ page }) => {
   await review(page);
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#scope-settings > summary').click();
-  const enabled = page.locator('input[type="checkbox"]').first();
+  await page.getByRole('tab', { name: '스캔 범위' }).click();
+  await card(page, /^ZIP 리소스팩/);
+  const enabled = page.locator('#resource-pack-settings input[type="checkbox"]').first();
   await enabled.check();
   await page.locator('#pack-target').fill('../bad.json');
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
@@ -71,11 +86,13 @@ test('resource pack locale settings validate inline and invalidate the reviewed 
 
 test('saved manual translations keep the scan and appear in manual filtering and detail', async ({ page }) => {
   await review(page);
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#scope-settings > summary').click();
-  await page.getByText('저장형 수동 번역', { exact: true }).click();
-  await page.locator('#source-overrides').fill('{"Welcome to Roguefire":"환영합니다"}');
+  await settingsTab(page, '스캔 범위');
+  await card(page, /^저장형 수동 번역/);
+  await page.getByRole('button', { name: '행 추가' }).click();
+  await page.getByRole('textbox', { name: '원문', exact: true }).fill('Welcome to Roguefire');
+  await page.getByRole('textbox', { name: '번역문', exact: true }).fill('환영합니다');
   await page.getByRole('button', { name: '저장', exact: true }).click();
+  await expect.poll(async () => (await settingsSaves(page)).at(-1)?.sourceOverrides).toEqual({ 'Welcome to Roguefire': '환영합니다' });
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
   await page.getByRole('group', { name: '상태 필터' }).getByRole('button', { name: '직접 번역', exact: true }).click();
@@ -88,19 +105,28 @@ test('saved manual translations keep the scan and appear in manual filtering and
 
 test('story preset preserves file rules and invalid saved translation input blocks saving', async ({ page }) => {
   await review(page);
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#scope-settings > summary').click();
+  await settingsTab(page, '스캔 범위');
   await page.getByRole('button', { name: '스토리 중심', exact: true }).click();
   await expect(page.getByLabel('아이템 이름', { exact: true })).not.toBeChecked();
   await expect(page.getByLabel('아이템 설명 (Lore)', { exact: true })).not.toBeChecked();
   await page.getByRole('button', { name: '추천 범위', exact: true }).click();
   await expect(page.getByLabel('아이템 이름', { exact: true })).toBeChecked();
-  await page.getByText('저장형 수동 번역', { exact: true }).click();
-  await page.locator('#source-overrides').fill('{broken');
+  // The file rules are on the advanced tab and are not touched by the presets.
+  await page.getByRole('tab', { name: '고급' }).click();
+  await card(page, /^파일 및 번역 키 규칙/);
+  await expect(page.getByRole('list', { name: '추가 리전 폴더' }).getByRole('listitem')).toHaveCount(6);
+  await page.getByRole('tab', { name: '스캔 범위' }).click();
+  await card(page, /^저장형 수동 번역/);
+  // An incomplete row cannot be saved; a complete one can.
+  await page.getByRole('button', { name: '행 추가' }).click();
+  await page.getByRole('textbox', { name: '원문', exact: true }).fill('{broken');
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
-  await page.locator('#source-overrides').fill('{}');
+  await page.getByRole('textbox', { name: '번역문', exact: true }).fill('깨진 원문');
+  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
+  await page.getByRole('textbox', { name: '원문', exact: true }).fill('');
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
-  await page.locator('#source-overrides').fill('{"Fixture source":"새 직접 번역"}');
+  await page.getByRole('textbox', { name: '원문', exact: true }).fill('Fixture source');
+  await page.getByRole('textbox', { name: '번역문', exact: true }).fill('새 직접 번역');
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
 });
 
@@ -202,7 +228,7 @@ test('manual draft survives desktop to narrow dialog resize', async ({ page }) =
 test('credential modes and explicit import never reveal a stored key', async ({ page }) => {
   await review(page);
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#key-management > summary').click();
+  await card(page, /^키 관리 및 보안/);
   await expect(page.locator('#credential-mode')).toHaveValue('local');
   await expect(page.locator('#api-key')).toHaveCount(0);
   await page.locator('#credential-mode').selectOption('session');
@@ -223,7 +249,7 @@ test('model preserves scan; target language invalidates it', async ({ page }) =>
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#target-language').fill('日本語');
+  await page.locator('#target-language').selectOption('日本語');
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   await expect(page.getByRole('grid')).toHaveCount(0);
@@ -242,7 +268,7 @@ test('kind filters are available immediately after loading a preview', async ({ 
 test('changing a text category invalidates the reviewed scan', async ({ page }) => {
   await review(page);
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('#scope-settings > summary').click();
+  await page.getByRole('tab', { name: '스캔 범위' }).click();
   await page.getByLabel('표지판', { exact: true }).uncheck();
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
@@ -256,7 +282,8 @@ test('settings export omits credentials and reset remains an unsaved draft', asy
   await page.getByLabel('사용 모델', { exact: true }).fill('synthetic-draft-model');
   await page.getByRole('button', { name: '키 변경', exact: true }).click();
   await page.locator('#api-key').fill('synthetic-secret-never-export');
-  await page.locator('#settings-management > summary').click();
+  await page.getByRole('tab', { name: '고급' }).click();
+  await card(page, /^설정 가져오기·내보내기/);
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: '설정 내보내기', exact: true }).click();
   const download = await downloading;
@@ -294,15 +321,15 @@ test('style helper confirms provider transmission and edits only the unsaved pro
 
 test('legacy settings import omits keys, preserves the world and stays a draft', async ({ page }) => {
   await review(page);
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.locator('input[type="file"]').setInputFiles({ name: 'legacy.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
+  await settingsTab(page, '고급');
+  await page.locator('#settings-management input[type="file"]').setInputFiles({ name: 'legacy.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
     world_dir: '/private/tmp/should-not-be-selected', api: { provider: 'openrouter', model: 'imported-model', api_key: 'synthetic-import-secret' },
     prompt: { target_language: '한국어', style_preset: 'story' }, batch_size: 64
   })) });
   await expect(page.getByLabel('사용 모델', { exact: true })).toHaveValue('imported-model');
   await expect(page.locator('#api-key')).toHaveCount(0);
   await expect(page.getByText('설정을 편집 화면에 불러왔습니다. 확인한 뒤 저장해 주세요. API 키는 가져오지 않았습니다.', { exact: true })).toBeVisible();
-  await page.locator('input[type="file"]').setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{broken') });
+  await page.locator('#settings-management input[type="file"]').setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer: Buffer.from('{broken') });
   await expect(page.getByText(/설정을 가져올 수 없습니다/)).toBeVisible();
   await expect(page.getByLabel('사용 모델', { exact: true })).toHaveValue('imported-model');
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
@@ -316,14 +343,14 @@ test('legacy settings import omits keys, preserves the world and stays a draft',
 
 test('literal Python settings import uses a preview and remains unsaved on failure', async ({ page }) => {
   await review(page);
-  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await settingsTab(page, '고급');
   const source = 'API_KEY = "synthetic-secret"\nBASE_URL = "https://legacy.example/v1"\nMODEL = "literal-model"\nSYSTEM_PROMPT = "Preserve formatting"';
-  await page.locator('input[type="file"]').setInputFiles({ name: 'translate.py', mimeType: 'text/x-python', buffer: Buffer.from(source) });
+  await page.locator('#settings-management input[type="file"]').setInputFiles({ name: 'translate.py', mimeType: 'text/x-python', buffer: Buffer.from(source) });
   await expect(page.getByLabel('사용 모델', { exact: true })).toHaveValue('literal-model');
   await page.screenshot({ path: 'output/playwright/settings-python-import.png', fullPage: true });
   await expect(page.locator('#api-key')).toHaveCount(0);
   await expect(page.locator('main')).not.toContainText('synthetic-secret');
-  await page.locator('input[type="file"]').setInputFiles({ name: 'invalid.py', mimeType: 'text/x-python', buffer: Buffer.from('invalid Python import') });
+  await page.locator('#settings-management input[type="file"]').setInputFiles({ name: 'invalid.py', mimeType: 'text/x-python', buffer: Buffer.from('invalid Python import') });
   await expect(page.getByText(/설정을 가져올 수 없습니다/)).toBeVisible();
   await expect(page.getByLabel('사용 모델', { exact: true })).toHaveValue('literal-model');
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
@@ -352,8 +379,9 @@ for (const width of [1440, 840, 320]) {
     await page.setViewportSize({ width, height: 620 });
     await review(page);
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-    await page.locator('#scope-settings > summary').click();
-    await page.locator('#scope-settings input[type="checkbox"]').first().check();
+    await page.getByRole('tab', { name: '스캔 범위' }).click();
+    await card(page, /^ZIP 리소스팩/);
+    await page.locator('#resource-pack-settings input[type="checkbox"]').first().check();
     const target = page.locator('#pack-target');
     await target.fill('ja_jp.json');
     await target.scrollIntoViewIfNeeded();
@@ -369,8 +397,9 @@ for (const width of [1440, 840, 320]) {
     await page.setViewportSize({ width, height: 620 });
     await review(page);
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-    await page.locator('#scope-settings > summary').click();
-    await page.locator('#scope-settings input[type="checkbox"]').first().check();
+    await page.getByRole('tab', { name: '스캔 범위' }).click();
+    await card(page, /^ZIP 리소스팩/);
+    await page.locator('#resource-pack-settings input[type="checkbox"]').first().check();
     const path = '/private/tmp/pomi-eval/' + 'very-long-resource-pack-folder/'.repeat(6) + '선택한 리소스팩.zip';
     await page.evaluate((chosen) => {
       (window as typeof window & { __pomiDialogFiles?: string[] }).__pomiDialogFiles = [chosen];
@@ -384,7 +413,7 @@ for (const width of [1440, 840, 320]) {
     await page.getByRole('button', { name: '번역 작업', exact: true }).click();
     await expect(page.getByRole('button', { name: '스캔 시작', exact: true })).toBeVisible();
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-    await page.locator('#scope-settings > summary').click();
+    await page.getByRole('tab', { name: '스캔 범위' }).click();
     await expect(page.locator('section.external-packs')).toContainText(path);
     await page.getByRole('button', { name: `외부 팩 선택 해제: ${path}`, exact: true }).click();
     await expect(page.locator('section.external-packs')).toContainText('선택한 외부 ZIP이 없습니다.');

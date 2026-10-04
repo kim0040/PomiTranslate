@@ -188,6 +188,8 @@ export type AppPrefs = {
   theme: 'system' | 'light' | 'dark';
   notice_accepted: boolean;
   tutorial_seen: boolean;
+  /** The setup wizard was finished or put off, so it does not open again by itself. */
+  setup_dismissed: boolean;
   update_auto_check: boolean;
   update_last_check: number;
   update_skipped_version: string;
@@ -218,6 +220,8 @@ export type ModelInfo = {
   pricing_prompt?: string;
   pricing_completion?: string;
   context_length?: number;
+  /** False for models made for something other than translating text (image, audio, embeddings...). */
+  suitable?: boolean;
 };
 
 export type ProgressEvent = {

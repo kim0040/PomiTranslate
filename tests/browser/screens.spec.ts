@@ -184,7 +184,7 @@ test('OpenRouter reasoning separates mode and supported effort and persists choi
   await select.selectOption('max');
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await expect(select).toHaveValue('max');
-  await expect(page.getByText('저장된 설정과 같습니다', { exact: true })).toBeVisible();
+  await expect(page.locator('.save-bar')).toHaveCount(0);
   await page.getByRole('button', { name: '정보', exact: true }).click();
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
   await expect(select).toHaveValue('max');
@@ -204,7 +204,7 @@ for (const width of [1440, 840, 320]) {
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
     const sidebar = page.locator('.sidebar');
     const before = await sidebar.boundingBox();
-    await page.getByRole('button', { name: '저장', exact: true }).scrollIntoViewIfNeeded();
+    await page.locator('main').evaluate((pane) => pane.scrollTo(0, pane.scrollHeight));
     const after = await sidebar.boundingBox();
     expect(after?.y).toBeCloseTo(before!.y, 0);
     expect(after?.height).toBeCloseTo(before!.height, 0);

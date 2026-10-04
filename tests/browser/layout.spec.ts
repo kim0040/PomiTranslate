@@ -53,6 +53,7 @@ for (const locale of ['en', 'ja']) {
   test(`${locale} review and settings fit a short narrow window in dark mode`, async ({ page }) => {
     await review(page);
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('tab', { name: '앱' }).click();
     await page.locator('#application-settings').getByRole('radio', { name: '다크' }).check();
     // The display language applies at once, like the appearance: no Save step.
     await page.locator('#ui-language').selectOption(locale);

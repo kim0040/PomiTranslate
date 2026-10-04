@@ -305,6 +305,7 @@ APP_PREF_DEFAULTS: dict = {
     "theme": "system",
     "notice_accepted": False,
     "tutorial_seen": False,
+    "setup_dismissed": False,
     "update_auto_check": True,
     "update_last_check": 0,
     "update_skipped_version": "",
@@ -316,7 +317,7 @@ def _valid_pref(key: str, value):
         if value not in {"system", "light", "dark"}:
             raise ValueError("theme must be system, light or dark")
         return value
-    if key in {"notice_accepted", "tutorial_seen", "update_auto_check"}:
+    if key in {"notice_accepted", "tutorial_seen", "setup_dismissed", "update_auto_check"}:
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false")
         return value

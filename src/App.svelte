@@ -7,7 +7,7 @@
   import { baseName } from './lib/format';
   import Sidebar from './components/Sidebar.svelte';
   import Stepper from './components/Stepper.svelte';
-  import Dialog from './components/Dialog.svelte';
+  import SetupWizard from './components/SetupWizard.svelte';
   import Callout from './components/Callout.svelte';
   import Toasts from './components/Toasts.svelte';
   import Icon from './components/Icon.svelte';
@@ -186,22 +186,11 @@
   </div>
 </div>
 
-{#if app.showNotice && app.notices}
-  <Dialog title={t('notice.title')} dismissible={false} onClose={() => {}}>
-    <div class="notice-brand" aria-hidden="true"><img src="/images/pomi.png" alt="" width="72" height="72" /></div>
-    <ul class="notice-list">
-      <li><Icon name="shield" size={19} /> <span>{t('notice.item1')}</span></li>
-      <li><Icon name="language" size={19} /> <span>{t('notice.item2')}</span></li>
-      <li><Icon name="info" size={19} /> <span>{t('notice.item3')}</span></li>
-    </ul>
-    <p class="required" lang="en">NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
-    {#snippet actions()}
-      <button type="button" class="btn btn-primary btn-lg" data-autofocus onclick={() => app.acceptNotice()}>{t('notice.accept')}</button>
-    {/snippet}
-  </Dialog>
+{#if app.showWizard && app.ready && !app.startupFailed}
+  <SetupWizard />
 {/if}
 
-{#if app.showTour && !app.showNotice && app.ready}
+{#if app.showTour && !app.showWizard && !app.showNotice && app.ready}
   <Tour />
 {/if}
 
@@ -248,12 +237,6 @@
   main.review-page { --pane-pad-bottom: var(--space-3); padding-block-end: var(--space-3); }
   .boot { min-height: 50vh; display: flex; align-items: center; justify-content: center; gap: var(--space-3); color: var(--text-secondary); }
   .banner { margin-block-end: var(--space-4); }
-  .notice-brand { display: grid; place-items: center; }
-  .notice-brand img { width: 72px; height: 72px; object-fit: contain; outline: 1px solid var(--image-outline); outline-offset: -1px; border-radius: var(--radius-xl); }
-  .notice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
-  .notice-list li { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: var(--space-3); }
-  .required { font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); letter-spacing: 0.01em; }
-  .notice-list :global(.icon) { color: var(--accent-text); margin-top: 2px; }
   .drop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 3px dashed var(--accent); outline-offset: -12px; pointer-events: none; animation: pomi-fade var(--dur-fast) var(--ease-out); }
   .drop-card { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-radius: var(--radius-xl); background: var(--bg-surface); color: var(--accent-text); font-weight: 600; box-shadow: var(--shadow-pop); }
 

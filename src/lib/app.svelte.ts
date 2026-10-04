@@ -28,7 +28,8 @@ import { CandidateSource } from './candidates.svelte';
 import { hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
 import { applyTheme, type ThemeChoice } from './theme';
 import { emptyProgress, reduceProgress, type JobProgress } from './workflow';
-import { normalizedScanOptions, scanOptionsSignature } from './settings';
+import { copySettings, normalizedScanOptions, scanOptionsSignature } from './settings';
+import type { SettingsTab } from './settings-tabs';
 
 export type Page = 'workspace' | 'backups' | 'settings' | 'about' | 'help';
 export type Step = 'world' | 'scan' | 'review' | 'run' | 'result';
@@ -50,7 +51,7 @@ const PROVIDERS = ['openai', 'gemini', 'anthropic', 'openrouter', 'comet', 'cust
 export const ISSUES_URL = 'https://github.com/kim0040/PomiTranslate/issues/new';
 const DAY = 24 * 60 * 60;
 export const DEFAULT_PREFS: AppPrefs = {
-  theme: 'system', notice_accepted: false, tutorial_seen: false,
+  theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false,
   update_auto_check: true, update_last_check: 0, update_skipped_version: ''
 };
 export type UpdateState = 'idle' | 'checking' | 'installing' | 'error';
@@ -78,6 +79,8 @@ export class AppState {
   /** App state saved with the settings file; the web view's storage is only a fast copy. */
   prefs = $state<AppPrefs>({ ...DEFAULT_PREFS });
   showTour = $state(false);
+  /** The first-run setup wizard (also reached from Help). It carries the legal notice on its first step. */
+  showWizard = $state(false);
   showLicenses = $state(false);
   /** A section of the help page to bring into view (set by the Help menu). */
   helpSection = $state('');
@@ -94,6 +97,8 @@ export class AppState {
   pendingLeave = $state<(() => void) | null>(null);
   /** The workflow step that sent the user to settings, so settings can offer the way back. */
   returnStep = $state<Step | null>(null);
+  /** The settings tab shown. It is kept for the session, and a fix-it link picks the tab it needs. */
+  settingsTab = $state<SettingsTab>('translate');
 
   settings = $state<Settings>(defaultSettings());
   apiKeyStored = $state(false);
@@ -104,7 +109,9 @@ export class AppState {
   models = $state<ModelInfo[]>([]);
   modelsScope = $state('');
   modelsCached = $state(false);
-  private modelCatalogs = new Map<string, { models: ModelInfo[]; fetchedAt: number; cached: boolean }>();
+  /** Models the catalog layer marked as unsuitable for translating text (listed apart, hidden by default). */
+  modelsHidden = $state(0);
+  private modelCatalogs = new Map<string, { models: ModelInfo[]; fetchedAt: number; cached: boolean; hidden: number }>();
 
   worldDir = $state('');
   inspection = $state<WorldInspection | null>(null);
@@ -303,7 +310,8 @@ export class AppState {
       let acceptedBefore = false;
       try { acceptedBefore = localStorage.getItem(NOTICE_KEY) === 'accepted'; } catch { /* no storage */ }
       const carried: Partial<AppPrefs> = {};
-      if (acceptedBefore) Object.assign(carried, { notice_accepted: true, tutorial_seen: true });
+      // Someone who used the app before the wizard existed is not shown a first-run guide.
+      if (acceptedBefore) Object.assign(carried, { notice_accepted: true, tutorial_seen: true, setup_dismissed: true });
       if (this.theme !== 'system') carried.theme = this.theme;
       Object.assign(saved, carried);
       if (Object.keys(carried).length) void this.setPrefs(carried);
@@ -311,7 +319,9 @@ export class AppState {
     this.prefs = saved;
     if (saved.theme !== this.theme) this.setThemeOnly(saved.theme);
     this.showNotice = !saved.notice_accepted;
-    this.showTour = saved.notice_accepted && !saved.tutorial_seen;
+    // First run, or still no usable provider and the guide was never put off or finished.
+    this.showWizard = !saved.notice_accepted || (this.setupNeeds.length > 0 && !saved.setup_dismissed);
+    this.showTour = saved.notice_accepted && !saved.tutorial_seen && !this.showWizard;
     if (saved.update_auto_check && Date.now() / 1000 - saved.update_last_check > DAY) {
       setTimeout(() => void this.checkUpdates(false), 4000);
     }
@@ -346,8 +356,45 @@ export class AppState {
   acceptNotice(): void {
     try { localStorage.setItem(NOTICE_KEY, 'accepted'); } catch { /* the settings file is the record */ }
     this.showNotice = false;
-    if (!this.prefs.tutorial_seen) this.showTour = true;
     void this.setPrefs({ notice_accepted: true });
+  }
+
+  /** Open the setup wizard again (Help, the tour, or a missing-setup notice). */
+  openWizard(): void {
+    if (!this.ready || this.startupFailed || this.showNotice) return;
+    this.showWizard = true;
+  }
+
+  /**
+   * Close the wizard without finishing ("later"). It stays closed on later launches, and the plain
+   * setup notices on the scan and run steps still say what is missing. The tour that the first run
+   * would have shown comes next.
+   */
+  dismissWizard(): void {
+    this.showWizard = false;
+    if (!this.prefs.setup_dismissed) void this.setPrefs({ setup_dismissed: true });
+    if (!this.prefs.tutorial_seen && !this.showNotice) this.showTour = true;
+  }
+
+  /** The wizard finished and saved: the guide counts as seen, and the next stop is the world step. */
+  finishSetup(openTour = false): void {
+    this.showWizard = false;
+    const seen: Partial<AppPrefs> = {};
+    if (!this.prefs.setup_dismissed) seen.setup_dismissed = true;
+    if (!this.prefs.tutorial_seen) seen.tutorial_seen = true;
+    if (Object.keys(seen).length) void this.setPrefs(seen);
+    this.page = 'workspace';
+    this.step = 'world';
+    this.showTour = openTour;
+  }
+
+  /** Save what the wizard collected in one `settings.set`, key included. Returns false on failure. */
+  async saveSetup(changes: Partial<Settings>, apiKey: string): Promise<boolean> {
+    const previous = copySettings(this.settings);
+    this.settings = copySettings({ ...this.settings, ...changes });
+    const saved = await this.saveSettings(previous, apiKey, this.credentialMode);
+    if (!saved) this.settings = previous;
+    return saved;
   }
 
   finishTour(): void {
@@ -475,9 +522,10 @@ export class AppState {
   }
 
   /** Open settings to fix something the current step needs; settings then offers the way back. */
-  openSettingsFor(step: Step = this.step): void {
+  openSettingsFor(step: Step = this.step, tab: SettingsTab = 'translate'): void {
     if (this.busy === 'settings') return;
     this.returnStep = this.page === 'workspace' ? step : null;
+    this.settingsTab = tab;
     this.goto('settings');
   }
 
@@ -517,6 +565,7 @@ export class AppState {
       void openExternal(ISSUES_URL).catch((cause) => this.fail(cause));
     } else if (action === 'updates') {
       this.helpSection = 'updates';
+      this.settingsTab = 'app';
       this.goto('settings');
       void this.checkUpdates(true);
     } else if (action === 'find') {
@@ -923,22 +972,65 @@ export class AppState {
       this.models = cached.models;
       this.modelsScope = scope;
       this.modelsCached = cached.cached;
+      this.modelsHidden = cached.hidden;
       return cached.models.length;
     }
     if (this.busy) throw new Error(t('settings.model.wait'));
     this.busy = 'models';
     try {
-      const listed = await callBackend<{ models: ModelInfo[]; cached?: boolean }>('models.list', {
+      const listed = await callBackend<{ models: ModelInfo[]; cached?: boolean; hiddenCount?: number }>('models.list', {
         provider: selection.provider,
         ...(selection.provider === 'custom' ? { baseUrl: selection.base_url } : {}),
         model: '',
         wireFormat: selection.wire_format,
         ...(selection.provider === 'openrouter' ? { publicCatalog: true } : {})
       });
+      const hidden = listed.hiddenCount ?? listed.models.filter((model) => model.suitable === false).length;
       this.models = listed.models;
       this.modelsScope = scope;
       this.modelsCached = !!listed.cached;
-      this.modelCatalogs.set(scope, { models: listed.models, fetchedAt: Date.now(), cached: !!listed.cached });
+      this.modelsHidden = hidden;
+      this.modelCatalogs.set(scope, { models: listed.models, fetchedAt: Date.now(), cached: !!listed.cached, hidden });
+      return listed.models.length;
+    } finally {
+      this.busy = '';
+    }
+  }
+
+  /** `checkConnection` for a form: the outcome as a value, with the provider's error code on failure. */
+  async testConnection(selection: Settings, draftApiKey = ''): Promise<{ ok: true; count: number } | { ok: false; code: string }> {
+    try {
+      return { ok: true, count: await this.checkConnection(selection, draftApiKey) };
+    } catch (cause) {
+      return { ok: false, code: cause instanceof BackendError ? cause.code : '' };
+    }
+  }
+
+  /**
+   * Check the connection: list models with the typed key (sent once, never saved) or, without one,
+   * the stored key. Always asks the provider and never falls back to a cached list, so a wrong key
+   * cannot look like a working connection.
+   */
+  async checkConnection(selection: Settings, draftApiKey = ''): Promise<number> {
+    const scope = this.modelScope(selection);
+    if (this.busy) throw new Error(t('settings.model.wait'));
+    this.busy = 'models';
+    try {
+      const draft = draftApiKey.trim();
+      const listed = await callBackend<{ models: ModelInfo[]; cached?: boolean; hiddenCount?: number }>('models.list', {
+        provider: selection.provider,
+        ...(selection.provider === 'custom' ? { baseUrl: selection.base_url } : {}),
+        model: '',
+        wireFormat: selection.wire_format,
+        connectionCheck: true,
+        ...(draft ? { draftApiKey: draft } : {})
+      });
+      const hidden = listed.hiddenCount ?? listed.models.filter((model) => model.suitable === false).length;
+      this.models = listed.models;
+      this.modelsScope = scope;
+      this.modelsCached = false;
+      this.modelsHidden = hidden;
+      this.modelCatalogs.set(scope, { models: listed.models, fetchedAt: Date.now(), cached: false, hidden });
       return listed.models.length;
     } finally {
       this.busy = '';

@@ -1,5 +1,40 @@
 import type { ScanOptions, Settings } from './api';
+import type { MessageKey } from './i18n/index.svelte';
 import { resourcePackOptions } from './resource-pack';
+
+/** A complete, normalized copy of settings, so comparisons and drafts never share objects. */
+export function copySettings(value: Settings): Settings {
+  const finite = (input: unknown, fallback: number) => Number.isFinite(Number(input)) ? Number(input) : fallback;
+  return {
+    ...value,
+    provider: value.provider || 'openai',
+    model: value.model ?? '',
+    openrouter_reasoning: value.openrouter_reasoning ?? 'default',
+    base_url: value.base_url ?? '',
+    wire_format: value.wire_format || 'openai',
+    target_language: value.target_language || '한국어',
+    style_preset: value.style_preset || 'neutral',
+    style_prompt: value.style_prompt ?? '',
+    custom_system_prompt: value.custom_system_prompt ?? '',
+    temperature: finite(value.temperature, 0.3),
+    batch_size: finite(value.batch_size, 40),
+    request_timeout: finite(value.request_timeout, 120),
+    rpm_limit: finite(value.rpm_limit, 0),
+    tpm_limit: finite(value.tpm_limit, 0),
+    max_batch_retries: finite(value.max_batch_retries, 3),
+    max_file_write_retries: finite(value.max_file_write_retries, 2),
+    continue_on_file_error: value.continue_on_file_error !== false,
+    source_overrides: { ...value.source_overrides },
+    concurrency: finite(value.concurrency, 4),
+    resource_pack_enabled: !!value.resource_pack_enabled,
+    resource_pack_options: resourcePackOptions(value.resource_pack_options),
+    external_resource_pack_paths: [...(value.external_resource_pack_paths ?? [])],
+    skip_target_language_text: value.skip_target_language_text !== false,
+    scan_options: normalizedScanOptions(value.scan_options),
+    ui_language: value.ui_language || 'ko',
+    last_world_dir: value.last_world_dir || ''
+  };
+}
 
 export function defaultScanOptions(): ScanOptions {
   return {
@@ -55,3 +90,13 @@ export function scanOptionsSignature(options?: Partial<ScanOptions>): string {
   const normalized = normalizedScanOptions(options);
   return JSON.stringify(Object.fromEntries(Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b))));
 }
+
+/** The style presets of the translation prompt, in the order a select lists them. */
+export const STYLE_PRESETS: { value: string; label: MessageKey }[] = [
+  { value: 'neutral', label: 'settings.style.neutral' },
+  { value: 'casual', label: 'settings.style.casual' },
+  { value: 'formal', label: 'settings.style.formal' },
+  { value: 'polite', label: 'settings.style.polite' },
+  { value: 'story', label: 'settings.style.story' },
+  { value: 'custom', label: 'settings.style.custom' }
+];
