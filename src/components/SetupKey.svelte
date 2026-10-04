@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
-  import { t } from '../lib/i18n/index.svelte';
+  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import type { CredentialMode } from '../lib/api';
   import { connectionErrorKey } from '../lib/models';
   import { openExternal } from '../lib/native';
   import { keyPageFor, type ProviderId } from '../lib/providers';
@@ -9,15 +10,16 @@
   // The key is checked as soon as it is pasted or the field is left, by asking the provider for its
   // model list with the typed key. Nothing is saved until the last step.
   let {
-    provider, apiKey = $bindable(''), storedKey, status, count, errorCode, onCheck, onSettings
+    provider, apiKey = $bindable(''), storedKey, storageMode, status, count, errorCode, onDraftChange, onCheck, onRetry, onSettings
   }: {
-    provider: ProviderId; apiKey?: string; storedKey: boolean; status: 'idle' | 'checking' | 'ok' | 'error'; count: number;
-    errorCode: string; onCheck: () => void; onSettings: () => void;
+    provider: ProviderId; apiKey?: string; storedKey: boolean; storageMode: CredentialMode; status: 'idle' | 'checking' | 'ok' | 'error'; count: number;
+    errorCode: string; onDraftChange: () => void; onCheck: () => void; onRetry: () => void; onSettings: () => void;
   } = $props();
 
   let show = $state(false);
   const page = $derived(keyPageFor(provider));
   const typed = $derived(!!apiKey.trim());
+  const storageModeLabel = $derived(t(`settings.vault.${storageMode}` as MessageKey));
 
   function onPaste(): void {
     // The pasted text reaches the field after this event.
@@ -40,7 +42,7 @@
     <label class="label" for="setup-api-key">{storedKey ? t('settings.apiKey.new') : t('settings.apiKey.label')}</label>
     <div class="secret-input">
       <input id="setup-api-key" class="input" type={show ? 'text' : 'password'} bind:value={apiKey} autocomplete="new-password" spellcheck="false"
-        placeholder={t('setup.key.placeholder')} data-step-focus onpaste={onPaste} onblur={() => { if (typed) onCheck(); }}
+        placeholder={t('setup.key.placeholder')} data-step-focus oninput={onDraftChange} onpaste={onPaste} onblur={() => { if (typed) onCheck(); }}
         onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); onCheck(); } }} />
       <button type="button" class="btn btn-secondary btn-icon" aria-label={show ? t('settings.apiKey.hide') : t('settings.apiKey.show')}
         title={show ? t('settings.apiKey.hide') : t('settings.apiKey.show')} onclick={() => (show = !show)}><Icon name={show ? 'eye-off' : 'eye'} size={18} /></button>
@@ -56,11 +58,11 @@
       <span class="state bad"><Icon name="alert-circle" size={16} /> {t(connectionErrorKey(errorCode))}</span>
     {/if}
     {#if status !== 'checking' && (typed || storedKey)}
-      <button type="button" class="btn btn-quiet btn-sm" onclick={onCheck}>{t('settings.apiKey.check')}</button>
+      <button type="button" class="btn btn-quiet btn-sm" onclick={onRetry}>{t('settings.apiKey.check')}</button>
     {/if}
   </div>
 
-  <p class="note"><Icon name="shield" size={14} /> <span>{t('setup.key.storage')} <button type="button" class="linklike" onclick={onSettings}>{t('setup.key.storageLink')}</button></span></p>
+  <p class="note"><Icon name="shield" size={14} /> <span>{t('setup.key.storage', { mode: storageModeLabel })} <button type="button" class="linklike" onclick={onSettings}>{t('setup.key.storageLink')}</button></span></p>
 </div>
 
 <style>

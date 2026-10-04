@@ -79,9 +79,18 @@ test('scan home explains scanning and shows the latest saved job and resume acti
   await expect(latest).toContainText('최근 번역');
   await expect(latest).toContainText('번역 4개 · 실패 2개');
   await expect(latest).toContainText('6');
+  const facts = latest.locator('.home-facts > div');
+  const scanDate = (await facts.nth(0).locator('dd').innerText()).trim();
+  const translationDate = (await facts.nth(2).locator('dd').innerText()).split(' · ')[0];
+  await expect(facts.nth(1).locator('dd')).toHaveText('6');
+  expect(scanDate).not.toBe(translationDate);
 
   await boot(page, 'unscanned');
   await expect(page.getByText('월드 파일을 읽어 번역 후보를 찾으며 API는 호출하지 않습니다.')).toBeVisible();
+  const unscanned = page.getByRole('region', { name: '이 월드의 최근 작업' });
+  await expect(unscanned.locator('.home-facts > div').nth(0).locator('dd')).toHaveText('확인 불가');
+  await expect(unscanned.locator('.home-facts > div').nth(1).locator('dd')).toHaveText('확인 불가');
+  await expect(unscanned).toContainText('번역 기록이 없습니다.');
 
   await boot(page, 'home-resume');
   const summary = page.getByRole('region', { name: '이 월드의 최근 작업' });
@@ -171,6 +180,47 @@ test('candidate locations are friendly, teleport copies the command, and row men
   const customRow = page.locator('tr[data-index="3"]');
   await customRow.click();
   await expect(page.locator('.places li').first()).toContainText('custom:sky');
+});
+
+test('candidate menu supports roving keyboard focus, activation, Tab close, and excluded-row editing', async ({ page }) => {
+  await boot(page, 'review');
+  await step(page, '후보 검토');
+  const row = page.locator('tr[data-index="0"]');
+  await row.focus();
+  await page.keyboard.press('Shift+F10');
+  let menu = page.getByRole('menu', { name: '후보 작업 메뉴' });
+  const items = menu.getByRole('menuitem');
+  await expect(items.nth(0)).toBeFocused();
+
+  await page.keyboard.press('ArrowDown');
+  await expect(items.nth(1)).toBeFocused();
+  await expect(items.nth(0)).toHaveAttribute('tabindex', '-1');
+  await page.keyboard.press('ArrowDown');
+  await expect(items.nth(2)).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(items.nth(0)).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(items.nth(2)).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(items.nth(1)).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(menu).toHaveCount(0);
+  await expect(row).toBeFocused();
+
+  // Exclude the row with the grid's keyboard action, then use the manual menu action.
+  await page.keyboard.press('Space');
+  await expect(row.locator('input[type="checkbox"]')).not.toBeChecked();
+  await page.keyboard.press('Shift+F10');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#manual-translation')).toBeFocused();
+  await expect(row.locator('input[type="checkbox"]')).toBeChecked();
+
+  await row.focus();
+  await page.keyboard.press('Shift+F10');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Space');
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiClipboard.at(-1))).toBe('Welcome to Roguefire');
 });
 
 test('bulk and single include changes can be undone and review passes axe', async ({ page }) => {

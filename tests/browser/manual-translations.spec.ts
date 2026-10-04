@@ -99,12 +99,13 @@ test('mistakes are marked on the row, and nothing invalid can be saved', async (
   await expect(sources(page)).toHaveCount(2);
 });
 
-test('a row with errors also says so in the tab, and blocks leaving with a save', async ({ page }) => {
+test('a row error stays visible on its tab while the save bar remains tab-scoped', async ({ page }) => {
   await open(page);
   await page.getByRole('button', { name: '행 추가' }).click();
   await sources(page).fill('only a source');
   await page.getByRole('tab', { name: '번역' }).click();
-  await expect(page.locator('.save-bar')).toContainText('스캔 범위 탭의 오류를 확인해 주세요.');
+  await expect(page.locator('.save-bar')).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: '다른 탭에서 확인할 항목이 있습니다: 스캔 범위' })).toBeVisible();
   await expect(page.getByRole('tab', { name: '스캔 범위' })).toHaveClass(/invalid/);
 });
 

@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { Settings } from '../lib/api';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { connectionErrorKey, defaultModel, isSuitable } from '../lib/models';
+  import { setupConnectionIdentity } from '../lib/setup-connection';
   import { PROVIDER_CARDS, PROVIDER_DEFAULTS, type ProviderId } from '../lib/providers';
   import { copySettings } from '../lib/settings';
   import { isValidCustomEndpoint } from '../lib/settings-import';
@@ -36,10 +37,16 @@
   let language = $state(app.settings.target_language || '한국어');
   let style = $state(app.settings.style_preset && app.settings.style_preset !== 'custom' ? app.settings.style_preset : 'neutral');
 
+  function wizardDraftSignature(): string {
+    // Keep the dirty-state snapshot free of credential text. SetupKey reports key edits directly.
+    return JSON.stringify([provider, baseUrl, wireFormat, model, language, style]);
+  }
+  let initialDraftSignature = wizardDraftSignature();
+  let keyDraftDirty = $state(false);
+
   let status = $state<'idle' | 'checking' | 'ok' | 'error'>('idle');
   let errorCode = $state('');
   let count = $state(0);
-  let checkedWith: string | null = null;
   let saving = $state(false);
   let saveError = $state('');
   let body: HTMLElement | undefined = $state();
@@ -54,10 +61,16 @@
     base_url: provider === 'custom' ? baseUrl.trim() : PROVIDER_DEFAULTS[provider]?.baseUrl ?? '',
     wire_format: provider === 'custom' ? wireFormat : PROVIDER_DEFAULTS[provider]?.wireFormat ?? 'openai'
   }));
+  const checkIdentity = $derived(setupConnectionIdentity({
+    provider, endpoint: selection.base_url, wireFormat: selection.wire_format, key: apiKey.trim(), storedKey: !apiKey.trim() && storedKey
+  }));
   const models = $derived(app.modelsFor(selection));
   const index = $derived(STEPS.indexOf(step));
   const accepting = $derived(app.showNotice);
   const dismissible = $derived(!accepting);
+  const canSaveSetup = $derived(customUrlValid && (provider !== 'custom' || !!baseUrl.trim()) &&
+    (!!typed || storedKey) && !(status === 'error' && ['AUTH_FAILED', 'KEY_MISSING'].includes(errorCode)) &&
+    status !== 'checking' && !!model.trim() && !!language.trim());
 
   const canAdvance = $derived.by(() => {
     if (step === 'provider') return customUrlValid && (provider !== 'custom' || !!baseUrl.trim());
@@ -72,7 +85,6 @@
     apiKey = '';
     status = 'idle';
     errorCode = '';
-    checkedWith = null;
     model = next === app.settings.provider ? app.settings.model : '';
   }
   let lastProvider = initialProvider;
@@ -82,41 +94,70 @@
   });
 
   let inflight: Promise<void> | null = null;
+  let connectionRevision = 0;
+  let active = true;
+  let currentIdentity = $state('');
+  const successfulChecks = new Set<string>();
 
-  /** Check the typed key (or the stored one). Calls made while a check runs wait for it and then re-judge. */
-  async function check(): Promise<void> {
+  $effect(() => {
+    const current = checkIdentity;
+    if (current === currentIdentity) return;
+    currentIdentity = current;
+    connectionRevision += 1;
+    status = 'idle';
+    errorCode = '';
+    count = 0;
+  });
+
+  $effect(() => {
+    app.wizardDirty = keyDraftDirty || wizardDraftSignature() !== initialDraftSignature;
+  });
+  onDestroy(() => {
+    active = false;
+    app.wizardDirty = false;
+    connectionRevision += 1;
+    successfulChecks.clear();
+  });
+
+  /** Check this exact provider/endpoint/wire/key identity. A visible retry always forces a request. */
+  async function check(force = false): Promise<void> {
     while (inflight) await inflight;
+    if (!active) return;
     const key = apiKey.trim();
-    if ((!key && !storedKey) || checkedWith === key) return;
+    const identity = currentIdentity;
+    if ((!key && !storedKey) || (!force && !!key && successfulChecks.has(identity))) return;
     if (provider === 'custom' && !customUrlValid) return;
-    inflight = ask(key);
-    try { await inflight; } finally { inflight = null; }
-    // The key may have been edited while the provider was answering.
-    if (apiKey.trim() !== key && (apiKey.trim() || storedKey)) await check();
+    if (force) successfulChecks.delete(identity);
+    const revision = ++connectionRevision;
+    const request = ask(key, identity, revision);
+    inflight = request;
+    try { await request; } finally { if (inflight === request) inflight = null; }
+    // Inputs may have changed while the provider was answering; check only the new identity.
+    if (active && currentIdentity !== identity && (apiKey.trim() || storedKey)) await check();
   }
 
-  async function ask(key: string): Promise<void> {
+  async function ask(key: string, identity: string, revision: number): Promise<void> {
     status = 'checking';
     errorCode = '';
-    const asked = provider;
-    const result = await app.testConnection(selection, key);
-    if (provider !== asked) return;
-    checkedWith = key;
+    const result = await app.testConnection(selection, key, () => active && identity === currentIdentity && revision === connectionRevision);
+    if (!active || identity !== currentIdentity || revision !== connectionRevision) return;
     if (result.ok) {
+      if (key) successfulChecks.add(identity);
+      else successfulChecks.delete(identity);
       status = 'ok';
       const listed = app.modelsFor(selection);
       count = listed.filter(isSuitable).length;
       // Start from the cheapest sensible model, unless a model that is on offer is already chosen.
       if (!listed.some((item) => item.id === model.trim())) model = defaultModel(listed)?.id ?? model;
     } else {
+      successfulChecks.delete(identity);
       status = 'error';
       errorCode = result.code;
     }
   }
 
   function retry(): void {
-    checkedWith = null;
-    void check();
+    void check(true);
   }
 
   async function focusStep(): Promise<void> {
@@ -148,8 +189,7 @@
     if (index > 0) go(STEPS[index - 1]);
   }
 
-  async function finish(): Promise<void> {
-    if (saving || app.busy) return;
+  async function saveSetupDraft(): Promise<boolean> {
     saving = true;
     saveError = '';
     const changes: Partial<Settings> = {
@@ -161,25 +201,50 @@
     saving = false;
     if (saved) {
       apiKey = '';
-      step = 'done';
-      void focusStep();
+      keyDraftDirty = false;
+      successfulChecks.clear();
+      initialDraftSignature = wizardDraftSignature();
+      app.wizardDirty = false;
+      return true;
     } else {
       // The settings screen's banner sits behind this dialog, so the reason is shown here instead.
       saveError = app.banner?.message ?? t('settings.saveError');
       app.banner = null;
+      return false;
     }
+  }
+
+  async function finish(): Promise<void> {
+    if (saving || app.busy) return;
+    if (await saveSetupDraft()) {
+      step = 'done';
+      void focusStep();
+    }
+  }
+
+  async function saveAndClose(): Promise<void> {
+    if (!canSaveSetup || saving || app.busy || app.pendingCloseContext !== 'wizard') return;
+    if (await saveSetupDraft()) app.finishWizardAndClose();
   }
 
   function later(): void {
     apiKey = '';
+    successfulChecks.clear();
     if (step === 'done') app.finishSetup(false);
     else app.dismissWizard();
   }
 
   function openSettings(): void {
     apiKey = '';
+    successfulChecks.clear();
+    app.wizardDirty = false;
     app.showWizard = false;
     app.openSettingsFor('world', 'translate');
+  }
+
+  function markKeyDraftDirty(): void {
+    keyDraftDirty = true;
+    app.wizardDirty = true;
   }
 </script>
 
@@ -196,7 +261,7 @@
     {:else if step === 'provider'}
       <SetupProvider bind:provider bind:baseUrl bind:wireFormat />
     {:else if step === 'key'}
-      <SetupKey {provider} bind:apiKey {storedKey} {status} {count} {errorCode} onCheck={check} onSettings={openSettings} />
+      <SetupKey {provider} bind:apiKey {storedKey} storageMode={app.credentialMode} {status} {count} {errorCode} onDraftChange={markKeyDraftDirty} onCheck={() => void check()} onRetry={() => void check(true)} onSettings={openSettings} />
     {:else if step === 'model'}
       <SetupModel bind:model {models} onReload={retry} reloading={status === 'checking'} />
       {#if status === 'error'}<p class="field-error" role="alert">{t(connectionErrorKey(errorCode))}</p>{/if}
@@ -227,6 +292,20 @@
     {/if}
   {/snippet}
 </Dialog>
+
+{#if app.pendingCloseContext === 'wizard' && app.pendingCloseSource}
+  <Dialog title={t('setup.close.title')} hideClose onClose={() => app.continueWizardClose()}>
+    <p>{t('setup.close.body')}</p>
+    {#if saveError}<p class="field-error" role="alert">{saveError}</p>{/if}
+    {#snippet actions()}
+      <button type="button" class="btn btn-quiet" disabled={saving} onclick={() => app.continueWizardClose()}>{t('setup.close.continue')}</button>
+      <button type="button" class="btn btn-secondary" disabled={saving} onclick={() => app.discardWizardAndClose()}>{t('setup.close.discard')}</button>
+      {#if canSaveSetup}
+        <button type="button" class="btn btn-primary" data-autofocus disabled={saving || !!app.busy} onclick={saveAndClose}>{t(saving ? 'settings.saving' : 'setup.close.save')}</button>
+      {/if}
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
   .wizard { display: grid; gap: var(--space-4); align-content: start; min-width: 0; color: var(--text-secondary); }
