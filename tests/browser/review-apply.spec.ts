@@ -21,7 +21,10 @@ const row = (page: Page, text: string) => page.locator('tr[data-index]').filter(
 async function toReview(page: Page, query = 'scenario=run') {
   await open(page, query);
   await step(page, '번역 진행');
-  await startButton(page).click();
+  const overCap = page.getByRole('alert').filter({ hasText: '예상 비용이 설정한 한도를 넘습니다' });
+  await expect.poll(async () => (await overCap.isVisible()) || !(await startButton(page).isDisabled())).toBe(true);
+  if (await overCap.isVisible().catch(() => false)) await overCap.getByRole('button', { name: '그래도 시작' }).click();
+  else await startButton(page).click();
   await expect(reviewHeading(page)).toBeVisible();
 }
 
@@ -123,7 +126,7 @@ test('failed rows are retried on their own, with the cost shown first', async ({
   await page.locator('.detail summary').click();
   await expect(page.locator('.detail .raw')).toContainText('ReadTimeout');
 
-  const retry = page.getByRole('button', { name: '실패한 2개 다시 번역' });
+  const retry = page.getByRole('button', { name: '다시 번역할 2개 번역' });
   await expect(retry).toBeVisible();
   await expect(page.getByText(/예상 비용 약 US\$/)).toBeVisible();
   await expect(page.getByRole('button', { name: '월드에 적용 (3개)' })).toBeVisible();
@@ -133,6 +136,80 @@ test('failed rows are retried on their own, with the cost shown first', async ({
   await expect(page.getByRole('button', { name: /^실패 0$/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /다시 번역$/ })).toHaveCount(0);
   expect(await requests(page, 'translate.retry_failed')).toHaveLength(1);
+});
+
+test('normal retry counts and preflights the failed plus glossary-stale rows', async ({ page }) => {
+  await toReview(page, 'scenario=run&fail=1&stale=1&estimateRange=1&cap=0.0001');
+  await expect(page.getByRole('button', { name: '다시 번역할 2개 번역' })).toBeVisible();
+  await expect(page.getByText('요청 1–2회')).toBeVisible();
+  const retry = page.getByRole('button', { name: '다시 번역할 2개 번역' });
+  await retry.click();
+  const confirmation = page.getByRole('dialog', { name: '예상 비용이 설정한 한도를 넘습니다' });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText('예상 비용');
+  await expect(confirmation).toContainText('요청 1–2회');
+  await expect(confirmation).not.toContainText('US$0.00017');
+  await confirmation.getByRole('button', { name: '그래도 시작' }).click();
+  await expect(reviewHeading(page)).toBeVisible();
+  const request = (await requests(page, 'translate.retry_failed')).at(-1)!;
+  expect(request.payload?.budgetOverride).toBe(true);
+  expect(request.payload?.refreshGlossary).toBeUndefined();
+  expect(await page.evaluate(() => (window as any).__pomiRetrySent)).toEqual(['welcome', 'shop']);
+});
+
+test('the run summary presents glossary reminder estimates as a request range', async ({ page }) => {
+  await open(page, 'scenario=run&estimateRange=1');
+  await step(page, '번역 진행');
+  await expect(page.locator('.group').filter({ hasText: '예상 요청 횟수' })).toContainText('요청 1–2회');
+});
+
+test('saved manual edits remain revertible when they also mismatch the glossary', async ({ page }) => {
+  await toReview(page, 'scenario=run&editedMismatch=1');
+  const first = page.locator('tr[data-index="0"]');
+  await expect(first).toContainText('수정됨');
+  await expect(first).toContainText('용어 확인');
+  await first.click();
+  await expect(page.getByRole('button', { name: 'AI 번역으로 되돌리기' })).toBeVisible();
+  const editor = page.locator('#translation-edit');
+  await expect(editor).toHaveValue('별칭');
+  await page.getByRole('button', { name: 'AI 번역으로 되돌리기' }).click();
+  await expect(editor).toHaveValue('로그파이어에 오신 것을 환영합니다');
+  await page.getByRole('button', { name: '월드에 적용 (5개)' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '월드에 적용', exact: true }).click();
+  const apply = (await requests(page, 'translate.apply')).at(-1)!;
+  expect(apply.payload?.edits).toMatchObject({ welcome: null });
+});
+
+test('Japanese source text has no invented English language metadata', async ({ page }) => {
+  await toReview(page, 'scenario=run&sourceLang=ja');
+  const first = page.locator('tr[data-index="0"]');
+  await expect(first.locator('.c-source .txt')).toHaveText('ようこそ、ローグファイアへ');
+  await expect(first.locator('.c-source .txt')).not.toHaveAttribute('lang', 'en');
+  await first.click();
+  await expect(page.locator('.detail .source')).toHaveText('ようこそ、ローグファイアへ');
+  await expect(page.locator('.detail .source')).not.toHaveAttribute('lang', 'en');
+});
+
+test('a failed reapply exposes both the recovery snapshot and a safe retry action', async ({ page }) => {
+  await toReview(page, 'scenario=run&reapplyInterrupted=1');
+  await page.getByRole('button', { name: '월드에 적용 (5개)' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '월드에 적용', exact: true }).click();
+  await expect(page.getByRole('button', { name: '번역문 수정' })).toBeVisible();
+  await page.getByRole('button', { name: '번역문 수정' }).click();
+  await row(page, 'Merchant of the Northern Gate').click();
+  await page.locator('#translation-edit').fill('북문의 상인님');
+  await page.getByRole('button', { name: '수정한 1개 다시 적용' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '복원하고 다시 적용' }).click();
+
+  const recovery = page.getByRole('alert').filter({ hasText: '다시 적용을 끝내지 못했습니다' });
+  await expect(recovery).toBeVisible();
+  await expect(recovery.getByRole('button', { name: '복구 스냅샷으로 되돌리기' })).toBeVisible();
+  await expect(recovery.getByRole('button', { name: '다시 적용' })).toBeEnabled();
+  await recovery.getByRole('button', { name: '복구 스냅샷으로 되돌리기' }).click();
+  const confirmRestore = page.getByRole('dialog', { name: '복구 스냅샷으로 되돌릴까요?' });
+  await confirmRestore.getByRole('button', { name: '복구 스냅샷으로 복원' }).click();
+  const restore = (await requests(page, 'restore.start')).at(-1)!;
+  expect(restore.payload?.backupSetId).toBe('recovery-before-reapply');
 });
 
 test('after applying, the translations can be corrected: restore, apply again, zero requests', async ({ page }) => {
@@ -210,7 +287,7 @@ test('an estimate above the spending cap blocks the start until it is confirmed'
   await expect(warning).toHaveCount(0);
   await expect(page.getByRole('button', { name: '이어서 번역', exact: true })).toBeEnabled();
 
-  // Back over the cap: "Start anyway" overrides it for this one run without saving a new cap.
+  // Back over the cap: "Start anyway" bypasses only the estimate preflight.
   await cap.fill('0.0001');
   await cap.press('Enter');
   await warning.getByRole('button', { name: '그래도 시작' }).click();
@@ -258,9 +335,28 @@ test('hitting the cap stops with a clear explanation and can be continued once w
   // Continuing is the way to send them.
   await expect(callout.getByRole('button', { name: '이번만 한도 없이 이어서 번역' })).toBeVisible();
   await callout.getByRole('button', { name: '이번만 한도 없이 이어서 번역' }).click();
+  const confirmation = page.getByRole('dialog', { name: '이번 번역에서만 한도를 끌까요?' });
+  await expect(confirmation).toContainText('비용 한도가 적용되지 않습니다');
+  await confirmation.getByRole('button', { name: '한도 없이 이어서 번역' }).click();
   await expect(reviewHeading(page)).toBeVisible();
   const resumes = await requests(page, 'translate.resume');
+  expect(resumes.at(-1)?.payload?.budgetDisabled).toBe(true);
+  expect(resumes.at(-1)?.payload?.budgetOverride).toBeUndefined();
+});
+
+test('starting above the estimate keeps the runtime cap and offers the cap editor after it stops', async ({ page }) => {
+  await open(page, 'scenario=run&overCap=1&cap=0.0001');
+  await step(page, '번역 진행');
+  const warning = page.getByRole('alert').filter({ hasText: '예상 비용이 설정한 한도를 넘습니다' });
+  await expect(warning).toContainText('실행 중 한도는 계속 적용');
+  await warning.getByRole('button', { name: '그래도 시작' }).click();
+  await expect(page.getByRole('status').filter({ hasText: '비용 한도에 닿아 번역을 멈췄습니다' })).toBeVisible();
+  const resumes = await requests(page, 'translate.resume');
   expect(resumes.at(-1)?.payload?.budgetOverride).toBe(true);
+  expect(resumes.at(-1)?.payload?.budgetDisabled).toBeUndefined();
+  const raise = page.getByRole('button', { name: '한도 올리기' });
+  await raise.click();
+  await expect(page.getByLabel('비용 한도')).toBeFocused();
 });
 
 test('rows the cost cap kept from sending are labeled as such in the review, not as an unknown failure', async ({ page }) => {
@@ -269,7 +365,7 @@ test('rows the cost cap kept from sending are labeled as such in the review, not
   await expect(page.locator('.detail .failed')).toContainText('비용 한도로 보내지 않았습니다');
   await expect(page.locator('.detail .failed')).not.toContainText('알 수 없는 이유');
   // The retry still sends them.
-  await expect(page.getByRole('button', { name: '실패한 2개 다시 번역' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '다시 번역할 2개 번역' })).toBeVisible();
 });
 
 test('a cancelled result counts the unsent rows apart from failures and the retry button', async ({ page }) => {
@@ -289,8 +385,9 @@ test('a tiny cost cap and tiny estimates keep their significant digits', async (
   await cap.fill('0.0001');
   await cap.press('Enter');
   await expect(page.locator('main')).toContainText('US$0.0001');
-  // The estimate band is 0.000252 to 0.000504 dollars: never "US$0.00".
-  await expect(page.locator('main')).toContainText('US$0.00025');
+  // The remaining estimate includes only four provider-bound rows after a saved manual override.
+  await expect(page.locator('main')).toContainText('US$0.00017');
+  await expect(page.locator('main')).toContainText('US$0.00034');
   await expect(page.locator('main')).not.toContainText(/US\$0\.00(?!\d)/);
 });
 
@@ -429,8 +526,8 @@ for (const size of [{ width: 1180, height: 800 }, { width: 840, height: 620 }]) 
 }
 
 const locales = [
-  { locale: 'en', steps: 'Steps', run: 'Translate', resume: 'Resume Translation', title: 'Review translations', apply: /^Apply to world \(4\)$/, retry: 'Translate 1 failed again' },
-  { locale: 'ja', steps: '手順一覧', run: '翻訳', resume: '翻訳を再開', title: '翻訳結果の確認', apply: /^ワールドに適用 \(4件\)$/, retry: '失敗した 1 件を翻訳し直す' }
+  { locale: 'en', steps: 'Steps', run: 'Translate', resume: 'Resume Translation', title: 'Review translations', apply: /^Apply to world \(4\)$/, retry: 'Retry 1 sentences' },
+  { locale: 'ja', steps: '手順一覧', run: '翻訳', resume: '翻訳を再開', title: '翻訳結果の確認', apply: /^ワールドに適用 \(4件\)$/, retry: '1件を再翻訳' }
 ];
 for (const item of locales) {
   test(`the review view reads in ${item.locale}`, async ({ page }) => {

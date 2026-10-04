@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
-  import type { GlossaryEntry, TranslationRow, TranslationState } from '../lib/api';
+  import { formatRequestRange } from '../lib/format';
+  import type { Estimate, GlossaryEntry, TranslationRow, TranslationState } from '../lib/api';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber, formatUsd } from '../lib/format';
   import { exceedsCap } from '../lib/workflow';
@@ -21,6 +22,7 @@
   let table: TranslationTable | undefined = $state();
   let confirmApply = $state(false);
   let confirmBudget = $state(false);
+  let confirmRecoveryRestore = $state(false);
   let refreshingGlossary = $state(false);
   let query = $state(review.query);
   let glossaryOpen = $state(false);
@@ -109,19 +111,29 @@
   }
 
   const failedCount = $derived(review.counts.failed);
-  const staleCount = $derived(review.meta?.glossaryStaleCount ?? 0);
-  const estimate = $derived((refreshingGlossary ? review.meta?.glossaryRefreshEstimate : review.meta?.retryEstimate) ?? null);
-  const estimateText = $derived.by(() => {
-    if (!estimate?.cost) return t('run.cost.unknown');
-    const band = t('run.cost.band', { low: formatUsd(estimate.cost.low, app.locale), high: formatUsd(estimate.cost.high, app.locale) });
-    const reasoning = estimate.reasoningIncluded ? ` · ${t('run.estimate.reasoning')}` : '';
-    const source = estimate.priceSource === 'user' ? ` · ${t('settings.price.userBasis')}` : '';
-    return `${band}${reasoning}${source}`;
-  });
-  const retryOverBudget = $derived(exceedsCap(estimate, app.settings.max_cost_usd));
+  const retryCount = $derived(review.meta?.retryCount ?? review.counts.failed);
+  const staleCount = $derived(review.meta?.glossaryRefreshCount ?? review.meta?.glossaryStaleCount ?? 0);
+  const retryEstimate = $derived(review.meta?.retryEstimate ?? null);
+  const glossaryRefreshEstimate = $derived(review.meta?.glossaryRefreshEstimate ?? null);
+  const estimate = $derived(refreshingGlossary ? glossaryRefreshEstimate : retryEstimate);
+  function estimateLabel(value: Estimate | null): string {
+    if (!value) return t('run.cost.unknown');
+    const band = value.cost
+      ? t('run.cost.band', { low: formatUsd(value.cost.low, app.locale), high: formatUsd(value.cost.high, app.locale) })
+      : t('run.cost.unknown');
+    const reasoning = value.reasoningIncluded ? ` · ${t('run.estimate.reasoning')}` : '';
+    const source = value.priceSource === 'user' ? ` · ${t('settings.price.userBasis')}` : '';
+    const requests = formatRequestRange(value, app.locale);
+    const requestRange = requests ? ` · ${requests}` : '';
+    return `${band}${reasoning}${source}${requestRange}`;
+  }
+  const estimateText = $derived(estimateLabel(estimate));
+  const glossaryRefreshEstimateText = $derived(estimateLabel(glossaryRefreshEstimate));
+  const retryOverBudget = $derived(exceedsCap(retryEstimate, app.settings.max_cost_usd));
   const actionCount = $derived(corrections && !review.meta?.glossaryRefreshed ? review.dirtyCount : review.applyCount);
   const canApply = $derived(!app.busy && !review.loading && staleCount === 0 && (corrections ? review.dirtyCount > 0 || !!review.meta?.glossaryRefreshed : review.applyCount > 0 || review.dirtyCount > 0));
   const cost = $derived(review.meta?.usage?.cost_reported ? review.meta.usage.cost ?? 0 : null);
+  const recoverySetId = $derived(review.meta?.status === 'reapply_interrupted' ? review.meta.recoverySetId ?? '' : '');
 
   function retry(): void {
     refreshingGlossary = false;
@@ -135,8 +147,14 @@
 
   function refreshGlossary(): void {
     refreshingGlossary = true;
-    if (exceedsCap(review.meta?.glossaryRefreshEstimate ?? null, app.settings.max_cost_usd)) confirmBudget = true;
+    if (exceedsCap(glossaryRefreshEstimate, app.settings.max_cost_usd)) confirmBudget = true;
     else void app.retryFailed({ refreshGlossary: true });
+  }
+
+  function restoreRecoverySnapshot(): void {
+    const backupSetId = recoverySetId;
+    confirmRecoveryRestore = false;
+    if (backupSetId) void app.restore(backupSetId);
   }
 
   async function jumpToProblem(): Promise<void> {
@@ -174,6 +192,7 @@
   {#if staleCount > 0}
     <Callout tone="warning" title={t('glossary.changedTitle')} role="alert">
       {t('glossary.changedHelp', { count: formatNumber(staleCount, app.locale) })}
+      <p class="refresh-estimate num">{t('translationReview.retryCost', { cost: glossaryRefreshEstimateText })}</p>
       {#snippet actions()}
         <button type="button" class="btn btn-secondary btn-sm" disabled={!!app.busy || !app.canRun} onclick={refreshGlossary}>
           <Icon name="refresh" size={15} /> {t('glossary.retranslate', { count: formatNumber(staleCount, app.locale) })}
@@ -184,6 +203,16 @@
 
   {#if app.reviewResumed && !corrections}
     <Callout tone="info" title={t('translationReview.resumed')}>{t('translationReview.resumedHelp')}</Callout>
+  {/if}
+
+  {#if recoverySetId}
+    <Callout tone="danger" title={t('translationReview.reapplyInterrupted.title')} role="alert">
+      {t('translationReview.reapplyInterrupted.body')}
+      {#snippet actions()}
+        <button type="button" class="btn btn-secondary btn-sm" disabled={!!app.busy} onclick={() => (confirmRecoveryRestore = true)}>{t('translationReview.reapplyInterrupted.restore')}</button>
+        <button type="button" class="btn btn-primary btn-sm" disabled={!canApply || !!app.busy} onclick={() => (confirmApply = true)}>{t('translationReview.reapplyInterrupted.retry')}</button>
+      {/snippet}
+    </Callout>
   {/if}
 
   {#if review.refusedIds.length}
@@ -236,10 +265,10 @@
       {#if cost !== null}<span class="num muted">{t('translationReview.costSoFar', { cost: formatUsd(cost, app.locale) })}</span>{/if}
     </div>
     <div class="next">
-      {#if failedCount > 0}
+      {#if retryCount > 0}
         <div class="retry">
           <button type="button" class="btn btn-secondary" disabled={!!app.busy || !app.canRun} onclick={retry}>
-            <Icon name="refresh" size={16} /> {t('translationReview.retry', { count: formatNumber(failedCount, app.locale) })}
+            <Icon name="refresh" size={16} /> {t('translationReview.retry', { count: formatNumber(retryCount, app.locale) })}
           </button>
           <span class="hint num">{t('translationReview.retryCost', { cost: estimateText })}</span>
         </div>
@@ -267,10 +296,21 @@
 
 {#if confirmBudget}
   <Dialog title={t('run.budget.title')} onClose={() => (confirmBudget = false)}>
-    <p>{t('translationReview.retryBudget', { high: formatUsd(estimate?.cost?.high ?? 0, app.locale), cap: formatUsd(app.settings.max_cost_usd ?? 0, app.locale) })}</p>
+    <p>{t(refreshingGlossary ? 'glossary.refreshBudget' : 'translationReview.retryBudget', { high: formatUsd(estimate?.cost?.high ?? 0, app.locale), cap: formatUsd(app.settings.max_cost_usd ?? 0, app.locale) })}</p>
+    {#if formatRequestRange(estimate, app.locale)}<p class="estimate-requests">{formatRequestRange(estimate, app.locale)}</p>{/if}
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmBudget = false)}>{t('common.cancel')}</button>
       <button type="button" class="btn btn-primary" onclick={retryAnyway}>{t('run.budget.anyway')}</button>
+    {/snippet}
+  </Dialog>
+{/if}
+
+{#if confirmRecoveryRestore}
+  <Dialog title={t('translationReview.reapplyInterrupted.confirmTitle')} onClose={() => (confirmRecoveryRestore = false)}>
+    <p>{t('translationReview.reapplyInterrupted.confirmBody')}</p>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmRecoveryRestore = false)}>{t('common.cancel')}</button>
+      <button type="button" class="btn btn-danger" disabled={!!app.busy || !recoverySetId} onclick={restoreRecoverySnapshot}>{t('translationReview.reapplyInterrupted.confirm')}</button>
     {/snippet}
   </Dialog>
 {/if}
@@ -291,6 +331,7 @@
   .chip .n { color: var(--text-secondary); font-weight: 500; }
   .chip[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-soft-text); }
   .chip[aria-pressed='true'] .n { color: inherit; }
+  .refresh-estimate { margin: var(--space-1) 0 0; color: var(--text-secondary); font-size: var(--text-sm); }
   @media (hover: hover) { .chip[aria-pressed='false']:hover { background: var(--bg-hover); } }
   .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; }
   .workarea.wide { grid-template-columns: minmax(0, 1fr) 340px; }

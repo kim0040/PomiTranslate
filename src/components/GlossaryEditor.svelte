@@ -1,47 +1,28 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import type { GlossaryEntry } from '../lib/api';
   import { t } from '../lib/i18n/index.svelte';
+  import { inspectGlossaryEntries } from '../lib/glossary-validation';
   import Icon from './Icon.svelte';
 
-  type RowError = { index: number; message: string };
-  let { entries = $bindable<GlossaryEntry[]>([]), invalid = $bindable(false), resetKey = 0 }: {
-    entries?: GlossaryEntry[]; invalid?: boolean; resetKey?: number;
+  let { entries = $bindable<GlossaryEntry[]>([]), invalid = $bindable(false), resetKey = 0, focusErrorIndex = -1 }: {
+    entries?: GlossaryEntry[]; invalid?: boolean; resetKey?: number; focusErrorIndex?: number;
   } = $props();
   let query = $state('');
   let fileInput: HTMLInputElement | undefined = $state();
   let importError = $state('');
 
-  function validate(value: GlossaryEntry[]): RowError[] {
-    const errors: RowError[] = [];
-    if (value.length > 2000) errors.push({ index: 2000, message: t('glossary.error.limit') });
-    const valid: { entry: GlossaryEntry; index: number }[] = [];
-    value.forEach((entry, index) => {
-      const problems: string[] = [];
-      const source = entry.source.trim();
-      if (!source) problems.push(t('glossary.error.sourceRequired'));
-      if (source.length > 200) problems.push(t('glossary.error.sourceLength'));
-      if (entry.target.length > 500) problems.push(t('glossary.error.targetLength'));
-      if (entry.note.length > 500) problems.push(t('glossary.error.noteLength'));
-      if (entry.mode === 'translate' && !entry.target.trim()) problems.push(t('glossary.error.targetRequired'));
-      if (!['translate', 'keep'].includes(entry.mode)) problems.push(t('glossary.error.mode'));
-      if (/§[0-9a-fk-orx]/i.test(entry.source) || /§[0-9a-fk-orx]/i.test(entry.target)) problems.push(t('glossary.error.formatCode'));
-      const previous = valid.find(({ entry: old }) => {
-        if (old.source.trim() === source) return true;
-        return old.source.trim().toLocaleLowerCase() === source.toLocaleLowerCase() && (!old.caseSensitive || !entry.caseSensitive);
-      });
-      if (previous) problems.push(t('glossary.error.duplicate', { row: previous.index + 1 }));
-      if (problems.length) errors.push({ index, message: problems.join(' ') });
-      else valid.push({ entry, index });
-    });
-    return errors;
-  }
-
-  const errors = $derived(validate(entries));
+  const errors = $derived(inspectGlossaryEntries(entries).errors);
   const filtered = $derived(entries.map((entry, index) => ({ entry, index })).filter(({ entry }) =>
     !query.trim() || `${entry.source}\n${entry.target}\n${entry.note}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
   ));
   $effect(() => { invalid = errors.length > 0; void resetKey; });
   $effect(() => { void resetKey; query = ''; importError = ''; });
+  $effect(() => {
+    const index = focusErrorIndex;
+    if (index < 0) return;
+    void tick().then(() => document.querySelector<HTMLInputElement>(`[data-glossary-row="${index}"] input`)?.focus());
+  });
 
   function update(index: number, changes: Partial<GlossaryEntry>): void {
     entries = entries.map((entry, at) => at === index ? { ...entry, ...changes } : entry);
@@ -177,7 +158,7 @@
           {#each filtered as row (row.index)}
             {@const entry = row.entry}
             {@const error = errors.find((item) => item.index === row.index)}
-            <tr class:invalid={!!error}>
+            <tr class:invalid={!!error} data-glossary-row={row.index}>
               <td><input class="input" value={entry.source} maxlength="200" aria-label={t('glossary.source')} aria-invalid={!!error} oninput={(event) => update(row.index, { source: event.currentTarget.value })} /></td>
               <td><input class="input" value={entry.target} maxlength="500" aria-label={t('glossary.target')} oninput={(event) => update(row.index, { target: event.currentTarget.value })} /></td>
               <td><select class="select" value={entry.mode} aria-label={t('glossary.mode')} onchange={(event) => update(row.index, { mode: event.currentTarget.value as GlossaryEntry['mode'] })}><option value="translate">{t('glossary.mode.translate')}</option><option value="keep">{t('glossary.mode.keep')}</option></select></td>
@@ -185,7 +166,7 @@
               <td><label class="case"><input type="checkbox" checked={entry.caseSensitive} aria-label={t('glossary.caseSensitive')} onchange={(event) => update(row.index, { caseSensitive: event.currentTarget.checked })} /><span class="sr-only">{t('glossary.caseSensitive')}</span></label></td>
               <td><button type="button" class="btn btn-quiet btn-icon btn-sm" aria-label={t('glossary.remove')} onclick={() => remove(row.index)}><Icon name="trash" size={15} /></button></td>
             </tr>
-            {#if error}<tr class="error-row"><td colspan="6"><span class="error" role="alert">{t('glossary.rowError', { row: row.index + 1, message: error.message })}</span></td></tr>{/if}
+            {#if error}<tr class="error-row"><td colspan="6"><span class="error" role="alert">{t('glossary.rowError', { row: row.index + 1, message: error.messages.map((item) => t(item.key, item.values)).join(' ') })}</span></td></tr>{/if}
           {/each}
         </tbody>
       </table>

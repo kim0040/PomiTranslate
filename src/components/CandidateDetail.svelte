@@ -43,7 +43,7 @@
 
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
-      <p class="source" lang="en">{candidate.source}</p>
+      <p class="source">{candidate.source}</p>
       {#if onQuickAdd}
         <button type="button" class="btn btn-secondary btn-sm glossary-add" onclick={() => onQuickAdd(candidate.source, manual)}>
           <Icon name="plus" size={14} /> {t('glossary.quickAdd')}

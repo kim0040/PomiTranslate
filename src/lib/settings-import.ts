@@ -1,6 +1,7 @@
 import { validateResourcePackOptions } from './resource-pack';
 import type { ScanFlag, ScanOptions, Settings } from './api';
 import { normalizedScanOptions, publicSettingsForExport } from './settings';
+import { inspectGlossaryEntries } from './glossary-validation';
 
 const MAX_IMPORT_BYTES = 1024 * 1024;
 const MAX_MODEL_CHARS = 256;
@@ -209,6 +210,34 @@ function setBooleanField(target: Settings, source: JsonObject, key: 'resource_pa
   else target.skip_target_language_text = value;
 }
 
+function validateCustomPrices(value: unknown): NonNullable<Settings['custom_prices']> {
+  const prices = object(value, 'settings.custom_prices');
+  if (Object.keys(prices).length > 1000) throw new Error('settings.custom_prices can contain at most 1000 prices');
+  const normalized: NonNullable<Settings['custom_prices']> = {};
+  for (const [key, raw] of Object.entries(prices)) {
+    const separator = key.indexOf('/');
+    const provider = separator >= 0 ? key.slice(0, separator) : '';
+    const model = separator >= 0 ? key.slice(separator + 1) : '';
+    if (!['openai', 'gemini', 'anthropic', 'openrouter', 'comet', 'custom'].includes(provider) || !model.trim()) {
+      throw new Error('settings.custom_prices contains an invalid provider/model key');
+    }
+    const price = object(raw, `settings.custom_prices.${key}`);
+    const rate = (name: 'input' | 'output') => {
+      const item = price[name];
+      if (typeof item !== 'number' || !Number.isFinite(item) || item < 0 || item > 1000) {
+        throw new Error(`settings.custom_prices.${key}.${name} must be between 0 and 1000`);
+      }
+      return item;
+    };
+    const updatedAt = price.updatedAt;
+    if (updatedAt !== undefined && (typeof updatedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(updatedAt) || !Number.isFinite(Date.parse(updatedAt)))) {
+      throw new Error(`settings.custom_prices.${key}.updatedAt must be an ISO timestamp`);
+    }
+    normalized[key] = { input: rate('input'), output: rate('output'), ...(typeof updatedAt === 'string' ? { updatedAt } : {}) };
+  }
+  return normalized;
+}
+
 function applyCurrentShape(target: Settings, source: JsonObject): void {
   const currentProvider = target.provider;
   const providerWasSupplied = hasOwn(source, 'provider');
@@ -243,11 +272,19 @@ function applyCurrentShape(target: Settings, source: JsonObject): void {
 
   const numericKeys = ['temperature', 'batch_size', 'request_timeout', 'rpm_limit', 'tpm_limit', 'max_batch_retries', 'max_file_write_retries', 'concurrency'];
   for (const key of numericKeys) setNumberField(target, source, key, 'settings');
+  if (hasOwn(source, 'review_before_apply')) target.review_before_apply = booleanValue(source.review_before_apply, 'settings.review_before_apply');
+  if (hasOwn(source, 'max_cost_usd')) target.max_cost_usd = boundedNumber(source.max_cost_usd, 'settings.max_cost_usd', 0, 1000);
   setBooleanField(target, source, 'resource_pack_enabled', 'settings.resource_pack_enabled');
   setBooleanField(target, source, 'skip_target_language_text', 'settings.skip_target_language_text');
   if (hasOwn(source, 'resource_pack_options')) target.resource_pack_options = validateResourcePackOptions(source.resource_pack_options, target.resource_pack_options);
   if (hasOwn(source, 'scan_options')) importScanOptions(target, source.scan_options, 'settings.scan_options');
   if (hasOwn(source, 'source_overrides')) target.source_overrides = validateSourceOverrides(source.source_overrides);
+  if (hasOwn(source, 'glossary')) {
+    const result = inspectGlossaryEntries(source.glossary);
+    if (!result.entries) throw new Error('settings.glossary contains invalid entries');
+    target.glossary = result.entries;
+  }
+  if (hasOwn(source, 'custom_prices')) target.custom_prices = validateCustomPrices(source.custom_prices);
   if (hasOwn(source, 'continue_on_file_error')) target.continue_on_file_error = booleanValue(source.continue_on_file_error, 'continue_on_file_error');
 
   if (selectedProvider && selectedProvider !== 'custom') {

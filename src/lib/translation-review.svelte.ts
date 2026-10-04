@@ -240,7 +240,7 @@ export class TranslationReview {
   setDraft(row: TranslationRow, text: string): void {
     const drafts = { ...this.drafts };
     if (text === row.translated) delete drafts[row.id];
-    else if (row.status === 'edited' && text === row.ai) drafts[row.id] = null;
+    else if (row.edited && text === row.ai) drafts[row.id] = null;
     else drafts[row.id] = text;
     this.drafts = drafts;
     this.dropRefusal(row.id);
@@ -250,7 +250,7 @@ export class TranslationReview {
   /** Back to the AI's answer. A saved edit is discarded by sending null; an unsaved one is just dropped. */
   revert(row: TranslationRow): void {
     const drafts = { ...this.drafts };
-    if (row.status === 'edited') drafts[row.id] = null;
+    if (row.edited) drafts[row.id] = null;
     else delete drafts[row.id];
     this.drafts = drafts;
     this.dropRefusal(row.id);
@@ -261,8 +261,8 @@ export class TranslationReview {
   canRevert(row: TranslationRow): boolean {
     const draft = this.drafts[row.id];
     if (draft === null) return false;
-    if (typeof draft === 'string') return !!row.ai || row.status === 'edited';
-    return row.status === 'edited';
+    if (typeof draft === 'string') return !!row.ai || row.edited;
+    return row.edited;
   }
 
   private dropRefusal(id: string): void {
@@ -285,5 +285,12 @@ export class TranslationReview {
   settle(): void {
     this.drafts = {};
     this.refused = {};
+  }
+
+  /** Drop only unsaved editor drafts while keeping the saved job and its rows available. */
+  discardDrafts(): void {
+    this.drafts = {};
+    this.refused = {};
+    this.refreshCounts(0);
   }
 }

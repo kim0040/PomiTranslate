@@ -150,7 +150,7 @@ for (const width of [1440, 840, 320]) {
     const editor = await page.locator('#style-prompt').boundingBox();
     const bar = await page.locator('.save-bar').boundingBox();
     expect(editor!.y + editor!.height).toBeLessThanOrEqual(bar!.y);
-    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.locator('main').evaluate((main) => { main.scrollTop = main.scrollHeight; });
     await expect(save).toBeInViewport();
     expect(await save.evaluate((button) => {
       const box = button.getBoundingClientRect();
@@ -158,7 +158,7 @@ for (const width of [1440, 840, 320]) {
     })).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.locator('main').evaluate((main) => { main.scrollTop = 0; });
     await page.screenshot({ path: `output/playwright/settings-ux-${width}.png` });
   });
 }

@@ -54,6 +54,7 @@
   }
   // `tokens=1` puts § formatting codes into one sentence, to test that a broken code is refused.
   if (new URLSearchParams(location.search).get('tokens') === '1') candidates[3].source = '§6A blade that remembers every battle§r';
+  if (new URLSearchParams(location.search).get('sourceLang') === 'ja') candidates[0].source = 'ようこそ、ローグファイアへ';
   const worldDir = '/private/tmp/pomi-eval/Roguefire — a deliberately long translated world folder name';
   const inspection = {
     validJavaWorld: true,
@@ -79,9 +80,15 @@
     max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false,
     skip_target_language_text: true, ui_language: previewLocale, last_world_dir: worldDir,
     // `review=0` keeps the old single-pass behaviour for the specs written before review-before-apply.
-    review_before_apply: new URLSearchParams(location.search).get('review') !== '0', max_cost_usd: 0,
+    review_before_apply: new URLSearchParams(location.search).get('review') !== '0', max_cost_usd: Number(new URLSearchParams(location.search).get('cap') || 0),
     glossary: [], custom_prices: {}
   };
+  if (new URLSearchParams(location.search).get('editedMismatch') === '1') {
+    settings.glossary = [{ source: 'Welcome to Roguefire', target: 'ログファイア', mode: 'translate', note: '', caseSensitive: false }];
+  }
+  if (new URLSearchParams(location.search).get('estimateRange') === '1') {
+    settings.glossary = [{ source: 'Welcome to Roguefire', target: '로그파이어', mode: 'translate', note: '', caseSensitive: false }];
+  }
   // Saved manual translations from an earlier session, in the settings object format.
   if (new URLSearchParams(location.search).get('sourceOverrides') === '1') settings.source_overrides = { 'Welcome to Roguefire': '환영합니다', 'You are not ready yet.': '아직 준비가 안 됐군.' };
   // A fresh install: no model chosen and no key saved yet.
@@ -90,7 +97,9 @@
   let freshKeySaved = false;
   const estimate = {
     candidateCount: candidates.length, requests: 1, sourceChars: 180, inputTokens: 720,
-    outputTokens: 240, price: { input: 0.00000015, output: 0.0000006, perMillionInput: 0.15, perMillionOutput: 0.6 },
+    outputTokens: 240, requestRange: { low: 1, high: 1 }, glossaryRetryRequests: 0, glossaryPromptChars: 0,
+    inputTokensHigh: 720, outputTokensHigh: 240,
+    price: { input: 0.00000015, output: 0.0000006, perMillionInput: 0.15, perMillionOutput: 0.6 },
     cost: { low: 0.000252, high: 0.000504 },
     // `reasoning=1` reports the reasoning allowance as included in the estimate.
     ...(new URLSearchParams(location.search).get('reasoning') === '1' ? { reasoningIncluded: true } : {})
@@ -128,7 +137,8 @@
       candidateCount: candidates.length, occurrenceCount: scan.occurrenceCount, kinds: scan.kinds, coverage: scan.coverage, candidates: candidates.slice(0, 200), excludedCandidateIds: ['tellraw'],
       candidateOverrides: { shop: previewTranslations[previewLocale] }, savedAt: 1790672400,
       lastScan: new URLSearchParams(location.search).get('scenario') === 'unscanned' ? null : { at: 1790585600, candidateCount: candidates.length },
-      status, translatedCount: job ? job.rows.filter((row) => row.status !== 'failed').length : 2, failedCount: job ? job.rows.filter((row) => row.status === 'failed').length : 0, backupSetId: '',
+      status, translatedCount: job ? job.rows.filter((row) => row.status !== 'failed').length : 2, failedCount: job ? job.rows.filter((row) => row.status === 'failed').length : 0,
+      backupSetId: job?.backupSetId || '', recoverySetId: job?.recoverySetId,
       lastJob: { world: 'Roguefire', at: 1790672300, status: 'partial', translated: 4, failed: 2, changedFiles: 4, candidateCount: 6 }
     };
   }
@@ -152,6 +162,20 @@
   }
   // --- the saved translation job (what the sidecar keeps in its checkpoint) -------------------
   const query = new URLSearchParams(location.search);
+  const firstLaunch = scenario() === 'first-run';
+  const fixturePrefs = firstLaunch ? {} : {
+    theme: query.get('theme') || (scenario() === 'dark-review' ? 'dark' : 'light'),
+    notice_accepted: true,
+    tutorial_seen: true,
+    setup_dismissed: true,
+    update_auto_check: true,
+    update_last_check: 0,
+    update_skipped_version: '',
+    notify_on_finish: query.get('notify') !== 'off'
+  };
+  if (query.has('theme')) fixturePrefs.theme = query.get('theme');
+  if (query.get('notify') === 'off') fixturePrefs.notify_on_finish = false;
+  window.__pomiPrefs = fixturePrefs;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const failCodes = ['timeout', 'rate_limit', 'invalid_response', 'network', 'quota', 'content_filter', 'auth', 'provider_error', 'unknown'];
   const failDetails = {
@@ -192,6 +216,11 @@
       const count = Number(query.get('fail') || 0);
       rows.slice(0, count).forEach((row, index) => failRow(row, query.get('failCode') || failCodes[index % failCodes.length]));
       if ((scenario() === 'glossary-mismatch' || query.get('glossaryMismatch') === '1') && rows[0]) rows[0].status = 'glossary_mismatch';
+      if (query.get('stale') === '1' && rows[1]) rows[1].glossaryFixtureStale = true;
+      if (query.get('editedMismatch') === '1' && rows[0]) {
+        rows[0].status = 'glossary_mismatch';
+        rows[0].edit = '별칭';
+      }
     }
     job = {
       kind, rows, status: kind === 'review' ? 'awaiting_review' : kind === 'success' ? 'completed' : kind, excluded: [...skip],
@@ -222,19 +251,67 @@
     return new RegExp(`(?<!\\w)${escaped}(?!\\w)`, entry.caseSensitive ? '' : 'i').test(text);
   }
   function glossaryHash(source) { return JSON.stringify(effectiveGlossary().filter((entry) => termMatches(source, entry))); }
-  function glossaryStale(row) { return row.status !== 'failed' && job.glossaryHashes?.[row.source] !== glossaryHash(row.source); }
+  function fixtureGlossaryBlock(entries, reminder = false) {
+    const translating = entries.filter((entry) => (entry.mode || 'translate') === 'translate').map((entry) => ({ source: entry.source, target: entry.target }));
+    const keeping = entries.filter((entry) => entry.mode === 'keep').map((entry) => entry.source);
+    if (!translating.length && !keeping.length) return '';
+    const lines = ['', '[FIXED GLOSSARY — BEGIN]'];
+    if (reminder) lines.push('Reminder: follow every glossary rule below exactly; these rules are mandatory.');
+    if (translating.length) {
+      lines.push('Use these fixed translations exactly (do not vary their spelling):');
+      lines.push(JSON.stringify(translating));
+    }
+    if (keeping.length) {
+      lines.push('Keep these terms untranslated exactly as written:');
+      lines.push(JSON.stringify(keeping));
+    }
+    lines.push('[FIXED GLOSSARY — END]');
+    return lines.join('\n');
+  }
+  function estimateForRows(rows) {
+    const count = rows.length;
+    const requests = Math.ceil(count / settings.batch_size);
+    const entriesFor = (batch) => effectiveGlossary().filter((entry) => batch.some((row) => termMatches(row.source, entry)));
+    let glossaryPromptChars = 0;
+    for (let index = 0; index < count; index += settings.batch_size) {
+      glossaryPromptChars += fixtureGlossaryBlock(entriesFor(rows.slice(index, index + settings.batch_size))).length;
+    }
+    const matchedRows = rows.map((row) => entriesFor([row])).filter((entries) => entries.length);
+    const glossaryRetryRequests = matchedRows.length;
+    const reminderPromptChars = matchedRows.reduce((total, entries) => total + fixtureGlossaryBlock(entries, true).length, 0);
+    const scale = count / Math.max(1, candidates.length);
+    const inputTokens = Math.ceil(estimate.inputTokens * scale) + Math.ceil(glossaryPromptChars / 4);
+    const outputTokens = Math.ceil(estimate.outputTokens * scale);
+    const inputTokensHigh = inputTokens + Math.ceil(reminderPromptChars / 4);
+    const outputTokensHigh = outputTokens + glossaryRetryRequests * 40;
+    return {
+      ...estimate,
+      candidateCount: count,
+      requests,
+      requestRange: { low: requests, high: requests + glossaryRetryRequests },
+      glossaryRetryRequests,
+      glossaryPromptChars,
+      sourceChars: Math.ceil(estimate.sourceChars * scale),
+      inputTokens,
+      outputTokens,
+      inputTokensHigh,
+      outputTokensHigh,
+      cost: {
+        low: 0.000042 * count + glossaryPromptChars / 4 * estimate.price.input,
+        high: 0.000084 * (count + glossaryRetryRequests) + (glossaryPromptChars + reminderPromptChars) / 4 * estimate.price.input
+      }
+    };
+  }
+  function glossaryStale(row) { return row.status !== 'failed' && (row.glossaryFixtureStale || job.glossaryHashes?.[row.source] !== glossaryHash(row.source)); }
   const viewRow = (row, drafts = new Set()) => {
-    const savedEdited = row.edit !== undefined;
-    const edited = savedEdited || drafts.has(row.id);
-    const translated = savedEdited ? row.edit : row.status === 'failed' ? '' : row.ai;
-    const glossaryMismatch = !!translated && (row.status === 'glossary_mismatch' || effectiveGlossary().some((entry) =>
-      termMatches(row.source, entry) && !termMatches(translated, { ...entry, source: entry.mode === 'keep' ? entry.source : entry.target, caseSensitive: entry.mode === 'translate' || entry.caseSensitive })
-    ));
+    const edited = row.edit !== undefined;
+    const glossaryMismatch = row.status === 'glossary_mismatch';
     return {
       id: row.id, source: row.source, kind: row.kind, occurrences: row.occurrences, ai: row.status === 'failed' ? '' : row.ai,
       translated, edited: savedEdited, glossaryMismatch,
       glossaryStale: glossaryStale(row),
-      status: drafts.has(row.id) ? 'edited' : glossaryMismatch ? 'glossary_mismatch' : edited ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
+      edited, glossaryMismatch,
+      status: glossaryMismatch ? row.status : edited || drafts.has(row.id) ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
       ...(row.status === 'failed' && row.edit === undefined ? { reason: row.reason, detail: row.detail } : {})
     };
   };
@@ -248,12 +325,16 @@
     }
     return counts;
   }
-  function actionEstimate(rows) {
-    if (!rows.length) return null;
-    const requests = Math.ceil(rows.length / settings.batch_size);
-    const glossaryRetryRequests = rows.filter((row) => effectiveGlossary().some((entry) => termMatches(row.source, entry))).length;
-    return { ...estimate, candidateCount: rows.length, requests, requestRange: { low: requests, high: requests + glossaryRetryRequests }, glossaryRetryRequests,
-      cost: { low: 0.000042 * rows.length, high: 0.000084 * (rows.length + glossaryRetryRequests) } };
+  function estimateRows(rows) { return rows.length ? estimateForRows(rows) : null; }
+  Object.assign(estimate, estimateForRows(candidates));
+  function retryRows() {
+    return job.rows.filter((row) => (row.status === 'failed' && row.edit === undefined) || glossaryStale(row));
+  }
+  function retryEstimate() {
+    return estimateRows(retryRows());
+  }
+  function glossaryRefreshRows() {
+    return job.rows.filter(glossaryStale);
   }
   function pagePayload(body) {
     const stale = job.rows.filter(glossaryStale);
@@ -270,9 +351,11 @@
     const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
     return {
       rows: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, counts: jobCounts(drafts),
-      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, recoverySetId: job.recoverySetId || '', failedCount: job.rows.filter((row) => row.status === 'failed').length, unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests }, retryCount: retry.length, retryEstimate: actionEstimate(retry),
-        glossaryActive: effectiveGlossary().length > 0, glossaryStaleCount: job.rows.filter(glossaryStale).length,
-        glossaryRefreshCount: stale.length, glossaryRefreshEstimate: actionEstimate(stale), glossaryRefreshed: !!job.glossaryRefreshed }
+      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, recoverySetId: job.recoverySetId,
+        failedCount: job.rows.filter((row) => row.status === 'failed').length, retryCount: retryRows().length,
+        unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests }, retryEstimate: retryEstimate(),
+        glossaryActive: effectiveGlossary().length > 0, glossaryStaleCount: glossaryRefreshRows().length, glossaryRefreshCount: glossaryRefreshRows().length,
+        glossaryRefreshEstimate: estimateRows(glossaryRefreshRows()), glossaryRefreshed: !!job.glossaryRefreshed }
     };
   }
   function jobResult(status, extra = {}) {
@@ -405,9 +488,8 @@
       const resultScenarios = ['result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
-        settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
-        ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
-        ...(new URLSearchParams(location.search).get('notify') === 'off' ? { prefs: { theme: 'system', notice_accepted: true, tutorial_seen: true, setup_dismissed: true, update_auto_check: false, update_last_check: 0, update_skipped_version: '', notify_on_finish: false } } : {}),
+        settings: { ...settings, last_world_dir: empty ? '' : worldDir, app_prefs: { ...fixturePrefs } },
+        prefs: { ...fixturePrefs },
         apiKeyStored: !fresh || freshKeySaved, credentialMode: credentialModes.get(settings.provider) || initialCredentialMode, worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
         worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
         resume: current === 'awaiting-review' ? resumePayload('awaiting_review') : resumed || resultScenarios.includes(current) ? resumePayload() : { available: false },
@@ -452,7 +534,34 @@
       return ok(request, { global: globalEntries, world: worldEntries, effective });
     }
     if (type === 'glossary.set') {
-      if (!Array.isArray(body.entries) || body.entries.length > 2000) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_INVALID', message: 'Invalid glossary entries', details: { rows: [] } } };
+      const entries = body.entries;
+      const rows = [];
+      if (!Array.isArray(entries)) rows.push({ index: 0, message: 'entries must be a list' });
+      else {
+        if (entries.length > 2000) rows.push({ index: 2000, message: 'scope limit exceeded' });
+        const seen = [];
+        entries.slice(0, 2000).forEach((entry, index) => {
+          const source = typeof entry?.source === 'string' ? entry.source.trim() : '';
+          const target = typeof entry?.target === 'string' ? entry.target.trim() : '';
+          const mode = entry?.mode ?? 'translate';
+          const note = entry?.note ?? '';
+          const caseSensitive = entry?.caseSensitive ?? false;
+          const problems = [];
+          if (!source) problems.push('source required');
+          if (source.length > 200) problems.push('source too long');
+          if (target.length > 500 || (mode === 'translate' && !target)) problems.push('target invalid');
+          if (mode !== 'translate' && mode !== 'keep') problems.push('mode invalid');
+          if (typeof note !== 'string' || note.length > 500) problems.push('note invalid');
+          if (typeof caseSensitive !== 'boolean') problems.push('case sensitivity invalid');
+          if (/§[0-9a-fk-orx]/i.test(source) || /§[0-9a-fk-orx]/i.test(target)) problems.push('format code invalid');
+          const duplicate = seen.find((item) => source === item.source || (source.toLowerCase() === item.source.toLowerCase() && (!caseSensitive || !item.caseSensitive)));
+          if (duplicate) problems.push(`duplicate of ${duplicate.index + 1}`);
+          if (source && source.length <= 200) seen.push({ source, caseSensitive, index });
+          if (problems.length) rows.push({ index, message: problems.join('; ') });
+        });
+      }
+      if (rows.length) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_INVALID', message: 'Invalid glossary entries', details: { rows } } };
+      if (query.get('glossaryFailScope') === body.scope) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_INVALID', message: 'Synthetic scope save failure', details: { rows: [] } } };
       if (body.scope === 'global') settings.glossary = body.entries;
       else {
         if (!body.world) return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'A world folder is required' } };
@@ -461,10 +570,8 @@
       return ok(request, { scope: body.scope, entries: body.entries, count: body.entries.length });
     }
     if (type === 'prefs.set') {
-      // A save answers with every stored pref, so a scenario's boot-time prefs must survive it.
-      if (!window.__pomiPrefs && new URLSearchParams(location.search).get('notify') === 'off') window.__pomiPrefs = { notify_on_finish: false };
-      window.__pomiPrefs = { ...(window.__pomiPrefs || {}), ...(body.prefs || {}) };
-      return ok(request, { prefs: { ...({ theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true }), ...window.__pomiPrefs } });
+      Object.assign(fixturePrefs, body.prefs || {});
+      return ok(request, { prefs: { ...fixturePrefs } });
     }
     if (type === 'app.reset') {
       if (body.confirm !== 'reset') return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'Reset needs an explicit confirmation' } };
@@ -484,17 +591,24 @@
     if (type === 'worlds.remember') return ok(request, { worlds: [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }] });
     if (type === 'worlds.forget') return ok(request, { worlds: [] });
     if (type === 'resume.status') {
-      if (job && !job.applied && ['awaiting_review', 'budget_stopped', 'cancelled', 'needs_retry', 'failed'].includes(job.status)) return ok(request, resumePayload(job.status));
+      if (job && (!job.applied || job.status === 'reapply_interrupted') && ['awaiting_review', 'budget_stopped', 'reapply_interrupted', 'cancelled', 'needs_retry', 'failed'].includes(job.status)) return ok(request, resumePayload(job.status));
       return ok(request, ['result-cancelled', 'result-needs_retry'].includes(current) ? { ...resumePayload(), status: current.slice(7) } : { available: false });
     }
     if (type === 'backups.list') return ok(request, { backups });
     if (type === 'estimate.get') {
       if (new URLSearchParams(location.search).get('slowEstimate') === '1') await new Promise((resolve) => setTimeout(resolve, 600));
       const excluded = new Set([...(body.excludedCandidateIds || []), ...(body.overrideCandidateIds || [])]);
-      const count = candidates.filter((row) => !excluded.has(row.id) && !settings.source_overrides?.[row.source]).length;
+      const estimateRows = candidates.filter((row) => !excluded.has(row.id) && !settings.source_overrides?.[row.source]);
+      const count = estimateRows.length;
       const userPrice = settings.custom_prices?.[`${settings.provider}/${settings.model}`];
-      const cost = userPrice ? { low: 0.0001 * (userPrice.input + userPrice.output), high: 0.0002 * (userPrice.input + userPrice.output) } : estimate.cost;
-      return ok(request, { ...estimate, priceSource: userPrice ? 'user' : estimate.priceSource, candidateCount: count, requests: Math.ceil(count / 40), cost });
+      const calculated = estimateForRows(estimateRows);
+      const inputRate = userPrice?.input / 1_000_000;
+      const outputRate = userPrice?.output / 1_000_000;
+      const cost = userPrice ? {
+        low: calculated.inputTokens * inputRate + calculated.outputTokens * outputRate,
+        high: (calculated.inputTokensHigh * inputRate + calculated.outputTokensHigh * outputRate) * 2
+      } : calculated.cost;
+      return ok(request, { ...calculated, priceSource: userPrice ? 'user' : calculated.priceSource, candidateCount: count, cost });
     }
     if (type === 'candidates.page') return ok(request, filteredPage(body));
     if (type === 'provider.usage') return ok(request, { provider: 'openrouter', checkedAt: '2026-10-01T00:00:00Z', usage: 0.123456, byokUsage: 0, limit: null, limitRemaining: null });
@@ -558,7 +672,7 @@
         return ok(request, staged);
       }
       const resuming = type === 'translate.resume';
-      const budgetStop = query.get('budget') === '1' && !body.budgetOverride && !job;
+      const budgetStop = (query.get('budget') === '1' || query.get('overCap') === '1') && !body.budgetDisabled;
       if (!resuming || !job) makeJob('review', body.excludedCandidateIds);
       if (budgetStop) {
         makeJob('budget_stopped', body.excludedCandidateIds).requests = 1;
@@ -588,20 +702,23 @@
     }
     if (type === 'translate.retry_failed') {
       ensureJob(['tellraw']);
+      const stale = glossaryRefreshRows();
+      const sendRows = body.refreshGlossary ? stale : retryRows();
+      window.__pomiRetrySent = sendRows.map((row) => row.id);
       progressEvents(request, 'translate.progress', [
-        [10, { event: 'phase_start', phase: 'translate', total: job.rows.filter((row) => row.status === 'failed').length, requests_estimate: 1 }]
+        [10, { event: 'phase_start', phase: 'translate', total: sendRows.length, requests_estimate: 1 }]
       ]);
       await sleep(80);
       job.requests += 1;
-      const stale = job.rows.filter(glossaryStale);
-      for (const row of stale) {
+      for (const row of sendRows.filter(glossaryStale)) {
         row.ai = effectiveGlossary().filter((entry) => termMatches(row.source, entry)).reduce((answer, entry) =>
           entry.mode === 'keep' ? answer : answer.replaceAll(entry.source, entry.target), row.source);
         row.status = 'translated';
+        row.glossaryFixtureStale = false;
       }
       if (stale.length && job.applied) job.glossaryRefreshed = true;
+      if (!body.refreshGlossary && query.get('retryFail') !== '1') sendRows.forEach((row) => { if (row.status === 'failed' && row.edit === undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; } });
       job.glossaryHashes = Object.fromEntries(job.rows.map((row) => [row.source, glossaryHash(row.source)]));
-      if (query.get('retryFail') !== '1') job.rows.forEach((row) => { if (row.status === 'failed' && row.edit === undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; } });
       job.status = 'awaiting_review';
       job.usage = { ...job.usage, prompt_tokens: job.usage.prompt_tokens + 120, completion_tokens: job.usage.completion_tokens + 40, cost: job.usage.cost + 0.00006 };
       return ok(request, jobResult('awaiting_review', { providerRequests: 1, backupSetId: job.applied ? job.backupSetId : '', changedFileCount: 0 }));
@@ -614,6 +731,12 @@
       if (!reapply && job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'ALREADY_APPLIED', message: 'Use reapply', recoverable: true } };
       if (reapply && !job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'NOTHING_TO_REAPPLY', message: 'Nothing to reapply', recoverable: true } };
       if (query.get('worldChanged') === '1' && reapply) return { v: 1, id: request.id, type: 'response.error', error: { code: 'WORLD_CHANGED_SINCE_APPLY', message: 'World changed', recoverable: true } };
+      if (query.get('reapplyInterrupted') === '1' && reapply && !job.reapplyInterruptedOnce) {
+        job.reapplyInterruptedOnce = true;
+        job.status = 'reapply_interrupted';
+        job.recoverySetId = 'recovery-before-reapply';
+        return { v: 1, id: request.id, type: 'response.error', error: { code: 'REAPPLY_INTERRUPTED', message: 'Reapply stopped after restore', recoverable: true, details: { recoverySetId: job.recoverySetId } } };
+      }
       const refusal = applyEdits(request, body.edits);
       if (refusal) return refusal;
       progressEvents(request, 'translate.progress', [

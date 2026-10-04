@@ -1,11 +1,32 @@
 import type { Locale, MessageKey } from './i18n/index.svelte';
 import { translate } from './i18n/index.svelte';
-import type { CandidateLocation } from './api';
+import type { CandidateLocation, Estimate } from './api';
 
 const BCP47: Record<Locale, string> = { ko: 'ko-KR', en: 'en-US', ja: 'ja-JP', zh: 'zh-CN' };
 
 export function formatNumber(value: number, locale: Locale): string {
   return new Intl.NumberFormat(BCP47[locale]).format(value);
+}
+
+export function formatRequestEstimate(estimate: Pick<Estimate, 'requests' | 'requestRange'> | null | undefined, locale: Locale): string {
+  if (!estimate) return '';
+  const range = estimate.requestRange;
+  if (range && range.high > range.low) {
+    return translate(locale, 'run.estimate.requestRange', {
+      low: formatNumber(range.low, locale),
+      high: formatNumber(range.high, locale)
+    });
+  }
+  return formatNumber(estimate.requests, locale);
+}
+
+export function formatRequestRange(estimate: Pick<Estimate, 'requestRange'> | null | undefined, locale: Locale): string {
+  const range = estimate?.requestRange;
+  if (!range || range.high <= range.low) return '';
+  return translate(locale, 'run.estimate.requestRange', {
+    low: formatNumber(range.low, locale),
+    high: formatNumber(range.high, locale)
+  });
 }
 
 export function formatCompact(value: number, locale: Locale): string {

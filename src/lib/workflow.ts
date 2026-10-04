@@ -123,7 +123,7 @@ export function resultPresentation(status: string): ResultPresentation {
 }
 
 /** A job whose translations are saved but that can still be continued from its checkpoint. */
-export const RESUMABLE_STATUSES = ['awaiting_review', 'budget_stopped', 'cancelled', 'needs_retry', 'failed'];
+export const RESUMABLE_STATUSES = ['awaiting_review', 'budget_stopped', 'reapply_interrupted', 'cancelled', 'needs_retry', 'failed'];
 
 /** The reasons the translation table can show for an edit the sidecar refused. */
 export type EditReason = 'tokens' | 'empty' | 'too_long' | 'invalid';

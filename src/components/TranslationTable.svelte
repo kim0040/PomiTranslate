@@ -130,20 +130,22 @@
             onclick={() => { active = index; onSelect(row, true); }}
             onkeydown={(event) => handleKey(event, index, row)}
           >
-            <td class="c-source"><span class="txt" lang="en">{row.source}</span></td>
+            <td class="c-source"><span class="txt">{row.source}</span></td>
             <td class="c-target">
               {#if shown.text}<span class="txt">{shown.text}</span>
               {:else}<span class="txt none">{shown.status === 'failed' ? t('translationReview.noTranslation') : ''}</span>{/if}
             </td>
             <td class="c-state">
-              <span class="pill {statusPill[shown.status]}">
-                {#if shown.status === 'translated'}<Icon name="check" size={12} />
-                {:else if shown.status === 'failed'}<Icon name="alert-circle" size={12} />
-                {:else if shown.status === 'glossary_mismatch'}<Icon name="alert-triangle" size={12} />
-                {:else if shown.status === 'edited'}<Icon name="pencil" size={12} />
-                {:else}<Icon name="minus" size={12} />{/if}
-                {row.glossaryStale ? t('glossary.needsCheck') : t(statusKey[shown.status])}
-              </span>
+              {#if row.edited || shown.status === 'edited'}<span class="pill pill-accent"><Icon name="pencil" size={12} /> {t(statusKey.edited)}</span>{/if}
+              {#if row.glossaryMismatch}<span class="pill pill-warning"><Icon name="alert-triangle" size={12} /> {t(statusKey.glossary_mismatch)}</span>{/if}
+              {#if !row.edited && !row.glossaryMismatch && shown.status !== 'edited'}
+                <span class="pill {statusPill[shown.status]}">
+                  {#if shown.status === 'translated'}<Icon name="check" size={12} />
+                  {:else if shown.status === 'failed'}<Icon name="alert-circle" size={12} />
+                  {:else}<Icon name="minus" size={12} />{/if}
+                  {row.glossaryStale ? t('glossary.needsCheck') : t(statusKey[shown.status])}
+                </span>
+              {/if}
               {#if problem}<span class="warn"><Icon name="alert-triangle" size={12} /> {t('translationReview.fixThis')}</span>{/if}
             </td>
           </tr>
