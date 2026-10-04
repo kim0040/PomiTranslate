@@ -19,6 +19,16 @@ async function dirtySettings(page: Page, draft = 'native-close-draft') {
   await expect.poll(() => page.evaluate(() => (window as any).__pomiUnsavedSettings)).toBe(true);
 }
 
+async function dirtyReview(page: Page) {
+  await boot(page, 'run');
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
+  await expect(page.getByRole('heading', { level: 1, name: '번역 결과 검토', exact: true })).toBeVisible();
+  await page.locator('tr[data-index="0"]').click();
+  await page.locator('#translation-edit').fill('저장 전 검토 초안');
+  await expect(page.locator('.counts')).toContainText('저장 전 수정 1');
+}
+
 async function requestClose(page: Page, source: 'window' | 'quit') {
   await page.evaluate((closeSource) => (window as any).__pomiEmit('pomi-close-requested', closeSource), source);
   const dialog = page.getByRole('dialog', { name: '앱을 닫기 전에 변경 사항을 확인하세요' });
@@ -53,6 +63,48 @@ test('Escape chooses the safe stay action for a close request', async ({ page })
   await expect(dialog).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).__pomiNativeCalls.some((call: any) => call.command === 'finish_close'))).toBe(false);
   await expect(page.locator('#model')).toHaveValue('native-close-draft');
+});
+
+test('window close and quit protect unsaved translation-review edits', async ({ page }) => {
+  await dirtyReview(page);
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiUnsavedSettings)).toBe(true);
+
+  await page.evaluate(() => (window as any).__pomiEmit('pomi-close-requested', 'window'));
+  const dialog = page.getByRole('dialog', { name: '저장하지 않은 번역 수정이 있습니다' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('아직 월드에 적용되지 않았습니다');
+  await dialog.getByRole('button', { name: '계속 편집' }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('#translation-edit')).toHaveValue('저장 전 검토 초안');
+  expect(await page.evaluate(() => (window as any).__pomiNativeCalls.some((call: any) => call.command === 'finish_close'))).toBe(false);
+
+  await page.evaluate(() => (window as any).__pomiEmit('pomi-close-requested', 'quit'));
+  await page.getByRole('dialog', { name: '저장하지 않은 번역 수정이 있습니다' }).getByRole('button', { name: '초안 버리고 계속' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiNativeCalls.find((call: any) => call.command === 'finish_close')?.args.source)).toBe('quit');
+  expect(await page.evaluate(() => (window as any).__pomiRequests.some((request: any) => ['translate.apply', 'translate.reapply'].includes(request.type)))).toBe(false);
+});
+
+test('a new scan asks before replacing a job with unsaved review edits', async ({ page }) => {
+  await dirtyReview(page);
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^월드 스캔/ }).click();
+  await page.getByRole('button', { name: '다시 스캔', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '저장하지 않은 번역 수정이 있습니다' });
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__pomiRequests.filter((request: any) => request.type === 'scan.start').length)).toBe(0);
+  await dialog.getByRole('button', { name: '초안 버리고 계속' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiRequests.filter((request: any) => request.type === 'scan.start').length)).toBe(1);
+  await expect(page.getByRole('heading', { level: 1, name: '월드 스캔', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '번역 후보 검토하기', exact: true })).toBeVisible();
+});
+
+test('opening a different world asks before discarding unsaved review edits', async ({ page }) => {
+  await dirtyReview(page);
+  await page.evaluate(() => (window as any).__pomiEmit('tauri://drag-drop', { paths: ['/private/tmp/OtherWorld'] }));
+  const dialog = page.getByRole('dialog', { name: '저장하지 않은 번역 수정이 있습니다' });
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__pomiRequests.filter((request: any) => request.type === 'world.inspect' && request.payload.worldDir.includes('OtherWorld')).length)).toBe(0);
+  await dialog.getByRole('button', { name: '초안 버리고 계속' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiRequests.some((request: any) => request.type === 'world.inspect' && request.payload.worldDir.includes('OtherWorld')))).toBe(true);
 });
 
 test('startup-stopped uses Korean catalog text instead of the raw Rust error', async ({ page }) => {
@@ -309,7 +361,26 @@ test('long jobs request notification permission lazily and notify once while unf
   await expect.poll(() => page.evaluate(() => (window as any).__pomiNotificationPermissionRequests)).toBe(1);
   const notices = await page.evaluate(() => (window as any).__pomiNotifications);
   expect(notices.every((notice: any) => notice.title === 'PomiTranslate' && notice.body.includes('Roguefire'))).toBe(true);
+  expect(notices[1].body).toContain('검토 후 월드에 적용');
+  expect(notices[1].body).not.toContain('실패');
   expect(JSON.stringify(notices)).not.toContain('/private/');
+});
+
+test('a budget-stopped translation notification describes the cap outcome, not a failure', async ({ page }) => {
+  await boot(page, 'run&budget=1');
+  await page.evaluate(() => {
+    const realNow = Date.now.bind(Date);
+    let calls = 0;
+    Date.now = () => realNow() + calls++ * 11_000;
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+  });
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
+  await expect(page.getByRole('status').filter({ hasText: '비용 한도에 닿아 번역을 멈췄습니다' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiNotifications.length)).toBe(1);
+  const notice = await page.evaluate(() => (window as any).__pomiNotifications[0]);
+  expect(notice.body).toContain('비용 한도');
+  expect(notice.body).not.toContain('실패');
 });
 
 test('notify_on_finish false suppresses native permission prompts and delivery', async ({ page }) => {
@@ -324,6 +395,18 @@ test('notify_on_finish false suppresses native permission prompts and delivery',
   await expect(page.locator('.working')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => (window as any).__pomiNotifications.length)).toBe(0);
   await expect.poll(() => page.evaluate(() => (window as any).__pomiNotificationPermissionRequests)).toBe(0);
+});
+
+test('saving an unrelated app preference preserves the stored notification choice', async ({ page }) => {
+  await boot(page, 'selected&notify=off');
+  await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱' }).click();
+  const notify = page.getByRole('checkbox', { name: '작업이 끝나면 알림 받기' });
+  await expect(notify).not.toBeChecked();
+  await page.getByRole('radio', { name: '다크' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiPrefs)).toMatchObject({
+    theme: 'dark', notify_on_finish: false, notice_accepted: true, setup_dismissed: true
+  });
 });
 
 for (const theme of ['light', 'dark']) {

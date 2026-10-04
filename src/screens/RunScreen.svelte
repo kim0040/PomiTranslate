@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
-  import { baseName, formatDuration, formatNumber, formatCompact, formatUsd, middleEllipsis } from '../lib/format';
+  import { baseName, formatDuration, formatNumber, formatCompact, formatRequestEstimate, formatUsd, middleEllipsis } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
@@ -158,7 +158,7 @@
           {#if p.samples.length}
             <ul>
               {#each p.samples as sample, index (index)}
-                <li><span class="from" lang="en">{sample.source}</span><Icon name="chevron-right" size={14} /><span class="to">{sample.translated}</span></li>
+                <li><span class="from">{sample.source}</span><Icon name="chevron-right" size={14} /><span class="to">{sample.translated}</span></li>
               {/each}
             </ul>
           {:else}
@@ -220,7 +220,7 @@
       <dl class="group">
         <div class="row-item"><dt class="k">{t('run.summary.texts')}</dt><dd class="v num">{formatNumber(app.outgoingCount, app.locale)}</dd></div>
         <div class="row-item"><dt class="k">{t('run.summary.manual')}</dt><dd class="v num">{formatNumber(app.manualCount, app.locale)}</dd></div>
-        <div class="row-item"><dt class="k">{t('run.summary.requests')}</dt><dd class="v num">{app.manualOnly ? '0' : estimate ? formatNumber(estimate.requests, app.locale) : app.estimateLoading ? t('run.cost.calculating') : t('common.unknown')}</dd></div>
+        <div class="row-item"><dt class="k">{t('run.summary.requests')}</dt><dd class="v num">{app.manualOnly ? '0' : estimate ? formatRequestEstimate(estimate, app.locale) : app.estimateLoading ? t('run.cost.calculating') : t('common.unknown')}</dd></div>
         <div class="row-item">
           <dt class="k">{t('run.summary.cost')}</dt>
           <dd class="v num">{costText}

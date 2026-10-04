@@ -80,9 +80,12 @@ export function publicSettingsForExport(settings: Settings): Settings {
     temperature: settings.temperature, batch_size: settings.batch_size, request_timeout: settings.request_timeout,
     rpm_limit: settings.rpm_limit, tpm_limit: settings.tpm_limit, max_batch_retries: settings.max_batch_retries,
     max_file_write_retries: settings.max_file_write_retries, continue_on_file_error: settings.continue_on_file_error,
+    review_before_apply: settings.review_before_apply !== false, max_cost_usd: settings.max_cost_usd ?? 0,
     source_overrides: { ...settings.source_overrides },
     glossary: (settings.glossary ?? []).map((entry) => ({ ...entry })),
-    custom_prices: Object.fromEntries(Object.entries(settings.custom_prices ?? {}).map(([key, price]) => [key, { ...price }])),
+    custom_prices: Object.fromEntries(Object.entries(settings.custom_prices ?? {}).map(([key, price]) => [key, {
+      input: price.input, output: price.output, ...(price.updatedAt ? { updatedAt: price.updatedAt } : {})
+    }])),
     concurrency: settings.concurrency, resource_pack_enabled: settings.resource_pack_enabled, resource_pack_options: resourcePackOptions(settings.resource_pack_options),
     skip_target_language_text: settings.skip_target_language_text, scan_options: normalizedScanOptions(settings.scan_options),
     ui_language: settings.ui_language, last_world_dir: settings.last_world_dir

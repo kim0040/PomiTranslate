@@ -93,7 +93,7 @@
   --text-secondary: #b5b0aa;
   --text-on-accent: #ffffff;
   --accent: var(--blue-600);
-  --accent-hover: var(--blue-500);
+  --accent-hover: var(--blue-700);
   --accent-text: var(--blue-300);
   --accent-soft: #132b5a;
   --accent-soft-text: var(--blue-300);

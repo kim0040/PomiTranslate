@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { t, hasMessage, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber, formatCompact, formatUsd } from '../lib/format';
@@ -8,6 +9,7 @@
   import { exportDocument } from '../lib/document-export';
   import { failureKey } from '../lib/failures';
   import TranslationReview from '../components/TranslationReview.svelte';
+  import Dialog from '../components/Dialog.svelte';
 
   async function exportReport(): Promise<void> {
     try {
@@ -73,6 +75,18 @@
   ]);
   const samples = $derived((result?.translationSamples ?? []).slice(0, canCorrect ? 3 : 12));
   const warnKnown = ['chunk_unreadable', 'file_unwritable', 'file_unreadable', 'command_unparsed'];
+  let confirmBudgetDisabled = $state(false);
+
+  async function raiseCap(): Promise<void> {
+    app.goStep('run');
+    await tick();
+    document.getElementById('max-cost')?.focus();
+  }
+
+  function continueWithoutCap(): void {
+    confirmBudgetDisabled = false;
+    void app.startTranslate({ resume: true, budgetDisabled: true });
+  }
 </script>
 
 {#if app.reviewOpen}
@@ -91,8 +105,8 @@
       {#if status === 'completed'}<br />{t('result.completedNext')}{/if}
       {#snippet actions()}
         {#if status === 'budget_stopped'}
-          <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => app.startTranslate({ resume: true, budgetOverride: true })}><Icon name="refresh" size={18} /> {t('result.budgetResume')}</button>
-          <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.goStep('run')}>{t('result.budgetChange')}</button>
+          <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => (confirmBudgetDisabled = true)}><Icon name="refresh" size={18} /> {t('result.budgetResume')}</button>
+          <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={raiseCap}>{t('result.budgetChange')}</button>
         {:else if canRetryFailed}
           <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => app.retryFailed()}><Icon name="refresh" size={18} /> {t('result.retryFailed', { count: formatNumber(retryTotal, app.locale) })}</button>
         {:else if canRetranslate}
@@ -153,7 +167,7 @@
           <thead><tr><th scope="col">{t('result.before')}</th><th scope="col">{t('result.after')}</th></tr></thead>
           <tbody>
             {#each samples as sample (sample.source)}
-              <tr><td lang="en">{sample.source}</td><td>{sample.translated}</td></tr>
+              <tr><td>{sample.source}</td><td>{sample.translated}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -175,7 +189,7 @@
           {#if failures.rows.length}
             {#each failures.rows as item (item.id)}
               <li>
-                <strong lang="en">{item.source}</strong>
+                <strong>{item.source}</strong>
                 <span class="muted">{t(failureKey(item.reason))}</span>
                 {#if item.detail}<details><summary>{t('failure.details')}</summary><span class="raw mono">{item.detail}</span></details>{/if}
               </li>
@@ -183,7 +197,7 @@
           {:else}
             {#each result.translationFailures ?? [] as item, index (index)}
               <li>
-                <strong lang="en">{item.source}</strong>
+                <strong>{item.source}</strong>
                 <span class="muted">{t(failureKey(item.reason))}</span>
                 {#if item.detail}<details><summary>{t('failure.details')}</summary><span class="raw mono">{item.detail}</span></details>{/if}
               </li>
@@ -205,6 +219,16 @@
     {/if}
   {/if}
 </div>
+{/if}
+
+{#if confirmBudgetDisabled}
+  <Dialog title={t('result.budgetUnlimitedConfirm.title')} onClose={() => (confirmBudgetDisabled = false)}>
+    <Callout tone="warning" title={t('result.budget_stopped')} role="alert">{t('result.budgetUnlimitedConfirm.body')}</Callout>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmBudgetDisabled = false)}>{t('common.cancel')}</button>
+      <button type="button" class="btn btn-danger" onclick={continueWithoutCap}>{t('result.budgetUnlimitedConfirm.confirm')}</button>
+    {/snippet}
+  </Dialog>
 {/if}
 
 <style>

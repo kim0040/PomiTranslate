@@ -113,9 +113,14 @@ export type CoverageItem = { id: string; scanned: boolean; present?: boolean; co
 export type Estimate = {
   candidateCount: number;
   requests: number;
+  requestRange?: { low: number; high: number };
+  glossaryRetryRequests?: number;
+  glossaryPromptChars?: number;
   sourceChars: number;
   inputTokens: number;
   outputTokens: number;
+  inputTokensHigh?: number;
+  outputTokensHigh?: number;
   price: { input: number; output: number; perMillionInput: number; perMillionOutput: number; source?: 'catalog' | 'user' } | null;
   priceSource?: 'catalog' | 'user' | null;
   cost: { low: number; high: number } | null;
@@ -204,6 +209,10 @@ export type TranslationRow = {
   source: string;
   translated: string;
   status: Exclude<TranslationState, 'all'>;
+  /** A saved user override exists, regardless of the row's current review status. */
+  edited: boolean;
+  /** The current output fails the active glossary check, independently of edit origin. */
+  glossaryMismatch: boolean;
   glossaryStale?: boolean;
   kind: string;
   occurrences: number;
@@ -221,11 +230,15 @@ export type TranslationPageMeta = {
   /** True once the job has been written to the world: only `translate.reapply` may write it again. */
   applied: boolean;
   backupSetId: string;
+  recoverySetId?: string;
   failedCount: number;
+  /** Rows sent by a normal retry: failed plus glossary-stale rows. */
+  retryCount: number;
   /** Failed rows that were never sent (a cost cap or cancel stopped the run first). */
   unsentCount?: number;
   usage: TranslationUsage;
   retryEstimate: Estimate | null;
+  glossaryRefreshCount?: number;
   glossaryActive?: boolean;
   glossaryStaleCount?: number;
   glossaryRefreshEstimate?: Estimate | null;
@@ -257,6 +270,7 @@ export type ResumeStatus = {
   translatedCount?: number;
   reason?: string;
   backupSetId?: string;
+  recoverySetId?: string;
   lastJob?: LastJob | null;
   lastScan?: LastScan | null;
 };

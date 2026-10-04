@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
-  import { formatNumber, formatDuration, formatDate, baseName } from '../lib/format';
+  import { formatNumber, formatDuration, formatDate, formatRequestEstimate, baseName } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
@@ -43,6 +43,7 @@
   };
   const knownBlockers = ['bedrock', 'mcr', 'linear', 'world_in_use', 'not_writable', 'not_readable', 'missing'];
   const requestEstimate = $derived(app.estimate?.requests ?? scan?.estimate?.requests ?? scan?.requestEstimate);
+  const requestEstimateObject = $derived(app.estimate ?? scan?.estimate ?? (requestEstimate === undefined ? undefined : { requests: requestEstimate }));
   const lastScanDate = $derived(app.lastScan?.at
     ? formatDate(new Date(app.lastScan.at * 1000).toISOString(), app.locale)
     : t('common.unknown'));
@@ -135,7 +136,7 @@
         <section class="summary card" aria-label={t('scan.found', { count: formatNumber(scan.candidateCount, app.locale) })}>
           <div class="stat"><span class="v num">{formatNumber(scan.candidateCount, app.locale)}</span><span class="l">{t('scan.summary.texts')}</span></div>
           <div class="stat"><span class="v num">{formatNumber(scan.occurrenceCount ?? scan.candidateCount, app.locale)}</span><span class="l">{t('scan.summary.places')}</span></div>
-          <div class="stat"><span class="v num">{requestEstimate === undefined ? t('common.unknown') : formatNumber(requestEstimate, app.locale)}</span><span class="l">{t('scan.summary.requests')}</span></div>
+          <div class="stat"><span class="v num">{requestEstimate === undefined ? t('common.unknown') : formatRequestEstimate(requestEstimateObject, app.locale)}</span><span class="l">{t('scan.summary.requests')}</span></div>
         </section>
 
         {#if kinds.length}

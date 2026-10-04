@@ -22,6 +22,7 @@
   import HelpScreen from './screens/HelpScreen.svelte';
   import Tour from './components/Tour.svelte';
   import LicensesDialog from './components/LicensesDialog.svelte';
+  import Dialog from './components/Dialog.svelte';
 
   let pane: HTMLElement | undefined = $state();
   let dropping = $state(false);
@@ -111,7 +112,7 @@
   });
 
   const pageTitles: Record<string, MessageKey> = { backups: 'nav.backups', settings: 'nav.settings', about: 'nav.about', help: 'nav.help' };
-  $effect(() => { void setUnsavedSettings(app.settingsDirty || app.wizardDirty); });
+  $effect(() => { void setUnsavedSettings(app.settingsDirty || app.wizardDirty || app.translationReview.dirtyCount > 0); });
 </script>
 
 <a class="skip" href="#main-content">{t('app.skip')}</a>
@@ -206,6 +207,16 @@
 {/if}
 
 <Toasts />
+
+{#if app.pendingReviewLeave || (app.pendingCloseContext === 'review' && app.pendingCloseSource)}
+  <Dialog title={t('translationReview.draftsClose.title')} hideClose onClose={() => app.resolveReviewLeave(false)}>
+    <p>{t('translationReview.draftsClose.body')}</p>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.resolveReviewLeave(false)}>{t('translationReview.draftsClose.stay')}</button>
+      <button type="button" class="btn btn-danger" onclick={() => app.resolveReviewLeave(true)}>{t('translationReview.draftsClose.discard')}</button>
+    {/snippet}
+  </Dialog>
+{/if}
 
 <style>
   .skip {

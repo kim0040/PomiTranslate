@@ -14,6 +14,22 @@ function currentSettings(overrides: Partial<Settings> = {}): Settings {
 }
 
 describe('settings import', () => {
+  it('round-trips glossary, custom prices, review mode, and spending cap, and preserves them in older files', () => {
+    const glossary = [{ source: 'Elder Mira', target: '장로 미라', mode: 'translate' as const, note: 'name', caseSensitive: true }];
+    const customPrices = { 'openai/test-model': { input: 1.25, output: 4.5, updatedAt: '2026-10-03T10:00:00Z' } };
+    const configured = currentSettings({ glossary, custom_prices: customPrices, review_before_apply: false, max_cost_usd: 0.37 });
+    const exported = publicSettingsForExport(configured);
+    expect(exported).toMatchObject({ glossary, custom_prices: customPrices, review_before_apply: false, max_cost_usd: 0.37 });
+
+    const fresh = currentSettings({ glossary: [], custom_prices: {}, review_before_apply: true, max_cost_usd: 0 });
+    expect(parseSettingsImport(JSON.stringify({ schema: 1, settings: exported }), fresh)).toMatchObject({
+      glossary, custom_prices: customPrices, review_before_apply: false, max_cost_usd: 0.37
+    });
+
+    const older = parseSettingsImport(JSON.stringify({ schema: 1, settings: { model: 'older-file' } }), configured);
+    expect(older).toMatchObject({ glossary, custom_prices: customPrices, review_before_apply: false, max_cost_usd: 0.37 });
+  });
+
   it('round-trips reasoning preferences through the public allowlist and rejects invalid values', () => {
     for (const value of ['default', 'enabled', 'disabled', 'low', 'high', 'max']) {
       const exported = publicSettingsForExport(currentSettings({ openrouter_reasoning: value }));
@@ -122,6 +138,10 @@ describe('settings import', () => {
       JSON.stringify({ schema: 1, settings: { provider: 'custom', base_url: 'https://example.test/v1?token=x' } }),
       JSON.stringify({ schema: 1, settings: { provider: 'custom', base_url: 'https://example.test/v1#fragment' } }),
       JSON.stringify({ schema: 1, settings: { provider: 'custom', base_url: 'https://example.test/v1', model: 'x'.repeat(257) } }),
+      JSON.stringify({ schema: 1, settings: { review_before_apply: 'false' } }),
+      JSON.stringify({ schema: 1, settings: { max_cost_usd: 1000.01 } }),
+      JSON.stringify({ schema: 1, settings: { glossary: [{ source: 'Mira', target: '', mode: 'translate' }] } }),
+      JSON.stringify({ schema: 1, settings: { custom_prices: { 'openai/test': { input: 1, output: 1001 } } } }),
       JSON.stringify({ api: { provider: 'not-a-provider' } })
     ];
     for (const text of invalid) expect(() => parseSettingsImport(text, current)).toThrow();

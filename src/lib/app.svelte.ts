@@ -123,9 +123,11 @@ export class AppState {
   wizardDirty = $state(false);
   /** A move away from settings that waits until the user saves or drops the changes there. */
   pendingLeave = $state<(() => void) | null>(null);
+  /** A navigation or job replacement waiting for the user to keep or discard review drafts. */
+  pendingReviewLeave = $state<(() => void) | null>(null);
   /** Set while the pending settings decision was requested by a window close or app quit. */
   pendingCloseSource = $state<CloseSource | null>(null);
-  pendingCloseContext = $state<'settings' | 'wizard' | null>(null);
+  pendingCloseContext = $state<'settings' | 'wizard' | 'review' | null>(null);
   /** The workflow step that sent the user to settings, so settings can offer the way back. */
   returnStep = $state<Step | null>(null);
   /** The settings tab shown. It is kept for the session, and a fix-it link picks the tab it needs. */
@@ -293,6 +295,10 @@ export class AppState {
       body = result.status === 'completed'
         ? t('native.notification.restoreDone', { world })
         : t('native.notification.restoreFailed', { world });
+    } else if (result.status === 'awaiting_review') {
+      body = t('native.notification.reviewReady', { world });
+    } else if (result.status === 'budget_stopped') {
+      body = t('native.notification.budgetStopped', { world });
     } else {
       const status = result.status === 'completed' || result.status === 'partial' || result.status === 'cancelled'
         ? result.status : 'failed';
@@ -380,6 +386,10 @@ export class AppState {
       if (this.resume?.status === 'awaiting_review') {
         this.reviewResumed = true;
         this.openReview();
+      } else if (this.resume?.status === 'reapply_interrupted') {
+        this.step = 'result';
+        this.reviewOpen = true;
+        this.translationReview.reset();
       }
     } catch (cause) {
       this.startupFailed = true;
@@ -591,9 +601,18 @@ export class AppState {
       if (this.page === 'settings') this.returnStep = null;
       next();
     };
-    if (this.glossaryGuard) this.glossaryGuard.leave(run);
-    else if (this.page === 'settings' && this.settingsDirty) this.pendingLeave = run;
-    else run();
+    const guarded = () => {
+      if (this.glossaryGuard) this.glossaryGuard.leave(guarded);
+      else if (this.page === 'settings' && this.settingsDirty) this.pendingLeave = guarded;
+      else run();
+    };
+    guarded();
+  }
+
+  private waitForReviewDrafts(next: () => void): boolean {
+    if (this.translationReview.dirtyCount === 0) return false;
+    this.pendingReviewLeave = next;
+    return true;
   }
 
   /** Show the existing unsaved-settings choice for a native X or app-quit request. */
@@ -606,6 +625,11 @@ export class AppState {
     if (this.showWizard) {
       this.pendingCloseSource = source;
       this.pendingCloseContext = 'wizard';
+      return;
+    }
+    if (this.translationReview.dirtyCount > 0) {
+      this.pendingCloseSource = source;
+      this.pendingCloseContext = 'review';
       return;
     }
     if (!this.settingsDirty) {
@@ -633,6 +657,26 @@ export class AppState {
     }
     this.settingsDirty = false;
     next();
+  }
+
+  /** Keep review edits open, or explicitly discard them before the waiting action proceeds. */
+  resolveReviewLeave(discard: boolean): void {
+    const next = this.pendingReviewLeave;
+    const source = this.pendingCloseSource;
+    this.pendingReviewLeave = null;
+    this.pendingCloseSource = null;
+    this.pendingCloseContext = null;
+    if (!discard) return;
+    this.translationReview.discardDrafts();
+    if (source) this.handleCloseRequested(source);
+    else next?.();
+  }
+
+  /** GlossarySheet resolves its own edits first, then returns a native close to this guard. */
+  continueCloseAfterGlossary(source: CloseSource): void {
+    this.glossaryGuard = null;
+    this.settingsDirty = false;
+    this.handleCloseRequested(source);
   }
 
   continueWizardClose(): void {
@@ -793,6 +837,7 @@ export class AppState {
 
   async useWorld(path: string): Promise<void> {
     if (this.isBusy) return;
+    if (path !== this.worldDir && this.waitForReviewDrafts(() => void this.useWorld(path))) return;
     this.banner = null;
     try {
       const inspected = await callBackend<WorldInspection>('world.inspect', { worldDir: path });
@@ -818,6 +863,7 @@ export class AppState {
   }
 
   async forgetWorld(path: string): Promise<void> {
+    if (this.worldDir === path && this.waitForReviewDrafts(() => void this.forgetWorld(path))) return;
     try {
       this.recent = (await callBackend<{ worlds: RecentWorld[] }>('worlds.forget', { worldDir: path })).worlds;
       if (this.worldDir === path) {
@@ -876,6 +922,7 @@ export class AppState {
 
   async startScan(): Promise<void> {
     if (!this.worldDir || this.isBusy) return;
+    if (this.waitForReviewDrafts(() => void this.startScan())) return;
     const startedAt = Date.now();
     let notificationStatus = 'failed';
     this.busy = 'scan';
@@ -1037,6 +1084,19 @@ export class AppState {
       outcome = await request();
       return outcome;
     } catch (cause) {
+      const interrupted = cause instanceof BackendError && cause.code === 'REAPPLY_INTERRUPTED';
+      if (interrupted) {
+        const recoverySetId = (cause.details && typeof cause.details === 'object' && 'recoverySetId' in cause.details)
+          ? (cause.details as { recoverySetId?: unknown }).recoverySetId : undefined;
+        if (typeof recoverySetId === 'string' && recoverySetId) {
+          if (this.translationReview.meta) this.translationReview.meta = { ...this.translationReview.meta, status: 'reapply_interrupted', recoverySetId };
+          if (this.resume) this.resume = { ...this.resume, status: 'reapply_interrupted', recoverySetId };
+          if (this.lastJob) this.lastJob = { ...this.lastJob, status: 'reapply_interrupted' };
+          this.reviewOpen = true;
+          this.step = 'result';
+          this.translationReview.reset();
+        }
+      }
       if (cause instanceof BackendError && cause.code === 'EDITS_INVALID') {
         this.translationReview.setRefused(editErrors(cause.details));
         this.reviewOpen = true;
@@ -1045,7 +1105,7 @@ export class AppState {
         this.translationReview.reset();
         this.reviewOpen = true;
       }
-      this.fail(cause);
+      if (!interrupted) this.fail(cause);
       this.step = kind === 'translate' || kind === 'resume' ? (this.scan ? 'run' : 'scan') : origin;
       return null;
     } finally {
@@ -1063,8 +1123,9 @@ export class AppState {
     return { worldDir: this.worldDir, scanPlanId: this.scan!.scanPlanId };
   }
 
-  async startTranslate(options: { resume?: boolean; budgetOverride?: boolean } = {}): Promise<void> {
+  async startTranslate(options: { resume?: boolean; budgetOverride?: boolean; budgetDisabled?: boolean } = {}): Promise<void> {
     if (this.guarded) return;
+    if (this.waitForReviewDrafts(() => void this.startTranslate(options))) return;
     const kind: Operation = options.resume ? 'resume' : 'translate';
     const hadResume = !!this.resume;
     const outcome = await this.runOperation(kind, () => callBackend<TranslationResult>(options.resume ? 'translate.resume' : 'translate.start', {
@@ -1079,7 +1140,8 @@ export class AppState {
       ...(this.settings.provider === 'custom' ? { baseUrl: this.settings.base_url } : {}),
       wireFormat: this.settings.wire_format,
       failurePolicy: this.failurePolicy,
-      ...(options.budgetOverride ? { budgetOverride: true } : {})
+      ...(options.budgetOverride ? { budgetOverride: true } : {}),
+      ...(options.budgetDisabled ? { budgetDisabled: true } : {})
     }), { persist: true, keepResult: false });
     if (outcome) {
       // A new translation replaces the job, so edits made to an older one no longer apply.
@@ -1096,6 +1158,7 @@ export class AppState {
   /** Send only the failed and unsent rows to the AI again. The result comes back for review. */
   async retryFailed(options: { budgetOverride?: boolean; refreshGlossary?: boolean } = {}): Promise<void> {
     if (this.guarded) return;
+    if (this.waitForReviewDrafts(() => void this.retryFailed(options))) return;
     const outcome = await this.runOperation('retry', () => callBackend<TranslationResult>('translate.retry_failed', {
       ...this.identity,
       provider: this.settings.provider,

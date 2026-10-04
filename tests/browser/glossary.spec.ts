@@ -74,6 +74,64 @@ test('candidate review quick-add opens the world sheet and stores its entry per 
   await glossaryDialog(page).getByRole('button', { name: '취소' }).click();
 });
 
+test('both glossary scopes validate before saving and the scope error jumps to its row', async ({ page }) => {
+  await open(page, 'scenario=review');
+  await step(page, '후보 검토');
+  await page.getByRole('button', { name: '이 월드 용어집' }).click();
+  const dialog = glossaryDialog(page);
+  await dialog.getByRole('button', { name: '용어 추가' }).click();
+  await sourceField(dialog).fill('Mira');
+  await targetField(dialog).fill('');
+  await dialog.getByLabel('적용 범위').selectOption('global');
+  await dialog.getByRole('button', { name: '용어 추가' }).click();
+  await sourceField(dialog).fill('Elder Mira');
+  await targetField(dialog).fill('장로 미라');
+
+  await expect(dialog.getByRole('alert').getByRole('button')).toContainText('월드');
+  await expect(dialog.getByRole('button', { name: '용어집 저장' })).toBeDisabled();
+  expect(await requests(page, 'glossary.set')).toHaveLength(0);
+  await dialog.getByRole('alert').getByRole('button').click();
+  await expect(dialog.getByLabel('적용 범위')).toHaveValue('world');
+  await expect(dialog.locator('[data-glossary-row="0"] input').first()).toBeFocused();
+  await expect(dialog).not.toContainText(/target invalid|Invalid glossary|Synthetic/);
+});
+
+test('glossary sheet reports a partial two-scope save in localized per-scope results', async ({ page }) => {
+  await open(page, 'scenario=review&glossaryFailScope=world');
+  await step(page, '후보 검토');
+  await page.getByRole('button', { name: '이 월드 용어집' }).click();
+  const dialog = glossaryDialog(page);
+  await dialog.getByRole('button', { name: '용어 추가' }).click();
+  await sourceField(dialog).fill('World Mira');
+  await targetField(dialog).fill('월드 미라');
+  await dialog.getByLabel('적용 범위').selectOption('global');
+  await dialog.getByRole('button', { name: '용어 추가' }).click();
+  await sourceField(dialog).fill('Elder Mira');
+  await targetField(dialog).fill('장로 미라');
+  await dialog.getByRole('button', { name: '용어집 저장' }).click();
+
+  await expect(dialog.locator('.save-results')).toContainText('저장됨');
+  await expect(dialog.locator('.save-results')).toContainText('저장하지 못함');
+  await expect(dialog.getByRole('alert')).toContainText('일부 범위만 저장했습니다');
+  await expect(dialog.getByRole('alert')).not.toContainText(/Synthetic|Invalid glossary|target invalid/);
+  const saves = await requests(page, 'glossary.set');
+  expect(saves.map((request) => request.payload?.scope)).toEqual(['global', 'world']);
+});
+
+test('glossary refresh uses the stale-only count and estimate while normal retry includes failures', async ({ page }) => {
+  await open(page, 'scenario=run&fail=1&stale=1');
+  await step(page, '번역 진행');
+  await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
+  await expect(page.getByRole('heading', { name: '번역 결과 검토', exact: true })).toBeVisible();
+  const refresh = page.getByRole('button', { name: '영향받은 문장 다시 번역 (1)' });
+  await expect(refresh).toBeEnabled();
+  await refresh.click();
+  await expect(page.getByRole('dialog', { name: '예상 비용이 설정한 한도를 넘습니다' })).toHaveCount(0);
+  const retry = (await requests(page, 'translate.retry_failed')).at(-1)!;
+  expect(retry.payload?.refreshGlossary).toBe(true);
+  expect(await page.evaluate(() => (window as any).__pomiRetrySent)).toEqual(['shop']);
+});
+
 test('translation review filters and badges glossary mismatches and can quick-add the current translation', async ({ page }) => {
   await open(page, 'scenario=run&glossaryMismatch=1');
   await step(page, '번역 진행');

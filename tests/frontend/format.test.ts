@@ -10,11 +10,23 @@ import {
   formatDate,
   formatDuration,
   formatNumber,
+  formatRequestEstimate,
+  formatRequestRange,
   formatUsd,
   middleEllipsis
 } from '../../src/lib/format';
 
 describe('format helpers', () => {
+  it('shows glossary-aware request ranges in each locale and keeps exact request counts compact', () => {
+    const range = { requests: 1, requestRange: { low: 1, high: 3 } };
+    expect(formatRequestEstimate(range, 'ko')).toBe('요청 1–3회');
+    expect(formatRequestEstimate(range, 'en')).toBe('1–3 requests');
+    expect(formatRequestEstimate(range, 'ja')).toBe('リクエスト1～3回');
+    expect(formatRequestRange(range, 'ko')).toBe('요청 1–3회');
+    expect(formatRequestEstimate({ requests: 2, requestRange: { low: 2, high: 2 } }, 'en')).toBe('2');
+    expect(formatRequestRange({ requestRange: { low: 2, high: 2 } }, 'en')).toBe('');
+  });
+
   it('formats counts and compact values in each supported locale', () => {
     expect(formatNumber(1234567, 'en')).toBe('1,234,567');
     expect(formatNumber(1234567, 'ko')).toBe('1,234,567');

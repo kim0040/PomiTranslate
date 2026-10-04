@@ -37,7 +37,7 @@
 
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
-      <p class="source" lang="en">{row.source}</p>
+      <p class="source">{row.source}</p>
       {#if onQuickAdd}
         <button type="button" class="btn btn-secondary btn-sm revert" onclick={() => onQuickAdd(row.source, shown.text)}>
           <Icon name="plus" size={14} /> {t('glossary.quickAdd')}
@@ -63,7 +63,7 @@
       </section>
     {/if}
 
-    {#if row.status === 'glossary_mismatch'}
+    {#if row.glossaryMismatch}
       <p class="mismatch" role="note"><Icon name="alert-triangle" size={15} /> {t('glossary.mismatchHelp')}</p>
     {/if}
     {#if row.glossaryStale}
@@ -73,7 +73,9 @@
     <section class="block">
       <div class="label-row">
         <h3><label for="translation-edit">{t('translationReview.detail.translation')}</label></h3>
-        <span class="pill {statusPill[shown.status]}">{t(statusKey[shown.status])}</span>
+        {#if row.edited || shown.status === 'edited'}<span class="pill pill-accent">{t(statusKey.edited)}</span>{/if}
+        {#if row.glossaryMismatch}<span class="pill pill-warning">{t(statusKey.glossary_mismatch)}</span>{/if}
+        {#if !row.edited && !row.glossaryMismatch && shown.status !== 'edited'}<span class="pill {statusPill[shown.status]}">{t(statusKey[shown.status])}</span>{/if}
       </div>
       <textarea
         id="translation-edit"
