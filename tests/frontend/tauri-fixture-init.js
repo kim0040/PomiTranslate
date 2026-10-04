@@ -1,9 +1,9 @@
 (() => {
   // Documentation previews use the same UI with an explicit, validated locale.
   const requestedLocale = new URLSearchParams(location.search).get('locale');
-  const previewLocale = ['ko', 'en', 'ja'].includes(requestedLocale) ? requestedLocale : 'ko';
-  const previewLanguages = { ko: '한국어', en: 'English', ja: '日本語' };
-  const previewTranslations = { ko: '잃어버린 열쇠 상점', en: 'The Lost Key Shop', ja: '失われた鍵の店' };
+  const previewLocale = ['ko', 'en', 'ja', 'zh'].includes(requestedLocale) ? requestedLocale : 'ko';
+  const previewLanguages = { ko: '한국어', en: 'English', ja: '日本語', zh: '简体中文' };
+  const previewTranslations = { ko: '잃어버린 열쇠 상점', en: 'The Lost Key Shop', ja: '失われた鍵の店', zh: '失落的钥匙商店' };
   window.__pomiRequests = [];
   window.__pomiSettingsSaves = [];
   window.__pomiNativeCalls = [];

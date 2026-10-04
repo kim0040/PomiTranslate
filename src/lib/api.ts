@@ -1,12 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { Locale } from './i18n/locale';
 
 export type CredentialMode = 'local' | 'session' | 'keychain';
 export type CredentialStatus = { mode: CredentialMode; stored: boolean };
 
 export type Provider = 'openai' | 'gemini' | 'anthropic' | 'openrouter' | 'comet' | 'custom';
-export type Locale = 'ko' | 'en' | 'ja';
-
 export type ScanFlag = 'translate_signs' | 'translate_books' | 'translate_custom_names' | 'translate_item_names' |
   'translate_lore' | 'translate_titles' | 'translate_filtered_titles' | 'translate_command_output' |
   'translate_text_displays' | 'skip_command_like_text';

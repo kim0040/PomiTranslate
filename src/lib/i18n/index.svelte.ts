@@ -1,12 +1,14 @@
 import { en } from './en';
 import { ja } from './ja';
 import { ko, type MessageKey } from './ko';
+import { zh } from './zh';
+import { LOCALES, type Locale } from './locale';
 
-export type Locale = 'ko' | 'en' | 'ja';
+export { LOCALES, detectSystemLocale, isLocale, localeFromLanguageTag } from './locale';
+export type { Locale } from './locale';
 export type { MessageKey };
-export const LOCALES: Locale[] = ['ko', 'en', 'ja'];
 
-const catalogs: Record<Locale, Record<MessageKey, string>> = { ko, en, ja };
+const catalogs: Record<Locale, Record<MessageKey, string>> = { ko, en, ja, zh };
 
 // A plain object, so every `t()` call in a template re-runs when the locale changes.
 export const i18n = $state<{ locale: Locale }>({ locale: 'ko' });

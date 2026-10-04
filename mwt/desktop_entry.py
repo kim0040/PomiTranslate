@@ -22,6 +22,7 @@ from mwt.desktop_settings import (
     normalize_resource_pack_options,
     normalize_scan_options,
     normalize_source_overrides,
+    normalize_ui_language,
 )
 from mwt.desktop_review import clean_edits, normalize_max_cost_usd, normalize_review_before_apply
 from mwt.notices import ABOUT, FIRST_LAUNCH, PRE_TRANSLATE, payload
@@ -952,6 +953,11 @@ def _settings_payload(data_dir: Path, provider: str = "", *, check_keyring: bool
 
     saved = dict(_saved(data_dir))
     saved.pop("last_jobs", None)  # world summaries for the start screen, not a setting
+    if "ui_language" in saved:
+        try:
+            saved["ui_language"] = normalize_ui_language(saved["ui_language"], field="saved ui_language")
+        except ValueError:
+            saved["ui_language"] = "ko"
     if not saved.get("provider"):
         saved["provider"] = "openai"
     saved["openrouter_reasoning"] = normalize_reasoning(saved.get("openrouter_reasoning", "default"))
@@ -1427,9 +1433,10 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         except GlossaryValidationError as exc:
             raise RequestRefused("GLOSSARY_INVALID", str(exc), exc.details) from exc
         custom_prices = normalize_custom_prices(public_setting("customPrices", "custom_prices", {}), field="customPrices")
-        ui_language = str(body.get("uiLanguage") or saved.get("ui_language") or "ko")
-        if ui_language not in {"ko", "en", "ja"}:
-            raise ValueError("Unsupported interface language")
+        raw_ui_language = body.get("uiLanguage")
+        if raw_ui_language is None or raw_ui_language == "":
+            raw_ui_language = saved.get("ui_language") or "ko"
+        ui_language = normalize_ui_language(raw_ui_language)
         provider = str(body.get("provider") or saved.get("provider") or "openai")
         def text_setting(camel_name: str, saved_name: str, default: str = "") -> str:
             if camel_name in body:

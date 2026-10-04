@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { Locale } from './i18n/locale';
 
 export type BackendResponse<T> = {
   v: number;
@@ -24,7 +25,7 @@ export type Settings = {
   tpm_limit?: number;
   max_batch_retries?: number;
   resource_pack_enabled?: boolean;
-  ui_language?: 'ko' | 'en' | 'ja';
+  ui_language?: Locale;
   last_world_dir: string;
 };
 

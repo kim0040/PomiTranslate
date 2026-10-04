@@ -911,6 +911,7 @@
               <option value="ko">{t('lang.ko')}</option>
               <option value="en">{t('lang.en')}</option>
               <option value="ja">{t('lang.ja')}</option>
+              <option value="zh">{t('lang.zh')}</option>
             </select>
             <span id="ui-language-help" class="hint">{t('settings.app.languageHelp')}</span>
           </div>
