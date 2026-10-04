@@ -452,6 +452,8 @@
       return ok(request, { scope: body.scope, entries: body.entries, count: body.entries.length });
     }
     if (type === 'prefs.set') {
+      // A save answers with every stored pref, so a scenario's boot-time prefs must survive it.
+      if (!window.__pomiPrefs && new URLSearchParams(location.search).get('notify') === 'off') window.__pomiPrefs = { notify_on_finish: false };
       window.__pomiPrefs = { ...(window.__pomiPrefs || {}), ...(body.prefs || {}) };
       return ok(request, { prefs: { ...({ theme: 'system', notice_accepted: false, tutorial_seen: false, setup_dismissed: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true }), ...window.__pomiPrefs } });
     }
