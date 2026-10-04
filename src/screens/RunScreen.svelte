@@ -158,7 +158,7 @@
           {#if p.samples.length}
             <ul>
               {#each p.samples as sample, index (index)}
-                <li><span class="from">{sample.source}</span><Icon name="chevron-right" size={14} /><span class="to">{sample.translated}</span></li>
+                <li><span class="from" translate="no">{sample.source}</span><Icon name="chevron-right" size={14} /><span class="to">{sample.translated}</span></li>
               {/each}
             </ul>
           {:else}

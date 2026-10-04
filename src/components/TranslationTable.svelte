@@ -130,7 +130,7 @@
             onclick={() => { active = index; onSelect(row, true); }}
             onkeydown={(event) => handleKey(event, index, row)}
           >
-            <td class="c-source"><span class="txt">{row.source}</span></td>
+            <td class="c-source"><span class="txt" translate="no">{row.source}</span></td>
             <td class="c-target">
               {#if shown.text}<span class="txt">{shown.text}</span>
               {:else}<span class="txt none">{shown.status === 'failed' ? t('translationReview.noTranslation') : ''}</span>{/if}

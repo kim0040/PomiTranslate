@@ -37,7 +37,7 @@
 
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
-      <p class="source">{row.source}</p>
+      <p class="source" translate="no">{row.source}</p>
       {#if onQuickAdd}
         <button type="button" class="btn btn-secondary btn-sm revert" onclick={() => onQuickAdd(row.source, shown.text)}>
           <Icon name="plus" size={14} /> {t('glossary.quickAdd')}

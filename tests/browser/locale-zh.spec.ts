@@ -21,7 +21,7 @@ async function assertChineseSurface(page: Page, name: string) {
         const box = element.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && box.width > 0 && box.height > 0;
       })
-      .filter((element) => !element.closest('[lang="en"], code, pre, .mono, .src, .source'))
+      .filter((element) => !element.closest('[lang="en"], [translate="no"], code, pre, .mono, .src, .source'))
       .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim())
       .filter(Boolean);
     const rawKeys = visibleLeafText.filter((value) => {

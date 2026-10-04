@@ -167,7 +167,7 @@
           <thead><tr><th scope="col">{t('result.before')}</th><th scope="col">{t('result.after')}</th></tr></thead>
           <tbody>
             {#each samples as sample (sample.source)}
-              <tr><td>{sample.source}</td><td>{sample.translated}</td></tr>
+              <tr><td translate="no">{sample.source}</td><td>{sample.translated}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -189,7 +189,7 @@
           {#if failures.rows.length}
             {#each failures.rows as item (item.id)}
               <li>
-                <strong>{item.source}</strong>
+                <strong translate="no">{item.source}</strong>
                 <span class="muted">{t(failureKey(item.reason))}</span>
                 {#if item.detail}<details><summary>{t('failure.details')}</summary><span class="raw mono">{item.detail}</span></details>{/if}
               </li>
@@ -197,7 +197,7 @@
           {:else}
             {#each result.translationFailures ?? [] as item, index (index)}
               <li>
-                <strong>{item.source}</strong>
+                <strong translate="no">{item.source}</strong>
                 <span class="muted">{t(failureKey(item.reason))}</span>
                 {#if item.detail}<details><summary>{t('failure.details')}</summary><span class="raw mono">{item.detail}</span></details>{/if}
               </li>
