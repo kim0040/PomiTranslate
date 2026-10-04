@@ -18,16 +18,20 @@ import {
   type ScanResult,
   type Settings,
   type TranslationResult,
+  type TranslationCounts,
+  type TranslationPageMeta,
+  type TranslationRow,
   type DiscoveredWorld,
   type AppPrefs,
   type WorldInspection
 } from './api';
-import { checkForUpdate, installUpdate, onUpdateProgress, openExternal, type MenuAction, type UpdateInfo } from './native';
+import { checkForUpdate, installUpdate, onUpdateProgress, openExternal, revealWorldFolder, type MenuAction, type UpdateInfo } from './native';
 import { resourcePackOptions } from './resource-pack';
 import { CandidateSource } from './candidates.svelte';
 import { hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
 import { applyTheme, type ThemeChoice } from './theme';
-import { emptyProgress, reduceProgress, type JobProgress } from './workflow';
+import { editErrors, emptyProgress, exceedsCap, reduceProgress, RESUMABLE_STATUSES, type JobProgress } from './workflow';
+import { fetchTranslationPage, TranslationReview } from './translation-review.svelte';
 import { normalizedScanOptions, scanOptionsSignature } from './settings';
 
 export type Page = 'workspace' | 'backups' | 'settings' | 'about' | 'help';
@@ -41,7 +45,7 @@ export const defaultSettings = (): Settings => ({
   provider: 'openai', model: '', base_url: '', wire_format: 'openai', target_language: '한국어', style_preset: 'neutral',
   openrouter_reasoning: 'default', style_prompt: '', custom_system_prompt: '', temperature: 0.3, batch_size: 40, request_timeout: 120, rpm_limit: 0,
   tpm_limit: 0, max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false, resource_pack_options: resourcePackOptions(), external_resource_pack_paths: [], skip_target_language_text: true,
-  max_file_write_retries: 2, continue_on_file_error: true, source_overrides: {},
+  max_file_write_retries: 2, continue_on_file_error: true, review_before_apply: true, max_cost_usd: 0, source_overrides: {},
   ui_language: 'ko', last_world_dir: '', scan_options: normalizedScanOptions()
 });
 
@@ -56,7 +60,23 @@ export const DEFAULT_PREFS: AppPrefs = {
 export type UpdateState = 'idle' | 'checking' | 'installing' | 'error';
 /** Menu commands that work while the core failed to start: help pages and links only. */
 const STARTUP_SAFE_ACTIONS: MenuAction[] = ['help', 'shortcuts', 'licenses', 'report'];
-const RESUMABLE = ['cancelled', 'needs_retry', 'failed'];
+const RESUMABLE = RESUMABLE_STATUSES;
+/** Statuses after which the sidecar may hold a saved translation table worth listing. */
+const TABLE_STATUSES = ['completed', 'partial', 'failed', 'needs_retry', 'cancelled', 'budget_stopped'];
+/** What a running translate-type operation is, so the progress screen can say it. */
+export type Operation = 'translate' | 'resume' | 'retry' | 'apply' | 'reapply';
+/** The full list of failed rows the result screen shows, loaded from the saved table. */
+export type FailureList = {
+  loading: boolean;
+  /** Null until known; false when the sidecar holds no saved table for this job. */
+  checkpoint: boolean | null;
+  rows: TranslationRow[];
+  total: number;
+  counts: TranslationCounts | null;
+  meta: TranslationPageMeta | null;
+};
+const emptyFailures = (): FailureList => ({ loading: false, checkpoint: null, rows: [], total: 0, counts: null, meta: null });
+const FAILURE_PAGE = 50;
 /** Settings that change which text a scan finds. Changing one makes a reviewed scan stale. */
 const SCOPE_KEYS: (keyof Settings)[] = ['target_language', 'resource_pack_enabled', 'skip_target_language_text'];
 
@@ -126,12 +146,26 @@ export class AppState {
   failurePolicy = $state<'stop' | 'skip'>('stop');
 
   progress = $state<JobProgress>(emptyProgress());
+  /** The one clock the sidebar and the run screen both read, so their timers never drift apart. */
+  now = $state(Date.now());
+  operation = $state<Operation>('translate');
   result = $state<TranslationResult | null>(null);
+  /** The translation table of the current job: rows from the sidecar plus the user's unsaved edits. */
+  translationReview = new TranslationReview(() => (this.scan && this.worldDir ? { worldDir: this.worldDir, scanPlanId: this.scan.scanPlanId } : null));
+  /** The review view is showing (in the run step before applying, or in the result step for corrections). */
+  reviewOpen = $state(false);
+  /** Counts and usage of the run that stopped for review. */
+  reviewOutcome = $state<TranslationResult | null>(null);
+  /** The review was reopened from a saved job at start-up, so it says where the translations came from. */
+  reviewResumed = $state(false);
+  failures = $state<FailureList>(emptyFailures());
   resume = $state<ResumeStatus | null>(null);
   /** The recovery snapshot of the last restore, until the next scan or world change replaces the job. */
   lastRestoreId = $state('');
 
   private toastSerial = 0;
+  private clock: ReturnType<typeof setInterval> | null = null;
+  private failuresRevision = 0;
   private estimateRevision = 0;
   private unsubscribe: (() => void)[] = [];
   private listenersStarted = false;
@@ -199,6 +233,11 @@ export class AppState {
     };
   }
 
+  /** The estimate's upper bound is above the saved spending cap: starting needs an explicit yes. */
+  get overBudget(): boolean {
+    return !this.manualOnly && exceedsCap(this.estimate, this.settings.max_cost_usd);
+  }
+
   get isBusy(): boolean {
     return this.busy === 'scan' || this.busy === 'translate' || this.busy === 'restore';
   }
@@ -263,6 +302,8 @@ export class AppState {
       this.settings.tpm_limit = numberOr(boot.settings.tpm_limit, 0);
       this.settings.max_batch_retries = numberOr(boot.settings.max_batch_retries, 3);
       this.settings.concurrency = numberOr(boot.settings.concurrency, 4);
+      this.settings.review_before_apply = boot.settings.review_before_apply !== false;
+      this.settings.max_cost_usd = numberOr(boot.settings.max_cost_usd, 0);
       this.settings.skip_target_language_text = boot.settings.skip_target_language_text !== false;
       this.settings.resource_pack_enabled = !!boot.settings.resource_pack_enabled;
       this.settings.scan_options = normalizedScanOptions(boot.settings.scan_options);
@@ -276,7 +317,11 @@ export class AppState {
       this.applyPrefs(boot);
       if (this.worldDir && this.inspection?.validJavaWorld) this.step = 'scan';
       this.applyResume(boot.resume);
-
+      // Translations that were never written wait in the review: the user lands back in it.
+      if (this.resume?.status === 'awaiting_review') {
+        this.reviewResumed = true;
+        this.openReview();
+      }
     } catch (cause) {
       this.startupFailed = true;
       this.fail(cause);
@@ -289,6 +334,7 @@ export class AppState {
   destroy(): void {
     this.destroyed = true;
     if (this.prefsRetry) clearTimeout(this.prefsRetry);
+    this.stopClock();
     for (const stop of this.unsubscribe) stop();
     this.unsubscribe = [];
   }
@@ -566,6 +612,12 @@ export class AppState {
     this.result = null;
     this.progress = emptyProgress();
     this.resume = null;
+    this.reviewOpen = false;
+    this.reviewResumed = false;
+    this.reviewOutcome = null;
+    this.translationReview.clear();
+    this.failuresRevision++;
+    this.failures = emptyFailures();
   }
 
   async chooseWorld(): Promise<void> {
@@ -658,6 +710,7 @@ export class AppState {
     this.banner = null;
     this.resetJob();
     this.progress = { ...emptyProgress(), phase: 'collect', startedAt: Date.now() };
+    this.startClock();
     try {
       await this.persistSettings();
       this.scan = await callBackend<ScanResult>('scan.start', { worldDir: this.worldDir });
@@ -667,6 +720,7 @@ export class AppState {
       this.fail(cause);
     } finally {
       this.busy = '';
+      this.stopClock();
       this.progress = emptyProgress();
     }
   }
@@ -717,52 +771,212 @@ export class AppState {
     this.progress = reduceProgress(this.progress, event);
   }
 
-  async startTranslate(options: { resume?: boolean } = {}): Promise<void> {
-    if (!this.scan || this.isBusy || this.settingsRecoveryRequired || this.credentialRecovery.has(this.settings.provider)) return;
+  private startClock(): void {
+    this.now = Date.now();
+    if (!this.clock) this.clock = setInterval(() => { this.now = Date.now(); }, 500);
+  }
+
+  private stopClock(): void {
+    if (this.clock) clearInterval(this.clock);
+    this.clock = null;
+  }
+
+  private get guarded(): boolean {
+    return !this.scan || this.isBusy || this.settingsRecoveryRequired || this.credentialRecovery.has(this.settings.provider);
+  }
+
+  /**
+   * Run one translate-type request with the progress screen up. Returns the outcome, or null when it
+   * was refused (the banner says why and the step goes back to where the request started).
+   */
+  private async runOperation(
+    kind: Operation,
+    request: () => Promise<TranslationResult>,
+    options: { persist: boolean; keepResult: boolean }
+  ): Promise<TranslationResult | null> {
+    const origin = this.step;
+    this.operation = kind;
     this.busy = 'translate';
     this.cancelling = false;
     this.banner = null;
-    this.result = null;
+    if (!options.keepResult) this.result = null;
     this.step = 'run';
     this.progress = { ...emptyProgress(), phase: 'collect', startedAt: Date.now() };
-    let outcome: TranslationResult | null = null;
+    this.startClock();
     try {
-      await this.persistSettings();
-      outcome = await callBackend<TranslationResult>(options.resume ? 'translate.resume' : 'translate.start', {
-        worldDir: this.worldDir,
-        fingerprint: this.scan.fingerprint,
-        scanPlanId: this.scan.scanPlanId,
-        excludedCandidateIds: [...this.excluded],
-        candidateOverrides: this.overrides,
-        manualOnly: this.manualOnly,
-        provider: this.settings.provider,
-        model: this.settings.model,
-        ...(this.settings.provider === 'custom' ? { baseUrl: this.settings.base_url } : {}),
-        wireFormat: this.settings.wire_format,
-        failurePolicy: this.failurePolicy
-      });
-      this.result = outcome;
-      this.step = 'result';
-      await this.loadBackups();
-      if (RESUMABLE.includes(outcome.status)) {
-        this.applyResume(await callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir }));
-        // A resumed job keeps its reviewed choices: applyResume rebuilds them from the checkpoint.
-      } else {
-        this.resume = null;
-      }
+      if (options.persist) await this.persistSettings();
+      return await request();
     } catch (cause) {
-      this.fail(cause);
-      this.step = this.scan ? 'run' : 'scan';
-      if (!options.resume && this.resume) {
-        // Starting over drops the saved checkpoint; ask what is left rather than offer a stale resume.
-        void callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir })
-          .then((resumable) => this.applyResume(resumable))
-          .catch(() => { this.resume = null; });
+      if (cause instanceof BackendError && cause.code === 'EDITS_INVALID') {
+        this.translationReview.setRefused(editErrors(cause.details));
+        this.reviewOpen = true;
       }
+      this.fail(cause);
+      this.step = kind === 'translate' || kind === 'resume' ? (this.scan ? 'run' : 'scan') : origin;
+      return null;
     } finally {
       this.busy = '';
       this.cancelling = false;
+      this.stopClock();
       this.progress = emptyProgress();
+    }
+  }
+
+  private get identity() {
+    return { worldDir: this.worldDir, scanPlanId: this.scan!.scanPlanId };
+  }
+
+  async startTranslate(options: { resume?: boolean; budgetOverride?: boolean } = {}): Promise<void> {
+    if (this.guarded) return;
+    const kind: Operation = options.resume ? 'resume' : 'translate';
+    const hadResume = !!this.resume;
+    const outcome = await this.runOperation(kind, () => callBackend<TranslationResult>(options.resume ? 'translate.resume' : 'translate.start', {
+      worldDir: this.worldDir,
+      fingerprint: this.scan!.fingerprint,
+      scanPlanId: this.scan!.scanPlanId,
+      excludedCandidateIds: [...this.excluded],
+      candidateOverrides: this.overrides,
+      manualOnly: this.manualOnly,
+      provider: this.settings.provider,
+      model: this.settings.model,
+      ...(this.settings.provider === 'custom' ? { baseUrl: this.settings.base_url } : {}),
+      wireFormat: this.settings.wire_format,
+      failurePolicy: this.failurePolicy,
+      ...(options.budgetOverride ? { budgetOverride: true } : {})
+    }), { persist: true, keepResult: false });
+    if (outcome) {
+      // A new translation replaces the job, so edits made to an older one no longer apply.
+      if (!options.resume) this.translationReview.clear();
+      await this.settle(outcome);
+    } else if (!options.resume && hadResume) {
+      // Starting over drops the saved checkpoint; ask what is left rather than offer a stale resume.
+      void callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir })
+        .then((resumable) => this.applyResume(resumable))
+        .catch(() => { this.resume = null; });
+    }
+  }
+
+  /** Send only the failed and unsent rows to the AI again. The result comes back for review. */
+  async retryFailed(options: { budgetOverride?: boolean } = {}): Promise<void> {
+    if (this.guarded) return;
+    const outcome = await this.runOperation('retry', () => callBackend<TranslationResult>('translate.retry_failed', {
+      ...this.identity,
+      provider: this.settings.provider,
+      model: this.settings.model,
+      ...(options.budgetOverride ? { budgetOverride: true } : {})
+    }), { persist: true, keepResult: true });
+    if (outcome) await this.settle(outcome);
+  }
+
+  /** Write the reviewed translations (and edits) into the world. No AI request is sent. */
+  async applyTranslations(): Promise<void> {
+    if (this.guarded) return;
+    const review = this.translationReview;
+    const corrections = !!review.meta?.applied;
+    const outcome = await this.runOperation(corrections ? 'reapply' : 'apply', () => callBackend<TranslationResult>(corrections ? 'translate.reapply' : 'translate.apply', {
+      ...this.identity,
+      fingerprint: this.scan!.fingerprint,
+      edits: review.edits()
+    }), { persist: false, keepResult: true });
+    if (outcome) await this.settle(outcome);
+  }
+
+  /** Handle what a translate-type request returned: into the review, or onto the result screen. */
+  private async settle(outcome: TranslationResult): Promise<void> {
+    this.reviewResumed = false;
+    if (outcome.status === 'awaiting_review') {
+      this.reviewOutcome = outcome;
+      this.step = 'run';
+      this.reviewOpen = true;
+      this.translationReview.reset();
+    } else {
+      this.result = outcome;
+      this.reviewOutcome = null;
+      this.reviewOpen = false;
+      this.step = 'result';
+      if (outcome.status === 'completed' || outcome.status === 'partial') this.translationReview.settle();
+      this.failuresRevision++;
+      this.failures = emptyFailures();
+    }
+    try { await this.loadBackups(); } catch { /* the backup list refreshes when its page opens */ }
+    if (RESUMABLE.includes(outcome.status)) {
+      try {
+        this.applyResume(await callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir }));
+        // A resumed job keeps its reviewed choices: applyResume rebuilds them from the checkpoint.
+      } catch { /* the result screen offers a fresh start instead */ }
+    } else {
+      this.resume = null;
+    }
+  }
+
+  /** Show the translation table of the current job, in the step the user is on (run, or result for corrections). */
+  openReview(): void {
+    if (!this.scan) return;
+    if (this.step !== 'result') this.step = 'run';
+    this.reviewOpen = true;
+    if (!this.translationReview.loaded) this.translationReview.reset();
+  }
+
+  closeReview(): void {
+    this.reviewOpen = false;
+  }
+
+  /** Correct translations after the world was written: the same table over the applied job. */
+  openCorrections(): void {
+    this.translationReview.clear();
+    this.reviewOpen = true;
+    this.translationReview.reset();
+  }
+
+  /** Load failed rows from the saved table, 50 at a time. */
+  async loadFailures(more = false): Promise<void> {
+    if (!this.scan || !this.worldDir) return;
+    const revision = more ? this.failuresRevision : ++this.failuresRevision;
+    const offset = more ? this.failures.rows.length : 0;
+    if (!more) this.failures = { ...emptyFailures(), loading: true };
+    else this.failures.loading = true;
+    try {
+      const page = await fetchTranslationPage(this.identity, { state: 'failed', offset, limit: FAILURE_PAGE });
+      if (revision !== this.failuresRevision) return;
+      this.failures = {
+        loading: false, checkpoint: true, rows: more ? [...this.failures.rows, ...page.rows] : page.rows,
+        total: page.total, counts: page.counts, meta: page.meta
+      };
+    } catch {
+      if (revision !== this.failuresRevision) return;
+      // No saved table for this job: only a fresh translation is possible.
+      this.failures = { ...emptyFailures(), checkpoint: false };
+    }
+  }
+
+  get tableStatuses(): string[] {
+    return TABLE_STATUSES;
+  }
+
+  /** Save one of the options on the run screen without touching anything else the settings screen holds. */
+  async setRunOption(changes: Partial<Pick<Settings, 'review_before_apply' | 'max_cost_usd'>>): Promise<boolean> {
+    if (this.busy) return false;
+    const before = { review_before_apply: this.settings.review_before_apply, max_cost_usd: this.settings.max_cost_usd };
+    this.busy = 'settings';
+    this.settings = { ...this.settings, ...changes };
+    try {
+      await this.persistSettings();
+      if (this.scan) void this.loadEstimate();
+      return true;
+    } catch (cause) {
+      this.settings = { ...this.settings, ...before };
+      this.fail(cause);
+      return false;
+    } finally {
+      this.busy = '';
+    }
+  }
+
+  async revealWorld(): Promise<void> {
+    try {
+      await revealWorldFolder(this.worldDir);
+    } catch (cause) {
+      this.fail(cause);
     }
   }
 
@@ -781,6 +995,7 @@ export class AppState {
     if (!this.worldDir || this.isBusy) return false;
     this.busy = 'restore';
     this.banner = null;
+    this.startClock();
     try {
       const restored = await callBackend<{ status: string; recoverySetId: string }>('restore.start', {
         worldDir: this.worldDir,
@@ -801,6 +1016,7 @@ export class AppState {
       return false;
     } finally {
       this.busy = '';
+      this.stopClock();
     }
   }
 
@@ -834,6 +1050,8 @@ export class AppState {
         maxBatchRetries: s.max_batch_retries,
         maxFileWriteRetries: s.max_file_write_retries,
         continueOnFileError: s.continue_on_file_error,
+        reviewBeforeApply: s.review_before_apply !== false,
+        maxCostUsd: s.max_cost_usd ?? 0,
         sourceOverrides: s.source_overrides ?? {},
         concurrency: s.concurrency,
         resourcePackEnabled: s.resource_pack_enabled,

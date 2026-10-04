@@ -133,7 +133,7 @@
       {/if}
     </header>
 
-    <main id="main-content" tabindex="-1" bind:this={pane} class:review-page={app.page === 'workspace' && app.step === 'review'}>
+    <main id="main-content" tabindex="-1" bind:this={pane} class:review-page={app.page === 'workspace' && (app.step === 'review' || (app.reviewOpen && !app.isBusy && (app.step === 'run' || app.step === 'result')))}>
       {#if !app.ready}
         <div class="boot" role="status" aria-live="polite">
           <span class="spin" aria-hidden="true"><Icon name="refresh" size={24} /></span>

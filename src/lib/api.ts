@@ -35,6 +35,10 @@ export type Settings = {
   max_batch_retries?: number;
   max_file_write_retries?: number;
   continue_on_file_error?: boolean;
+  /** Stop after translating so the result can be read and corrected before anything is written. */
+  review_before_apply?: boolean;
+  /** Spending cap in USD; 0 means no cap. */
+  max_cost_usd?: number;
   source_overrides?: Record<string, string>;
   concurrency?: number;
   resource_pack_enabled?: boolean;
@@ -106,6 +110,8 @@ export type Estimate = {
   outputTokens: number;
   price: { input: number; output: number; perMillionInput: number; perMillionOutput: number } | null;
   cost: { low: number; high: number } | null;
+  /** True when the high end already includes an allowance for reasoning tokens. */
+  reasoningIncluded?: boolean;
 };
 
 export type BackendWarning = { code: string; file?: string; count?: number; message?: string; compression?: number[] };
@@ -150,19 +156,63 @@ export type CandidateQuery = {
 
 export type TranslationStats = { unique: number; translated: number; failed: number; kept_original: number; unchanged: number };
 
+export type FailureCode =
+  | 'timeout' | 'auth' | 'rate_limit' | 'quota' | 'invalid_response' | 'content_filter' | 'network' | 'provider_error' | 'unknown';
+
+export type TranslationFailure = { source: string; reason: FailureCode | string; detail?: string };
+
+export type TranslationUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean };
+
 export type TranslationResult = {
-  status: 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'locked' | 'invalidated' | 'unsupported' | string;
+  status: 'awaiting_review' | 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'budget_stopped' | 'locked' | 'invalidated' | 'unsupported' | string;
   candidateCount: number;
   changedFileCount: number;
   providerRequests?: number;
   backupSetId?: string;
+  recoverySetId?: string;
   errors?: { scope?: string; code?: string; message?: string; file?: string }[];
   warnings?: BackendWarning[];
   translation?: Partial<TranslationStats>;
-  translationFailures?: { source: string; reason: string }[];
+  translationFailures?: TranslationFailure[];
   translationSamples?: { source: string; translated: string }[];
   keptOriginalSamples?: string[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean };
+  usage?: TranslationUsage;
+};
+
+export type TranslationState = 'all' | 'translated' | 'failed' | 'kept' | 'edited';
+
+export type TranslationRow = {
+  id: string;
+  source: string;
+  translated: string;
+  status: Exclude<TranslationState, 'all'>;
+  kind: string;
+  occurrences: number;
+  /** The unedited AI answer, empty when there is none. Used to revert an edit. */
+  ai: string;
+  reason?: FailureCode | string;
+  detail?: string;
+};
+
+export type TranslationCounts = Record<TranslationState, number>;
+
+export type TranslationPageMeta = {
+  status: string;
+  /** True once the job has been written to the world: only `translate.reapply` may write it again. */
+  applied: boolean;
+  backupSetId: string;
+  failedCount: number;
+  usage: TranslationUsage;
+  retryEstimate: Estimate | null;
+};
+
+export type TranslationPage = {
+  rows: TranslationRow[];
+  offset: number;
+  total: number;
+  hasMore: boolean;
+  counts: TranslationCounts;
+  meta: TranslationPageMeta;
 };
 
 export type ResumeStatus = {
@@ -239,14 +289,19 @@ export type ProgressEvent = {
   message?: string;
   file?: string;
   candidate_text_count?: number;
+  /** `translation_sample` events carry one source → translation pair. */
+  source?: string;
+  translated?: string;
 };
 
 export class BackendError extends Error {
   code: string;
-  constructor(message: string, code = '') {
+  details?: unknown;
+  constructor(message: string, code = '', details?: unknown) {
     super(message);
     this.name = 'BackendError';
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -281,7 +336,7 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
     }
     if (response.id !== id) throw new BackendError('The translation core answered a different request.', 'TRANSPORT');
     if (response.type === 'response.error') {
-      throw new BackendError(response.error?.message || response.error?.code || 'Translation core error', response.error?.code || '');
+      throw new BackendError(response.error?.message || response.error?.code || 'Translation core error', response.error?.code || '', response.error?.details);
     }
     if (response.type !== 'response.ok' || !response.payload) {
       throw new BackendError('The translation core response was incomplete.', 'TRANSPORT');

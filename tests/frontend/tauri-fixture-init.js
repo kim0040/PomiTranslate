@@ -29,6 +29,8 @@
       candidates.push({ ...base, id: `candidate-${i}`, source: `${base.source} ${i}` });
     }
   }
+  // `tokens=1` puts § formatting codes into one sentence, to test that a broken code is refused.
+  if (new URLSearchParams(location.search).get('tokens') === '1') candidates[3].source = '§6A blade that remembers every battle§r';
   const worldDir = '/private/tmp/pomi-eval/Roguefire — a deliberately long translated world folder name';
   const inspection = {
     validJavaWorld: true,
@@ -49,7 +51,9 @@
     target_language: previewLanguages[previewLocale], style_preset: 'neutral', style_prompt: '', custom_system_prompt: '',
     temperature: 0.3, batch_size: 40, request_timeout: 120, rpm_limit: 0, tpm_limit: 0,
     max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false,
-    skip_target_language_text: true, ui_language: previewLocale, last_world_dir: worldDir
+    skip_target_language_text: true, ui_language: previewLocale, last_world_dir: worldDir,
+    // `review=0` keeps the old single-pass behaviour for the specs written before review-before-apply.
+    review_before_apply: new URLSearchParams(location.search).get('review') !== '0', max_cost_usd: 0
   };
   // A fresh install: no model chosen and no key saved yet.
   const fresh = new URLSearchParams(location.search).get('fresh') === '1';
@@ -58,7 +62,9 @@
   const estimate = {
     candidateCount: candidates.length, requests: 1, sourceChars: 180, inputTokens: 720,
     outputTokens: 240, price: { input: 0.00000015, output: 0.0000006, perMillionInput: 0.15, perMillionOutput: 0.6 },
-    cost: { low: 0.000252, high: 0.000504 }
+    cost: { low: 0.000252, high: 0.000504 },
+    // `reasoning=1` reports the reasoning allowance as included in the estimate.
+    ...(new URLSearchParams(location.search).get('reasoning') === '1' ? { reasoningIncluded: true } : {})
   };
   const scan = {
     status: 'completed', candidateCount: candidates.length, occurrenceCount: candidates.reduce((sum, item) => sum + item.occurrences, 0),
@@ -86,12 +92,12 @@
   function ok(request, payload) {
     return { v: 1, id: request.id, type: 'response.ok', payload };
   }
-  function resumePayload() {
+  function resumePayload(status = 'needs_retry') {
     return {
       available: true, scanPlanId: scan.scanPlanId, fingerprint: scan.fingerprint,
       candidateCount: candidates.length, occurrenceCount: scan.occurrenceCount, kinds: scan.kinds, coverage: scan.coverage, candidates: candidates.slice(0, 200), excludedCandidateIds: ['tellraw'],
       candidateOverrides: { shop: previewTranslations[previewLocale] }, savedAt: 1790672400,
-      status: 'needs_retry', translatedCount: 2
+      status, translatedCount: job ? job.rows.filter((row) => row.status !== 'failed').length : 2, failedCount: job ? job.rows.filter((row) => row.status === 'failed').length : 0, backupSetId: ''
     };
   }
   function filteredPage(body) {
@@ -112,21 +118,152 @@
     const limit = Number(body.limit || 200);
     return { candidates: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, kinds: scan.kinds };
   }
+  // --- the saved translation job (what the sidecar keeps in its checkpoint) -------------------
+  const query = new URLSearchParams(location.search);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const failCodes = ['timeout', 'rate_limit', 'invalid_response', 'network', 'quota', 'content_filter', 'auth', 'provider_error', 'unknown'];
+  const failDetails = {
+    timeout: 'ReadTimeout: read timed out (120s) while waiting for the provider', rate_limit: 'HTTP 429 Too Many Requests: rate limit reached for requests',
+    invalid_response: 'Expected 6 items but the model returned 5', network: 'ConnectError: [Errno 8] nodename nor servname provided, or not known',
+    quota: 'HTTP 402 Payment Required: insufficient credits', content_filter: 'The response was blocked by the safety system',
+    auth: 'HTTP 401 Unauthorized: invalid api key', provider_error: 'HTTP 503 Service Unavailable: upstream connect error', unknown: 'Not translated yet.'
+  };
+  const koText = {
+    'Welcome to Roguefire': '로그파이어에 오신 것을 환영합니다', 'The Lost Key Shop': '잃어버린 열쇠 상점',
+    'Find the keeper beyond the old bridge.': '낡은 다리 너머의 수호자를 찾아라.', 'A blade that remembers every battle': '모든 전투를 기억하는 검',
+    'You are not ready yet.': '아직 준비가 되지 않았습니다.', 'Merchant of the Northern Gate': '북문의 상인'
+  };
+  function aiFor(source) {
+    const lead = (source.match(/^(§.)+/) || [''])[0];
+    const tail = /§r$/.test(source) ? '§r' : '';
+    const suffix = (source.match(/ \d+$/) || [''])[0];
+    const core = source.slice(lead.length, source.length - tail.length - suffix.length);
+    return `${lead}${koText[core] || `번역: ${core}`}${tail}${suffix}`;
+  }
+  let job = null;
+  function failRow(row, code) { Object.assign(row, { status: 'failed', reason: code, detail: failDetails[code] || '' }); }
+  function makeJob(kind, excluded) {
+    const skip = new Set(excluded || []);
+    const rows = candidates.filter((item) => !skip.has(item.id)).map((item) => ({
+      id: item.id, source: item.source, kind: item.kind, occurrences: item.occurrences, ai: aiFor(item.source), status: 'translated', reason: '', detail: '', edit: undefined
+    }));
+    const pending = (row) => failRow(row, 'unknown');
+    const spread = (row, index) => failRow(row, failCodes[index % 6]);
+    if (kind === 'partial') rows.slice(0, 2).forEach((row) => failRow(row, 'provider_error'));
+    else if (kind === 'failed' || kind === 'needs_retry') rows.forEach(spread);
+    else if (kind === 'cancelled') rows.slice(2).forEach(pending);
+    else if (kind === 'budget_stopped') rows.slice(3).forEach(pending);
+    else if (kind === 'review') {
+      const count = Number(query.get('fail') || 0);
+      rows.slice(0, count).forEach((row, index) => failRow(row, query.get('failCode') || failCodes[index % failCodes.length]));
+    }
+    job = {
+      kind, rows, status: kind === 'review' ? 'awaiting_review' : kind === 'success' ? 'completed' : kind, excluded: [...skip],
+      applied: kind === 'success' || kind === 'partial', backupSetId: kind === 'success' || kind === 'partial' ? backups[0].backupSetId : '',
+      usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }
+    };
+    return job;
+  }
+  function ensureJob(excluded) {
+    if (job) return job;
+    const current = scenario();
+    const kind = current.startsWith('result-') ? current.slice(7) : 'review';
+    return makeJob(kind, excluded ?? (['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review'].includes(current) || current.startsWith('result-') ? ['tellraw'] : []));
+  }
+  const viewRow = (row, drafts = new Set()) => {
+    const edited = row.edit !== undefined || drafts.has(row.id);
+    return {
+      id: row.id, source: row.source, kind: row.kind, occurrences: row.occurrences, ai: row.status === 'failed' ? '' : row.ai,
+      translated: row.edit !== undefined ? row.edit : row.status === 'failed' ? '' : row.ai,
+      status: edited ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
+      ...(row.status === 'failed' && row.edit === undefined ? { reason: row.reason, detail: row.detail } : {})
+    };
+  };
+  function jobCounts(drafts) {
+    const counts = { all: 0, translated: 0, failed: 0, kept: 0, edited: 0 };
+    for (const row of job.rows) { counts.all++; counts[viewRow(row, drafts).status]++; }
+    return counts;
+  }
+  function retryEstimate() {
+    const failed = job.rows.filter((row) => row.status === 'failed' && row.edit === undefined).length;
+    if (!failed) return null;
+    return { ...estimate, candidateCount: failed, requests: Math.ceil(failed / 40), cost: { low: 0.000042 * failed, high: 0.000084 * failed } };
+  }
+  function pagePayload(body) {
+    const drafts = new Set(body.draftIds || []);
+    let rows = job.rows.map((row) => viewRow(row, drafts));
+    const text = String(body.query || '').trim().toLocaleLowerCase();
+    if (text) rows = rows.filter((row) => row.source.toLocaleLowerCase().includes(text) || row.translated.toLocaleLowerCase().includes(text));
+    if (body.state && body.state !== 'all') rows = rows.filter((row) => row.status === body.state);
+    const offset = Number(body.offset || 0);
+    const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
+    return {
+      rows: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, counts: jobCounts(drafts),
+      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, usage: job.usage, retryEstimate: retryEstimate() }
+    };
+  }
+  function jobResult(status, extra = {}) {
+    const failed = job.rows.filter((row) => row.status === 'failed');
+    const unchanged = job.rows.filter((row) => row.status === 'translated' && row.ai === row.source && row.edit === undefined).length;
+    return {
+      status, candidateCount: candidates.length, changedFileCount: job.applied ? 8 : 0, providerRequests: 0, backupSetId: job.applied ? job.backupSetId : '', preTranslate: '', localhostServer: false,
+      errors: [], warnings: [],
+      translation: { unique: job.rows.length, translated: job.rows.length - failed.length - unchanged, failed: failed.length, kept_original: 0, unchanged, pending: failed.filter((row) => row.reason === 'unknown').length },
+      translationFailures: failed.slice(0, 20).map((row) => ({ source: row.source, reason: row.reason, detail: row.detail })),
+      translationSamples: job.rows.filter((row) => row.status !== 'failed').slice(0, 12).map((row) => ({ source: row.source, translated: row.edit ?? row.ai })), keptOriginalSamples: [],
+      usage: job.usage, ...extra
+    };
+  }
+  function progressEvents(request, type, names) {
+    names.forEach(([delay, payload]) => setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type, payload }), delay));
+  }
+  const editReason = (row, text) => {
+    const clean = String(text).trim();
+    if (!clean) return 'empty';
+    if (clean.length > 32000) return 'too_long';
+    if (clean.includes('\u0000')) return 'invalid';
+    const tokens = (value) => (value.match(/§.|%(?:\d+\$)?[sdif]|\{[A-Za-z0-9_]+\}/g) || []).sort().join('|');
+    return tokens(row.source) === tokens(clean) ? '' : 'tokens';
+  };
+  /** Validate edits as the sidecar does; returns an EDITS_INVALID error response or applies them. */
+  function applyEdits(request, edits) {
+    const refused = [];
+    for (const [id, text] of Object.entries(edits || {})) {
+      const row = job.rows.find((item) => item.id === id);
+      if (!row) return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'Unknown candidate', recoverable: true } };
+      if (text === null) continue;
+      const reason = editReason(row, text);
+      if (reason) refused.push({ id, reason });
+    }
+    if (refused.length) return { v: 1, id: request.id, type: 'response.error', error: { code: 'EDITS_INVALID', message: 'Some edited translations cannot be written.', recoverable: true, details: { rows: refused } } };
+    for (const [id, text] of Object.entries(edits || {})) {
+      const row = job.rows.find((item) => item.id === id);
+      if (text === null || String(text).trim() === row.ai) delete row.edit; else row.edit = String(text).trim();
+      if (row.edit !== undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; }
+    }
+    return null;
+  }
+
   function resultPayload(status) {
     if (status === 'partial') return {
       status, candidateCount: candidates.length, changedFileCount: 4, providerRequests: 2,
       backupSetId: backups[0].backupSetId,
       translation: { unique: 6, translated: 4, failed: 2, kept_original: 0, unchanged: 0 },
       translationSamples: [{ source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }],
-      translationFailures: [{ source: 'Welcome to Roguefire', reason: 'Provider unavailable' }],
+      translationFailures: [{ source: 'Welcome to Roguefire', reason: 'provider_error', detail: 'HTTP 503 Service Unavailable: upstream connect error' }],
       usage: { prompt_tokens: 540, completion_tokens: 180, cost: 0.00018, cost_reported: true }
     };
     if (status === 'failed' || status === 'needs_retry') return {
       status, candidateCount: candidates.length, changedFileCount: 0, providerRequests: 3,
       errors: [{ code: 'PROVIDER_ERROR', message: 'Provider requests failed repeatedly.' }],
       translation: { unique: 6, translated: 0, failed: 6, kept_original: 0, unchanged: 0 },
-      translationFailures: [{ source: 'Welcome to Roguefire', reason: 'Provider unavailable' }],
+      translationFailures: [{ source: 'Welcome to Roguefire', reason: 'provider_error', detail: 'HTTP 503 Service Unavailable: upstream connect error' }],
       usage: { prompt_tokens: 680, completion_tokens: 0, cost: 0.0002, cost_reported: true }
+    };
+    if (status === 'budget_stopped') return {
+      status, candidateCount: candidates.length, changedFileCount: 0, providerRequests: 1, backupSetId: '',
+      translation: { unique: 6, translated: 3, failed: 3, kept_original: 0, unchanged: 0, pending: 3 },
+      usage: { prompt_tokens: 380, completion_tokens: 120, cost: 0.0001, cost_reported: true }
     };
     if (status === 'cancelled') return {
       status, candidateCount: candidates.length, changedFileCount: 2, providerRequests: 1,
@@ -157,7 +294,8 @@
   async function sidecar(request) {
     const type = request.type;
     const body = request.payload || {};
-    window.__pomiRequests.push({ type, provider: body.provider, publicCatalog: body.publicCatalog });
+    const { apiKey: _hidden, ...loggable } = body;
+    window.__pomiRequests.push({ type, provider: body.provider, publicCatalog: body.publicCatalog, payload: JSON.parse(JSON.stringify(loggable)) });
     const current = scenario();
     if (type === 'app.bootstrap') {
       bootstrapAttempts++;
@@ -169,7 +307,7 @@
       }
       if (current === 'startup-delay') await new Promise((resolve) => setTimeout(resolve, 500));
       const empty = current === 'empty';
-      const resumed = ['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review'].includes(current);
+      const resumed = ['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review', 'awaiting-review'].includes(current);
       const resultScenarios = ['result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
@@ -177,7 +315,7 @@
         ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
         apiKeyStored: !fresh || freshKeySaved, credentialMode: 'local', worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
         worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
-        resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false }
+        resume: current === 'awaiting-review' ? resumePayload('awaiting_review') : resumed || resultScenarios.includes(current) ? resumePayload() : { available: false }
       });
     }
     // This fixture tests draft wiring only; the real AST parser has Python regressions.
@@ -187,7 +325,10 @@
     }
     if (type === 'settings.set') {
       if (new URLSearchParams(location.search).get('slowSettings') === '1') await new Promise((resolve) => setTimeout(resolve, 1500));
-      const aliases = { openrouterReasoning: 'openrouter_reasoning', externalResourcePackPaths: 'external_resource_pack_paths', resourcePackOptions: 'resource_pack_options', sourceOverrides: 'source_overrides', continueOnFileError: 'continue_on_file_error', maxFileWriteRetries: 'max_file_write_retries', targetLanguage: 'target_language', uiLanguage: 'ui_language', baseUrl: 'base_url', wireFormat: 'wire_format', resourcePackEnabled: 'resource_pack_enabled', skipTargetLanguageText: 'skip_target_language_text', scanOptions: 'scan_options' };
+      if (body.maxCostUsd !== undefined && !(Number.isFinite(Number(body.maxCostUsd)) && Number(body.maxCostUsd) >= 0 && Number(body.maxCostUsd) <= 1000)) {
+        return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'max_cost_usd must be between 0 and 1000' } };
+      }
+      const aliases = { reviewBeforeApply: 'review_before_apply', maxCostUsd: 'max_cost_usd', openrouterReasoning: 'openrouter_reasoning', externalResourcePackPaths: 'external_resource_pack_paths', resourcePackOptions: 'resource_pack_options', sourceOverrides: 'source_overrides', continueOnFileError: 'continue_on_file_error', maxFileWriteRetries: 'max_file_write_retries', targetLanguage: 'target_language', uiLanguage: 'ui_language', baseUrl: 'base_url', wireFormat: 'wire_format', resourcePackEnabled: 'resource_pack_enabled', skipTargetLanguageText: 'skip_target_language_text', scanOptions: 'scan_options' };
       for (const [key, value] of Object.entries(body)) {
         if (key !== 'apiKey' && key !== 'credentialMode') settings[aliases[key] || key] = value;
       }
@@ -216,7 +357,10 @@
     }
     if (type === 'worlds.remember') return ok(request, { worlds: [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }] });
     if (type === 'worlds.forget') return ok(request, { worlds: [] });
-    if (type === 'resume.status') return ok(request, ['result-cancelled', 'result-needs_retry'].includes(current) ? { ...resumePayload(), status: current.slice(7) } : { available: false });
+    if (type === 'resume.status') {
+      if (job && !job.applied && ['awaiting_review', 'budget_stopped', 'cancelled', 'needs_retry', 'failed'].includes(job.status)) return ok(request, resumePayload(job.status));
+      return ok(request, ['result-cancelled', 'result-needs_retry'].includes(current) ? { ...resumePayload(), status: current.slice(7) } : { available: false });
+    }
     if (type === 'backups.list') return ok(request, { backups });
     if (type === 'estimate.get') {
       if (new URLSearchParams(location.search).get('slowEstimate') === '1') await new Promise((resolve) => setTimeout(resolve, 600));
@@ -242,11 +386,77 @@
     }
     if (type === 'translate.start' || type === 'translate.resume') {
       if (current === 'run-progress') {
-        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'phase_start', phase: 'translate', total: 6, requests_estimate: 1 } }), 50);
-        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1 } }), 120);
+        // Two batches finish a second apart, so the remaining-time estimate appears after the second one.
+        progressEvents(request, 'translate.progress', [
+          [50, { event: 'phase_start', phase: 'translate', total: 6, requests_estimate: 3 }],
+          [400, { event: 'translation_progress', completed: 2, total: 6, failed: 0, batch: 1, batches: 3, requests: 1 }],
+          [450, { event: 'translation_sample', source: 'Welcome to Roguefire', translated: '로그파이어에 오신 것을 환영합니다' }],
+          [500, { event: 'translation_sample', source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }],
+          [1500, { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 2, batches: 3, requests: 2 }],
+          [1550, { event: 'translation_sample', source: 'Merchant of the Northern Gate', translated: '북문의 상인' }]
+        ]);
         return new Promise((resolve) => setTimeout(() => resolve(ok(request, resultPayload('completed'))), 60000));
       }
-      return ok(request, resultPayload(current.startsWith('result-') ? current.slice('result-'.length) : 'completed'));
+      if (current.startsWith('result-')) {
+        ensureJob(body.excludedCandidateIds);
+        return ok(request, resultPayload(current.slice('result-'.length)));
+      }
+      const resuming = type === 'translate.resume';
+      const budgetStop = query.get('budget') === '1' && !body.budgetOverride && !job;
+      if (!resuming || !job) makeJob('review', body.excludedCandidateIds);
+      if (budgetStop) {
+        makeJob('budget_stopped', body.excludedCandidateIds);
+        return ok(request, resultPayload('budget_stopped'));
+      }
+      if (job.status === 'budget_stopped') job.rows.forEach((row) => { row.status = 'translated'; row.reason = ''; row.detail = ''; });
+      progressEvents(request, 'translate.progress', [
+        [10, { event: 'phase_start', phase: 'translate', total: job.rows.length, requests_estimate: 1 }],
+        [30, { event: 'translation_progress', completed: job.rows.length, total: job.rows.length, failed: 0, batch: 1, batches: 1, requests: 1 }]
+      ]);
+      await sleep(80);
+      if (settings.review_before_apply) {
+        job.status = 'awaiting_review';
+        return ok(request, jobResult('awaiting_review', { providerRequests: 1 }));
+      }
+      // Single pass: written straight away, failed rows stay original.
+      job.applied = true;
+      job.backupSetId = backups[0].backupSetId;
+      job.status = job.rows.some((row) => row.status === 'failed') ? 'partial' : 'completed';
+      return ok(request, jobResult(job.status, { providerRequests: 1 }));
+    }
+    if (type === 'translations.page') {
+      if (query.get('nocp') === '1') return { v: 1, id: request.id, type: 'response.error', error: { code: 'RESUME_NOT_AVAILABLE', message: 'No saved translations', recoverable: true } };
+      ensureJob(['tellraw']);
+      return ok(request, pagePayload(body));
+    }
+    if (type === 'translate.retry_failed') {
+      ensureJob(['tellraw']);
+      progressEvents(request, 'translate.progress', [
+        [10, { event: 'phase_start', phase: 'translate', total: job.rows.filter((row) => row.status === 'failed').length, requests_estimate: 1 }]
+      ]);
+      await sleep(80);
+      if (query.get('retryFail') !== '1') job.rows.forEach((row) => { if (row.status === 'failed' && row.edit === undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; } });
+      job.status = 'awaiting_review';
+      job.usage = { ...job.usage, prompt_tokens: job.usage.prompt_tokens + 120, completion_tokens: job.usage.completion_tokens + 40, cost: job.usage.cost + 0.00006 };
+      return ok(request, jobResult('awaiting_review', { providerRequests: 1, backupSetId: job.applied ? job.backupSetId : '', changedFileCount: 0 }));
+    }
+    if (type === 'translate.apply' || type === 'translate.reapply') {
+      ensureJob(['tellraw']);
+      const reapply = type === 'translate.reapply';
+      if (!reapply && job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'ALREADY_APPLIED', message: 'Use reapply', recoverable: true } };
+      if (reapply && !job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'NOTHING_TO_REAPPLY', message: 'Nothing to reapply', recoverable: true } };
+      if (query.get('worldChanged') === '1' && reapply) return { v: 1, id: request.id, type: 'response.error', error: { code: 'WORLD_CHANGED_SINCE_APPLY', message: 'World changed', recoverable: true } };
+      const refusal = applyEdits(request, body.edits);
+      if (refusal) return refusal;
+      progressEvents(request, 'translate.progress', [
+        [10, { event: 'phase_start', phase: 'write', total: 8 }],
+        [40, { event: 'file_start', phase: 'write', index: 3, total: 8 }]
+      ]);
+      await sleep(120);
+      job.applied = true;
+      job.backupSetId = backups[0].backupSetId;
+      job.status = job.rows.some((row) => row.status === 'failed') ? 'partial' : 'completed';
+      return ok(request, jobResult(job.status, reapply ? { recoverySetId: 'recovery-before-reapply' } : {}));
     }
     if (type === 'restore.start') return ok(request, { status: 'restored', recoverySetId: 'recovery-before-restore' });
     if (type === 'credentials.delete') {
@@ -287,6 +497,7 @@
       if (command === 'operation_active') return false;
       if (command === 'open_external') { (window.__pomiOpened ||= []).push(args.url); return null; }
       if (command === 'data_locations') return { data: '/Users/fixture/Library/Application Support/PomiTranslate', app: '/Users/fixture/Library/Application Support/app.pomitranslate.desktop' };
+      if (command === 'reveal_world_folder') { window.__pomiWorldRevealed = args.worldDir; return null; }
       if (command === 'reveal_data_folder') { window.__pomiRevealed = (window.__pomiRevealed || 0) + 1; return null; }
       if (command === 'plugin:app|version') return '0.1.0';
       if (command === 'update_check') {

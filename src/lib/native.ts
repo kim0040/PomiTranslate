@@ -172,3 +172,8 @@ export async function installUpdate(): Promise<void> {
 export async function onUpdateProgress(handler: (downloaded: number, total: number | null) => void): Promise<Unsubscribe> {
   return listen<{ downloaded: number; total: number | null }>('pomi-update-progress', ({ payload }) => handler(payload.downloaded, payload.total ?? null));
 }
+
+/** Open the selected world's folder in the file manager. The shell refuses anything but a Java world folder. */
+export async function revealWorldFolder(worldDir: string): Promise<void> {
+  await invoke('reveal_world_folder', { worldDir });
+}
