@@ -14,6 +14,10 @@
   ];
   const faq: { id: string; q: MessageKey; a: MessageKey }[] = [
     { id: 'cost', q: 'help.faq.cost.q', a: 'help.faq.cost.a' },
+    { id: 'cap', q: 'help.faq.cap.q', a: 'help.faq.cap.a' },
+    { id: 'edit-before', q: 'help.faq.editBefore.q', a: 'help.faq.editBefore.a' },
+    { id: 'edit-after', q: 'help.faq.editAfter.q', a: 'help.faq.editAfter.a' },
+    { id: 'glossary', q: 'help.faq.glossary.q', a: 'help.faq.glossary.a' },
     { id: 'restore', q: 'help.faq.restore.q', a: 'help.faq.restore.a' },
     { id: 'missing', q: 'help.faq.missing.q', a: 'help.faq.missing.a' },
     { id: 'keys', q: 'help.faq.keys.q', a: 'help.faq.keys.a' },

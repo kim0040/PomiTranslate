@@ -72,6 +72,22 @@ test('the Help menu opens help, shortcuts, the tour, licenses and a problem repo
   await expect.poll(() => page.evaluate(() => (window as any).__pomiOpened ?? [])).toContain('https://github.com/kim0040/PomiTranslate/issues/new');
 });
 
+test('the FAQ explains editing before and after applying, the glossary and the spending cap', async ({ page }) => {
+  await boot(page, 'scenario=review');
+  await emit(page, 'pomi-menu', 'help');
+  const entries: [string, string][] = [
+    ['번역을 적용하기 전에 고칠 수 있나요?', '번역 결과 검토 화면이 열리고'],
+    ['적용한 뒤 번역을 고치려면?', 'AI 요청은 보내지 않습니다'],
+    ['용어집은 어떻게 쓰나요?', '이 월드 용어집'],
+    ['비용 한도는 어떻게 동작하나요?', '월드에는 쓰지 않으며']
+  ];
+  for (const [question, answer] of entries) {
+    await page.locator('summary', { hasText: question }).click();
+    await expect(page.getByText(answer, { exact: false })).toBeVisible();
+  }
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test('web links open in the system browser, not inside the app window', async ({ page }) => {
   await boot(page, 'scenario=review');
   await page.getByRole('button', { name: '정보', exact: true }).click();
