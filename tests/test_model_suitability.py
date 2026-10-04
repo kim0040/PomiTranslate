@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import mwt.desktop_entry as entry
-from llm_backends import LLMProviderClient, ProviderError, annotate_suitability, is_translation_suitable
+from llm_backends import LLMProviderClient, ModelCatalogError, ProviderError, annotate_suitability, is_translation_suitable
 
 
 def test_ids_and_modalities() -> None:
@@ -72,13 +72,89 @@ def test_models_list_reports_suitability_and_hidden_count() -> None:
         {"id": "text-embedding-3-large", "text": True},
         {"id": "gpt-image-1"},
     ]
-    with tempfile.TemporaryDirectory() as directory, patch.object(LLMProviderClient, "try_refresh_text_models", return_value=catalog):
+    with tempfile.TemporaryDirectory() as directory, patch.object(LLMProviderClient, "try_refresh_model_catalog", return_value=catalog):
         reply = _handle({"provider": "openai", "model": "", "credentialOwner": "rust", "apiKey": "synthetic-key"}, Path(directory) / "data")
     assert reply["type"] == "response.ok"
     flags = {item["id"]: item["suitable"] for item in reply["payload"]["models"]}
     assert flags == {"gpt-5-mini": True, "text-embedding-3-large": False, "gpt-image-1": False}
     assert reply["payload"]["hiddenCount"] == 2
     print("PASS model_suitability.models_list_payload")
+
+
+def test_provider_shaped_catalogs_reach_models_list_and_cache_without_nontext_runs() -> None:
+    # These are provider response shapes, not pre-annotated UI fixture records.
+    catalogs = {
+        "openai": ({"object": "list", "data": [
+            {"id": model_id, "object": "model", "created": 1700000000, "owned_by": "openai"}
+            for model_id in ["gpt-4o", "text-embedding-3-large", "gpt-image-1", "tts-1",
+                             "omni-moderation-latest", "gpt-realtime", "gpt-4o-transcribe", "whisper-1"]
+        ]}, {"gpt-4o"}),
+        "openrouter": ({"data": [
+            {"id": "vendor/chat", "name": "Chat", "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]}, "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
+            {"id": "vendor/painter", "name": "Painter", "architecture": {"input_modalities": ["text"], "output_modalities": ["image"]}},
+            {"id": "vendor/speaker", "architecture": {"modality": "text->audio"}},
+            {"id": "vendor/embedding", "architecture": {"output_modalities": ["embeddings"]}},
+        ]}, {"vendor/chat"}),
+        "gemini": ({"models": [
+            {"name": "models/gemini-2.5-flash", "displayName": "Gemini 2.5 Flash", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+            {"name": "models/gemini-embedding-001", "displayName": "Gemini Embedding", "supportedGenerationMethods": ["embedContent", "countTokens"]},
+            {"name": "models/gemini-2.5-flash-image", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-2.5-flash-preview-tts", "supportedGenerationMethods": ["generateContent", "countTokens"]},
+            {"name": "models/aqa", "supportedGenerationMethods": ["generateAnswer"]},
+        ]}, {"gemini-2.5-flash"}),
+        "anthropic": ({"data": [
+            {"id": "claude-sonnet-4-5-20250929", "type": "model", "display_name": "Claude Sonnet 4.5", "created_at": "2025-09-29T00:00:00Z"},
+            {"id": "claude-haiku-4-5-20251001", "type": "model", "display_name": "Claude Haiku 4.5", "created_at": "2025-10-01T00:00:00Z"},
+        ], "has_more": False}, {"claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"}),
+    }
+    with tempfile.TemporaryDirectory() as directory:
+        for provider, (response, suitable_ids) in catalogs.items():
+            data = Path(directory) / provider
+            calls = []
+            def fake(_client, method, url, *, headers, payload=None):
+                calls.append((method, url))
+                assert method == "GET", "catalog queries must never generate text"
+                return {"data": {"limit_remaining": 1}} if url.endswith("/key") else response
+            body = {"provider": provider, "model": "", "credentialOwner": "rust", "apiKey": "synthetic-key"}
+            for connection_check in [False, True]:
+                with patch.object(LLMProviderClient, "_request_json", autospec=True, side_effect=fake):
+                    reply = _handle({**body, "connectionCheck": connection_check}, data)
+                assert reply["type"] == "response.ok", provider
+                models = reply["payload"]["models"]
+                raw = response.get("data", response.get("models"))
+                assert len(models) == len(raw), provider
+                assert {item["id"] for item in models if item["suitable"]} == suitable_ids, provider
+                assert reply["payload"]["hiddenCount"] == len(raw) - len(suitable_ids), provider
+            if provider == "openrouter":
+                with patch.object(LLMProviderClient, "_request_json", autospec=True, side_effect=fake):
+                    public = _handle({"provider": provider, "publicCatalog": True}, data)
+                assert public["payload"]["hiddenCount"] == 3
+                assert all("output_modalities=" not in url for _, url in calls)
+            with patch.object(LLMProviderClient, "_request_json", side_effect=ProviderError("offline")):
+                cached = _handle(body, data)
+            assert cached["payload"]["cached"] is True
+            assert cached["payload"]["hiddenCount"] == len(raw) - len(suitable_ids)
+            client = _client(provider)
+            client.data_dir = str(data)
+            with patch.object(client, "_request_json", side_effect=ProviderError("offline")):
+                text_models = client.try_refresh_text_models()
+            assert all(item["text"] for item in text_models)
+            nontext = next((item for item in models if not item["text"]), None)
+            if nontext:
+                client = _client(provider)
+                client.model = nontext["id"]
+                client.data_dir = str(data)
+                with patch.object(client, "_request_json", side_effect=ProviderError("offline")):
+                    try:
+                        client.try_refresh_text_models()
+                    except ModelCatalogError:
+                        pass
+                    else:
+                        raise AssertionError("a non-text id must not enter the translation run")
+            # Running a translation catalog refresh must not replace the saved full catalog.
+            from mwt.userdata import load_model_catalog
+            assert len(load_model_catalog(provider, root=data)) == len(raw)
+    print("PASS model_suitability.provider_shapes_catalog_cache_and_text_runs")
 
 
 def test_connection_check_error_codes() -> None:
@@ -191,6 +267,7 @@ if __name__ == "__main__":
     test_ids_and_modalities()
     test_annotate_marks_every_record_including_old_cache_entries()
     test_models_list_reports_suitability_and_hidden_count()
+    test_provider_shaped_catalogs_reach_models_list_and_cache_without_nontext_runs()
     test_connection_check_error_codes()
     test_connection_check_success_remembers_the_catalog()
     test_check_connection_requests_and_failures()

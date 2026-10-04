@@ -1077,7 +1077,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 models = LLMProviderClient(config).check_connection()
                 remember_model_catalog(provider, models, root=data_dir)
             else:
-                models = LLMProviderClient(config).try_refresh_text_models()
+                client = LLMProviderClient(config)
+                models = client.try_refresh_model_catalog()
+                cached = client.catalog_cached
         except Exception as exc:
             from llm_backends import ProviderError
 

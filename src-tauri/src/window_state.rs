@@ -4,12 +4,13 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{atomic::{AtomicBool, Ordering}, Mutex},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, Window};
-use tauri_plugin_window_state::StateFlags;
+use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 /// The configured minimum and default size (tauri.conf.json), in logical pixels.
 const MIN_LOGICAL: (f64, f64) = (840.0, 620.0);
@@ -18,13 +19,30 @@ const DEFAULT_LOGICAL: (f64, f64) = (1180.0, 800.0);
 const REACHABLE: (i64, i64) = (160, 60);
 const GEOMETRY_FILE: &str = ".window-geometry.json";
 static READY: AtomicBool = AtomicBool::new(false);
+const WRITE_INTERVAL: Duration = Duration::from_millis(500);
+static WRITES: Mutex<GeometryWrites> = Mutex::new(GeometryWrites { pending: None, scheduled: false });
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Geometry {
     x: i32,
     y: i32,
     width: u32,
     height: u32,
+}
+
+struct GeometryWrites {
+    pending: Option<Geometry>,
+    scheduled: bool,
+}
+
+impl GeometryWrites {
+    fn queue(&mut self, geometry: Geometry, maximized: bool, fullscreen: bool, minimized: bool) -> bool {
+        if maximized || fullscreen || minimized { return false; }
+        self.pending = Some(geometry);
+        if self.scheduled { return false; }
+        self.scheduled = true;
+        true
+    }
 }
 
 /// The plugin keeps the maximized flag. Normal size and position use our guarded geometry file so
@@ -105,6 +123,10 @@ pub fn plan(window: Rect, scale: f64, maximized: bool, fullscreen: bool, monitor
     if placed.w >= home.w && placed.h >= home.h {
         return Plan::Apply { size: Some(fit(scaled(DEFAULT_LOGICAL, scale), home)), center: true };
     }
+    let fitted = fit(size, home);
+    if fitted != size {
+        return Plan::Apply { size: Some(fitted), center: true };
+    }
     // The title bar must stay on the screen, or the window cannot be dragged back.
     if placed.y < home.y || placed.y > home.y + home.h - REACHABLE.1 {
         return Plan::Apply { size: resized.then_some(size), center: true };
@@ -159,19 +181,42 @@ pub fn save_normal_geometry<R: Runtime>(window: &Window<R>) {
         return;
     };
     if size.width == 0 || size.height == 0 { return; }
-    write_geometry(
-        window.app_handle(),
-        Geometry {
+    let Ok(mut writes) = WRITES.lock() else { return; };
+    let schedule = writes.queue(Geometry {
             x: position.x,
             y: position.y,
             width: size.width,
             height: size.height,
-        },
-    );
+        }, false, false, false);
+    drop(writes);
+    if schedule {
+        let app = window.app_handle().clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(WRITE_INTERVAL).await;
+            // Serialize background and close-time writes so an older snapshot cannot win.
+            if let Ok(mut writes) = WRITES.lock() {
+                if let Some(geometry) = writes.pending.take() { write_geometry(&app, geometry); }
+                writes.scheduled = false;
+            }
+        });
+    }
 }
 
-/// Run after the window-state plugin has restored its maximized flag and before the page is shown.
+pub fn flush_pending_geometry<R: Runtime>(app: &AppHandle<R>) {
+    if let Ok(mut writes) = WRITES.lock() {
+        if let Some(geometry) = writes.pending.take() { write_geometry(app, geometry); }
+    }
+}
+
+/// Closing while maximized/fullscreen still flushes the last queued normal rectangle.
+pub fn flush_normal_geometry<R: Runtime>(window: &Window<R>) {
+    save_normal_geometry(window);
+    flush_pending_geometry(window.app_handle());
+}
+
+/// Restore normal geometry first; the plugin applies its saved maximized flag afterwards.
 pub fn guard<R: Runtime>(app: &AppHandle<R>) {
+    if READY.load(Ordering::SeqCst) { return; }
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -193,7 +238,8 @@ pub fn guard<R: Runtime>(app: &AppHandle<R>) {
             h: i64::from(monitor.size().height),
         })
         .collect();
-    if monitors.is_empty() || maximized || fullscreen {
+    if monitors.is_empty() || fullscreen {
+        let _ = window.restore_state(flags());
         return;
     }
     let saved = load_geometry(app);
@@ -212,7 +258,9 @@ pub fn guard<R: Runtime>(app: &AppHandle<R>) {
             h: i64::from(size.height),
         }
     };
-    let action = plan(current, scale, maximized, fullscreen, &monitors);
+    // `current` is the normal rectangle, even when the saved display mode is maximized.
+    if maximized { let _ = window.unmaximize(); }
+    let action = plan(current, scale, false, false, &monitors);
     let (planned_size, center) = match action {
         Plan::Keep => (None, false),
         Plan::Apply { size, center } => (size, center),
@@ -238,6 +286,7 @@ pub fn guard<R: Runtime>(app: &AppHandle<R>) {
             },
         );
     }
+    let _ = window.restore_state(flags());
 }
 
 /// Enable persistence after initial restore and the geometry guard have completed.
@@ -259,6 +308,38 @@ mod tests {
     #[test]
     fn a_normal_saved_window_is_left_alone() {
         assert_eq!(plan(win(200, 100, 1180, 800), 1.0, false, false, &[SCREEN]), Plan::Keep);
+    }
+
+    #[test]
+    fn maximized_relaunch_plans_the_saved_normal_rectangle_before_maximizing() {
+        let normal = win(2700, 100, 1180, 800);
+        assert_eq!(plan(normal, 1.0, false, false, &[SCREEN, SECOND]), Plan::Keep);
+        // The startup guard supplies the normal rectangle, not the maximized display rectangle.
+        assert_eq!(plan(normal, 1.0, false, false, &[SCREEN]),
+            Plan::Apply { size: Some((1180, 800)), center: true });
+        assert_eq!(plan(win(200, 100, 1180, 800), 2.0, false, false, &[SCREEN]),
+            Plan::Apply { size: Some((1680, 1240)), center: false });
+        assert_eq!(plan(win(200, 100, 1680, 1240), 1.0, false, false, &[SCREEN]), Plan::Keep);
+    }
+
+    #[test]
+    fn writes_coalesce_and_mode_changes_never_replace_the_normal_rectangle() {
+        let mut writes = GeometryWrites { pending: None, scheduled: false };
+        let first = Geometry { x: 100, y: 80, width: 1000, height: 700 };
+        let last = Geometry { x: 200, y: 100, width: 1180, height: 800 };
+        assert!(writes.queue(first, false, false, false));
+        assert!(!writes.queue(last, false, false, false));
+        let maximized = Geometry { x: 0, y: 0, width: 2560, height: 1440 };
+        for (max, full, min) in [(true, false, false), (false, true, false), (false, false, true)] {
+            assert!(!writes.queue(maximized, max, full, min));
+            assert_eq!(writes.pending, Some(last));
+        }
+        // Close while maximized flushes normal geometry; relaunch/unmaximize uses that rectangle.
+        let saved = writes.pending.take().unwrap();
+        assert_eq!(saved, last);
+        assert_eq!(plan(win(saved.x.into(), saved.y.into(), saved.width.into(), saved.height.into()),
+            1.0, false, false, &[SCREEN]), Plan::Keep);
+        assert_eq!(WRITE_INTERVAL, Duration::from_millis(500));
     }
 
     #[test]

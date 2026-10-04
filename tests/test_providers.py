@@ -185,7 +185,8 @@ def test_openai_gemini_anthropic_openrouter_custom(base: str, tmp: Path) -> None
     assert openrouter.translate_mapping({"0": "Hello"}, system_prompt="sys", temperature=0) == {"0": "Hola"}
     _, path, full, headers, body = last_post()
     assert path == "/v1/chat/completions"
-    assert any(item[0] == "GET" and "output_modalities=text" in item[2] for item in Recorder.seen)
+    assert any(item[0] == "GET" and item[2] == "/v1/models" for item in Recorder.seen)
+    assert not any(item[0] == "GET" and "output_modalities=text" in item[2] for item in Recorder.seen)
     assert headers["authorization"] == "Bearer openrouter-key"
     assert headers["x-title"] == "PomiTranslate"
     assert "response_format" not in body
@@ -195,6 +196,11 @@ def test_openai_gemini_anthropic_openrouter_custom(base: str, tmp: Path) -> None
     assert ids == ["text-model", "json-model"]
     assert "image-model" not in ids
     assert "embed-model" not in ids
+    catalog = {item["id"]: item for item in openrouter.list_models()}
+    assert catalog["image-model"]["text"] is False and catalog["image-model"]["suitable"] is False
+    assert catalog["embed-model"]["suitable"] is False
+    from mwt.userdata import load_model_catalog
+    assert len(load_model_catalog("openrouter", root=tmp / "openrouter")) == 4
 
     LLMProviderClient.reset_counters()
     gemini = client(f"{root}/v1beta", "gemini", "gemini-test")
