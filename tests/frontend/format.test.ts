@@ -19,9 +19,11 @@ describe('format helpers', () => {
     expect(formatNumber(1234567, 'en')).toBe('1,234,567');
     expect(formatNumber(1234567, 'ko')).toBe('1,234,567');
     expect(formatNumber(1234567, 'ja')).toBe('1,234,567');
+    expect(formatNumber(1234567, 'zh')).toBe('1,234,567');
     expect(formatCompact(1250, 'en')).toBe('1.3K');
     expect(formatCompact(1250, 'ko')).toBe('1.3천');
     expect(formatCompact(1250, 'ja')).toBe('1250');
+    expect(formatCompact(1250, 'zh')).toBe(new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(1250));
   });
 
   it('formats bytes at boundaries and handles invalid values safely', () => {
@@ -55,6 +57,7 @@ describe('format helpers', () => {
     expect(formatDuration(3600, 'en')).toBe('1h 0m');
     expect(formatDate('not-a-date', 'en')).toBe('');
     expect(formatDate('2026-01-02T03:04:05Z', 'en')).toContain('2026');
+    expect(formatDate('2026-01-02T03:04:05Z', 'zh')).toBe(new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date('2026-01-02T03:04:05Z')));
   });
 
   it('formats dates, paths, locations, and detail labels', () => {

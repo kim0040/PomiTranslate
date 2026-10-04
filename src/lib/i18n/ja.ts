@@ -527,6 +527,7 @@ export const ja: Record<MessageKey, string> = {
   'lang.ko': '한국어',
   'lang.en': 'English',
   'lang.ja': '日本語',
+  'lang.zh': '简体中文',
 
   'about.title': 'PomiTranslate について',
   'about.lead': 'Minecraft Java Editionのワールドからプレイヤーに表示されるテキストを安全に抽出し、翻訳する無料のオープンソースツールです。',

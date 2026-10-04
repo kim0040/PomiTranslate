@@ -158,6 +158,7 @@ def main() -> None:
                             "worldDir": str(world),
                             "provider": "openai",
                             "model": "fixture",
+                            "uiLanguage": "zh",
                             "review_before_apply": False,
                             "credentialOwner": "rust",
                         },
@@ -168,6 +169,7 @@ def main() -> None:
                     {"v": 1, "id": "bootstrap", "type": "app.bootstrap", "payload": {"credentialOwner": "rust"}},
                 )
                 assert bootstrap["payload"]["settings"]["last_world_dir"] == str(world.resolve())
+                assert bootstrap["payload"]["settings"]["ui_language"] == "zh"
                 assert bootstrap["payload"]["worlds"][0]["path"] == str(world.resolve())
                 assert bootstrap["payload"]["worldInspection"]["validJavaWorld"] is True
                 assert bootstrap["payload"]["worldInspection"]["dataVersions"] == [

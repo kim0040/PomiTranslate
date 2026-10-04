@@ -35,6 +35,13 @@ MAX_SOURCE_OVERRIDES = 5000
 MAX_SOURCE_OVERRIDE_CHARS = 32_000
 MAX_SOURCE_OVERRIDES_BYTES = 1_048_576
 MAX_CUSTOM_PRICES = 1_000
+UI_LANGUAGES = frozenset({"ko", "en", "ja", "zh"})
+
+
+def normalize_ui_language(value: Any, *, field: str = "ui_language") -> str:
+    if not isinstance(value, str) or value not in UI_LANGUAGES:
+        raise ValueError(f"{field} must be one of: {', '.join(sorted(UI_LANGUAGES))}")
+    return value
 
 RESOURCE_PACK_OPTION_KEYS = frozenset(
     {"source_lang_files", "target_lang_file", "skip_if_target_exists"}

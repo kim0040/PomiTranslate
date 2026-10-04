@@ -1,6 +1,7 @@
 import type { ScanOptions, Settings } from './api';
 import type { MessageKey } from './i18n/index.svelte';
 import { resourcePackOptions } from './resource-pack';
+import { isLocale } from './i18n/locale';
 
 /** A complete, normalized copy of settings, so comparisons and drafts never share objects. */
 export function copySettings(value: Settings): Settings {
@@ -33,7 +34,7 @@ export function copySettings(value: Settings): Settings {
     external_resource_pack_paths: [...(value.external_resource_pack_paths ?? [])],
     skip_target_language_text: value.skip_target_language_text !== false,
     scan_options: normalizedScanOptions(value.scan_options),
-    ui_language: value.ui_language || 'ko',
+    ui_language: isLocale(value.ui_language) ? value.ui_language : 'ko',
     last_world_dir: value.last_world_dir || ''
   };
 }

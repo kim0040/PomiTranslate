@@ -528,6 +528,7 @@ export const ko = {
   'lang.ko': '한국어',
   'lang.en': 'English',
   'lang.ja': '日本語',
+  'lang.zh': '简体中文',
 
   'about.title': 'PomiTranslate 정보',
   'about.lead': 'Minecraft Java Edition 월드에서 플레이어에게 노출되는 텍스트를 안전하게 추출하고 번역하는 무료 오픈소스 도구입니다.',

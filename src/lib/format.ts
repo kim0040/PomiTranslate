@@ -2,7 +2,7 @@ import type { Locale, MessageKey } from './i18n/index.svelte';
 import { translate } from './i18n/index.svelte';
 import type { CandidateLocation } from './api';
 
-const BCP47: Record<Locale, string> = { ko: 'ko-KR', en: 'en-US', ja: 'ja-JP' };
+const BCP47: Record<Locale, string> = { ko: 'ko-KR', en: 'en-US', ja: 'ja-JP', zh: 'zh-CN' };
 
 export function formatNumber(value: number, locale: Locale): string {
   return new Intl.NumberFormat(BCP47[locale]).format(value);

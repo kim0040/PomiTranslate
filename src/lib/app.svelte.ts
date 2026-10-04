@@ -31,6 +31,7 @@ import { checkForUpdate, finishClose, installUpdate, onCloseRequested, onUpdateP
 import { resourcePackOptions } from './resource-pack';
 import { CandidateSource } from './candidates.svelte';
 import { hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
+import { detectSystemLocale, isLocale } from './i18n/locale';
 import { applyTheme, type ThemeChoice } from './theme';
 import { editErrors, emptyProgress, exceedsCap, reduceProgress, RESUMABLE_STATUSES, type JobProgress } from './workflow';
 import { fetchTranslationPage, TranslationReview } from './translation-review.svelte';
@@ -197,7 +198,7 @@ export class AppState {
   // --- derived numbers used across screens ---------------------------------------------------
 
   get locale(): Locale {
-    return (this.settings.ui_language as Locale) || 'ko';
+    return isLocale(this.settings.ui_language) ? this.settings.ui_language : 'ko';
   }
 
   get candidateCount(): number {
@@ -351,7 +352,10 @@ export class AppState {
       const boot = await callBackend<BootstrapPayload>('app.bootstrap');
       if (this.destroyed) return;
       this.notices = boot.notices;
-      this.settings = { ...defaultSettings(), ...boot.settings };
+      this.settings = {
+        ...defaultSettings(), ...boot.settings,
+        ui_language: isLocale(boot.settings.ui_language) ? boot.settings.ui_language : detectSystemLocale()
+      };
       this.settings.batch_size = numberOr(boot.settings.batch_size, 40);
       this.settings.temperature = numberOr(boot.settings.temperature, 0.3);
       this.settings.request_timeout = numberOr(boot.settings.request_timeout, 120);
