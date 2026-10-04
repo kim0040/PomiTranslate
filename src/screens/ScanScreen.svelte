@@ -66,7 +66,7 @@
     <section class="home-summary card" aria-label={t('scan.home.title')}>
       <div class="home-summary-head">
         <span class="ico" aria-hidden="true"><Icon name="clock" size={20} /></span>
-        <div><h2>{t('scan.home.title')}</h2><p class="muted">{baseName(app.worldDir)}</p></div>
+        <h2>{t('scan.home.title')}</h2>
       </div>
       <dl class="home-facts">
         <div><dt>{t('scan.home.lastScan')}</dt><dd>{lastScanDate}</dd></div>
@@ -213,7 +213,6 @@
   .home-summary { display: grid; grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.3fr); align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-4); }
   .home-summary-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
   .home-summary-head h2, .resume-card h2 { font-size: var(--text-md); }
-  .home-summary-head p { font-size: var(--text-sm); overflow-wrap: anywhere; }
   .home-summary .ico { width: 36px; height: 36px; }
   .home-facts { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin: 0; }
   .home-facts div { min-width: 110px; }

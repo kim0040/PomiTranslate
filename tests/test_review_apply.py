@@ -151,7 +151,7 @@ class ReviewApplyTests(unittest.TestCase):
         self.assertEqual(page["total"], 4)
         self.assertEqual(len(page["rows"]), 2)
         self.assertTrue(page["hasMore"])
-        self.assertEqual(page["counts"], {"all": 4, "translated": 1, "failed": 1, "kept": 1, "edited": 1})
+        self.assertEqual(page["counts"], {"all": 4, "translated": 1, "failed": 1, "kept": 1, "edited": 1, "unsent": 0, "errored": 1})
         for state, expected in {"translated": "Alpha", "failed": "Beta", "kept": "Gamma", "edited": "Delta"}.items():
             row = self.page(state=state)["rows"]
             self.assertEqual(len(row), 1)
@@ -234,6 +234,9 @@ class ReviewApplyTests(unittest.TestCase):
         self.assertEqual(self.page(state="failed")["total"], 0)
         self.assertEqual(self.job()["translation_cache"]["First"], "번역 First")
         self.assertEqual(result["usage"]["prompt_tokens"], 400)
+        # This call sent one request; the job, whose tokens are summed above, sent all of them.
+        self.assertEqual(result["jobProviderRequests"], 4)
+        self.assertEqual(result["usage"]["requests"], 4)
 
     def test_reapply_restores_own_backup_and_recovery_preserves_applied_bytes(self):
         self.scan(["First", "Second"])
@@ -305,6 +308,8 @@ class ReviewApplyTests(unittest.TestCase):
         self.assertEqual(self.call("translate.apply", **self.identity)["error"]["code"], "ALREADY_APPLIED")
         result = self.ok("translate.reapply", **self.identity)
         self.assertEqual(result["providerRequests"], 0)
+        self.assertGreater(result["jobProviderRequests"], 0)
+        self.assertEqual(result["jobProviderRequests"], result["usage"]["requests"])
         self.assertEqual(self.written(), ["번역 Good", "재시도 Bad"])
 
     def test_budget_provider_cost_stops_keeps_checkpoint_and_resumes_pending_only(self):
@@ -318,9 +323,23 @@ class ReviewApplyTests(unittest.TestCase):
         self.assertEqual(self.hashes(), before)
         self.assertEqual(len(self.job()["translation_cache"]), 1)
         self.assertEqual(self.ok("resume.status")["status"], "budget_stopped")
+        # Rows the cap kept from being sent are their own kind: not failures, but a retry sends them.
+        stopped = self.page(state="failed")
+        self.assertEqual({row["reason"] for row in stopped["rows"]}, {"budget_unsent"})
+        self.assertEqual([row["detail"] for row in stopped["rows"]], ["", ""])
+        self.assertEqual(stopped["counts"]["unsent"], 2)
+        self.assertEqual(stopped["counts"]["errored"], 0)
+        self.assertEqual(self.page(state="errored")["total"], 0)
+        self.assertEqual(self.page(state="unsent")["total"], 2)
+        self.assertEqual(stopped["meta"]["unsentCount"], 2)
+        self.assertEqual(stopped["meta"]["failedCount"], 2)
+        self.assertEqual(result["translation"]["failed"], 0)
+        self.assertEqual(result["translation"]["pending"], 2)
         self.settings(maxCostUsd=0)
         self.calls.clear()
         resumed = self.ok("translate.resume", apiKey="synthetic-test-key")
+        self.assertEqual(resumed["providerRequests"], 2)
+        self.assertEqual(resumed["jobProviderRequests"], 3)
         self.assertEqual(resumed["status"], "awaiting_review")
         self.assertEqual(self.calls, [["Second"], ["Third"]])
         self.assertAlmostEqual(resumed["usage"]["cost"], 0.15)
@@ -358,6 +377,17 @@ class ReviewApplyTests(unittest.TestCase):
         result = self.ok("translate.resume", apiKey="synthetic-test-key")
         self.assertEqual(result["status"], "awaiting_review")
         self.assertEqual(self.calls, [["Second"]])
+
+    def test_cancelled_run_marks_unsent_rows_without_the_budget_reason(self):
+        self.scan(["First", "Second"])
+        def cancelling(values):
+            self.cancel.write_text("cancel")
+            return {key: "번역 " + value for key, value in values.items()}
+        self.behavior = cancelling
+        self.assertEqual(self.start()["status"], "cancelled")
+        stopped = self.page(state="failed")
+        self.assertEqual([row["reason"] for row in stopped["rows"]], ["unsent"])
+        self.assertEqual(stopped["counts"]["errored"], 0)
 
     def test_older_checkpoint_without_additive_fields_resumes(self):
         self.scan()

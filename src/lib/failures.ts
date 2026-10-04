@@ -1,7 +1,7 @@
 import type { MessageKey } from './i18n/index.svelte';
 import type { EditReason } from './workflow';
 
-const CODES = ['timeout', 'auth', 'rate_limit', 'quota', 'invalid_response', 'content_filter', 'network', 'provider_error', 'unknown'] as const;
+const CODES = ['timeout', 'auth', 'rate_limit', 'quota', 'invalid_response', 'content_filter', 'network', 'provider_error', 'unknown', 'budget_unsent', 'unsent'] as const;
 
 /** Catalog key for a failure code. Anything the catalog does not know reads as "unknown", never as raw text. */
 export function failureKey(code: string | undefined): MessageKey {

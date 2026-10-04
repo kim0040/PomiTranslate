@@ -236,7 +236,8 @@
   .chip[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-soft-text); }
   .chip[aria-pressed='true'] .n { color: inherit; }
   @media (hover: hover) { .chip[aria-pressed='false']:hover { background: var(--bg-hover); } }
-  .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; }
+  /* The reduced-motion reset leaves a 0.01ms transition on every property, which holds the old column widths for one frame; a resized panel must be exact at once. */
+  .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; transition: none; }
   .workarea.wide { grid-template-columns: minmax(0, 1fr) 340px; }
   .workarea.wide.compact { grid-template-columns: minmax(0, 1fr) 280px; }
   .workarea.wide.empty-compact { grid-template-columns: minmax(0, 1fr) 40px; }

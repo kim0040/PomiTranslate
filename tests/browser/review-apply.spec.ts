@@ -78,7 +78,11 @@ test('a broken formatting code is refused per row, then a fixed edit is applied 
   expect(await requests(page, 'translate.retry_failed')).toHaveLength(0);
   const stats = page.locator('.stats');
   await expect(stats.locator('.stat').filter({ hasText: '월드에 적용됨' })).toContainText('5');
-  await expect(stats.locator('.stat').filter({ hasText: 'API 요청 수' })).toContainText('0');
+  // The apply call itself sent nothing, but the stat is the job's total (the translate run's request), like the tokens and cost next to it.
+  const requestStat = stats.locator('.stat').filter({ hasText: 'API 요청 수' });
+  await expect(requestStat.locator('.v')).toHaveText('1');
+  await expect(requestStat).toContainText('작업 전체');
+  expect((await requests(page, 'translate.apply')).length).toBe(2);
   await expect(stats.getByText('번역문 준비')).toHaveCount(0);
 });
 
@@ -245,10 +249,49 @@ test('hitting the cap stops with a clear explanation and can be continued once w
   await expect(callout).toContainText('지금까지의 번역은 보관되어 있어');
   await expect(page.locator('.stats').locator('.stat').filter({ hasText: '번역문 준비' })).toContainText('3');
   await expect(page.locator('.stats').getByText('월드에 적용됨')).toHaveCount(0);
+  // Rows the cap kept from being sent are their own count, not failures, and nothing says "unknown reason".
+  const stats = page.locator('.stats');
+  await expect(stats.locator('.stat').filter({ hasText: '비용 한도로 보내지 않음' }).locator('.v')).toHaveText('2');
+  await expect(stats.locator('.stat').filter({ hasText: '번역 실패' }).locator('.v')).toHaveText('0');
+  await expect(page.locator('main')).not.toContainText('알 수 없는 이유');
+  await expect(page.getByRole('heading', { name: '번역 실패 문장 목록' })).toHaveCount(0);
+  // Continuing is the way to send them.
+  await expect(callout.getByRole('button', { name: '이번만 한도 없이 이어서 번역' })).toBeVisible();
   await callout.getByRole('button', { name: '이번만 한도 없이 이어서 번역' }).click();
   await expect(reviewHeading(page)).toBeVisible();
   const resumes = await requests(page, 'translate.resume');
   expect(resumes.at(-1)?.payload?.budgetOverride).toBe(true);
+});
+
+test('rows the cost cap kept from sending are labeled as such in the review, not as an unknown failure', async ({ page }) => {
+  await toReview(page, 'scenario=run&fail=2&failCode=budget_unsent');
+  await row(page, 'Welcome to Roguefire').click();
+  await expect(page.locator('.detail .failed')).toContainText('비용 한도로 보내지 않았습니다');
+  await expect(page.locator('.detail .failed')).not.toContainText('알 수 없는 이유');
+  // The retry still sends them.
+  await expect(page.getByRole('button', { name: '실패한 2개 다시 번역' })).toBeVisible();
+});
+
+test('a cancelled result counts the unsent rows apart from failures and the retry button', async ({ page }) => {
+  await open(page, 'scenario=result-cancelled');
+  await step(page, '번역 진행');
+  await startButton(page).click();
+  const stats = page.locator('.stats');
+  await expect(stats.locator('.stat').filter({ hasText: '보내지 않은 문장' }).locator('.v')).toHaveText('4');
+  await expect(stats.locator('.stat').filter({ hasText: '번역 실패' }).locator('.v')).toHaveText('0');
+  await expect(page.getByRole('heading', { name: '번역 실패 문장 목록' })).toHaveCount(0);
+});
+
+test('a tiny cost cap and tiny estimates keep their significant digits', async ({ page }) => {
+  await open(page, 'scenario=run');
+  await step(page, '번역 진행');
+  const cap = page.getByLabel('비용 한도');
+  await cap.fill('0.0001');
+  await cap.press('Enter');
+  await expect(page.locator('main')).toContainText('US$0.0001');
+  // The estimate band is 0.000252 to 0.000504 dollars: never "US$0.00".
+  await expect(page.locator('main')).toContainText('US$0.00025');
+  await expect(page.locator('main')).not.toContainText(/US\$0\.00(?!\d)/);
 });
 
 test('failure reasons are readable per code, with the provider text behind "details"', async ({ page }) => {
@@ -295,6 +338,14 @@ test('a partly applied run lists every failure and offers the retry and the corr
   await expect(page.getByRole('button', { name: '실패한 2개만 다시 번역' })).toHaveClass(/btn-primary/);
   await expect(page.getByRole('button', { name: '번역문 수정' })).toBeVisible();
   await expect(page.getByRole('button', { name: '월드 폴더 열기' })).toBeVisible();
+  // The stat and the list agree, and the preview points to the full translations instead of repeating them.
+  await expect(page.locator('.stats').locator('.stat').filter({ hasText: '번역 실패' }).locator('.v')).toHaveText('2');
+  await expect(page.locator('.stats').locator('.stat').filter({ hasText: '보내지 않은 문장' })).toHaveCount(0);
+  const preview = page.locator('section').filter({ has: page.getByRole('heading', { name: '번역 결과 미리보기' }) });
+  await expect(preview.locator('tbody tr')).toHaveCount(3);
+  await preview.getByRole('button', { name: '전체 번역문 보기' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: '번역문 수정', exact: true })).toBeVisible();
+  expect(await requests(page, 'translations.page')).not.toHaveLength(0);
 });
 
 test('progress shows the time left after two batches and the latest translations, on one shared clock', async ({ page }) => {

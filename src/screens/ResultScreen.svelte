@@ -44,10 +44,15 @@
   $effect(() => {
     if (result && app.tableStatuses.includes(result.status) && failures.checkpoint === null && !failures.loading) void app.loadFailures();
   });
+  // The failure list holds only rows the AI got wrong. Rows never sent (the cost cap or a cancel stopped the
+  // run first) are counted apart, so the number, the list and the retry button always agree.
   const failedTotal = $derived(failures.checkpoint ? failures.total : (stats.failed ?? 0));
+  const unsentTotal = $derived(failures.checkpoint ? (failures.counts?.unsent ?? failures.meta?.unsentCount ?? 0) : (stats.pending ?? 0));
+  // A retry sends both kinds.
+  const retryTotal = $derived(failures.checkpoint ? failures.total + unsentTotal : 0);
   const written = $derived(status === 'completed' || status === 'partial');
   // A saved table exists and still has rows to send again.
-  const canRetryFailed = $derived(['partial', 'failed', 'needs_retry'].includes(status) && failures.checkpoint === true && failures.total > 0 && !!app.scan);
+  const canRetryFailed = $derived(['partial', 'failed', 'needs_retry'].includes(status) && failures.checkpoint === true && retryTotal > 0 && !!app.scan);
   // No saved table: a failed run can only be translated again from the start.
   const canRetranslate = $derived(['failed', 'needs_retry'].includes(status) && failures.checkpoint === false && !!app.scan);
   const canCorrect = $derived(written && failures.checkpoint === true && failures.meta?.applied === true && !!app.scan);
@@ -57,11 +62,14 @@
     // "Applied" only once the world was written; before that the same rows are "prepared" (U9).
     { label: t(written ? 'result.stat.applied' : 'result.stat.prepared'), value: stats.translated ?? 0, tone: written ? 'ok' : '' },
     { label: t('result.stat.unchanged'), value: stats.unchanged ?? 0, tone: '' },
-    { label: t('result.stat.failed'), value: stats.failed ?? 0, tone: (stats.failed ?? 0) > 0 ? 'bad' : '' },
+    { label: t('result.stat.failed'), value: failedTotal, tone: failedTotal > 0 ? 'bad' : '' },
+    ...(unsentTotal > 0 ? [{ label: t(status === 'budget_stopped' ? 'result.stat.unsentBudget' : 'result.stat.unsent'), value: unsentTotal, tone: 'warn' }] : []),
     { label: t('result.stat.kept'), value: stats.kept_original ?? 0, tone: (stats.kept_original ?? 0) > 0 ? 'warn' : '' },
     { label: t('result.stat.files'), value: result?.changedFileCount ?? 0, tone: '' },
-    { label: t('result.stat.requests'), value: result?.providerRequests ?? 0, tone: '' }
+    // The whole job, as the tokens and cost below are, not only the request of the call that just ended.
+    { label: t('result.stat.requests'), value: result?.jobProviderRequests ?? usage?.requests ?? result?.providerRequests ?? 0, tone: '' }
   ]);
+  const samples = $derived((result?.translationSamples ?? []).slice(0, canCorrect ? 3 : 12));
   const warnKnown = ['chunk_unreadable', 'file_unwritable', 'file_unreadable', 'command_unparsed'];
 </script>
 
@@ -84,7 +92,7 @@
           <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => app.startTranslate({ resume: true, budgetOverride: true })}><Icon name="refresh" size={18} /> {t('result.budgetResume')}</button>
           <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.goStep('run')}>{t('result.budgetChange')}</button>
         {:else if canRetryFailed}
-          <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => app.retryFailed()}><Icon name="refresh" size={18} /> {t('result.retryFailed', { count: formatNumber(failures.total, app.locale) })}</button>
+          <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => app.retryFailed()}><Icon name="refresh" size={18} /> {t('result.retryFailed', { count: formatNumber(retryTotal, app.locale) })}</button>
         {:else if canRetranslate}
           <button type="button" class="btn btn-primary" disabled={app.isBusy || !app.canRun} onclick={() => app.startTranslate({ resume: false })}><Icon name="refresh" size={18} /> {t('result.retranslate')}</button>
         {:else if resumable}
@@ -134,18 +142,21 @@
       </Callout>
     {/if}
 
-    {#if result.translationSamples?.length}
+    {#if samples.length}
       <section class="card samples" aria-labelledby="samples-title">
         <h2 id="samples-title">{t('result.samples')}</h2>
         <p class="muted">{t('result.samplesLead')}</p>
         <table>
           <thead><tr><th scope="col">{t('result.before')}</th><th scope="col">{t('result.after')}</th></tr></thead>
           <tbody>
-            {#each result.translationSamples as sample (sample.source)}
+            {#each samples as sample (sample.source)}
               <tr><td lang="en">{sample.source}</td><td>{sample.translated}</td></tr>
             {/each}
           </tbody>
         </table>
+        {#if canCorrect}
+          <div><button type="button" class="btn btn-secondary btn-sm" disabled={app.isBusy} onclick={() => app.openCorrections()}><Icon name="list" size={14} /> {t('result.viewAll')}</button></div>
+        {/if}
       </section>
     {/if}
 
