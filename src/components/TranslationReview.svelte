@@ -110,7 +110,6 @@
     review.reset();
   }
 
-  const failedCount = $derived(review.counts.failed);
   const retryCount = $derived(review.meta?.retryCount ?? review.counts.failed);
   const staleCount = $derived(review.meta?.glossaryRefreshCount ?? review.meta?.glossaryStaleCount ?? 0);
   const retryEstimate = $derived(review.meta?.retryEstimate ?? null);
@@ -180,11 +179,8 @@
       <h1>{corrections ? t('translationReview.correctionsTitle') : t('translationReview.title')}</h1>
       <p class="lead">{corrections ? t('translationReview.correctionsLead') : t('translationReview.lead')}</p>
     </div>
+    <!-- The filter chips already carry the per-state counts; only unsaved edits are news here. -->
     <div class="counts" role="status" aria-live="polite">
-      <span class="pill pill-success num">{t('translationReview.count.translated', { count: formatNumber(review.counts.translated, app.locale) })}</span>
-      {#if failedCount > 0}<span class="pill pill-danger num">{t('translationReview.count.failed', { count: formatNumber(failedCount, app.locale) })}</span>{/if}
-      <span class="pill pill-accent num">{t('translationReview.count.edited', { count: formatNumber(review.counts.edited, app.locale) })}</span>
-      {#if review.counts.glossary_mismatch > 0}<span class="pill pill-warning num">{t('translationReview.count.glossaryMismatch', { count: formatNumber(review.counts.glossary_mismatch, app.locale) })}</span>{/if}
       {#if review.dirtyCount > 0}<span class="pill pill-warning num">{t('translationReview.count.unsaved', { count: formatNumber(review.dirtyCount, app.locale) })}</span>{/if}
     </div>
   </header>

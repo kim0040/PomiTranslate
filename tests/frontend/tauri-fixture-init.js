@@ -308,7 +308,7 @@
     const glossaryMismatch = row.status === 'glossary_mismatch';
     return {
       id: row.id, source: row.source, kind: row.kind, occurrences: row.occurrences, ai: row.status === 'failed' ? '' : row.ai,
-      translated, edited: savedEdited, glossaryMismatch,
+      translated: row.edit !== undefined ? row.edit : row.status === 'failed' ? '' : row.ai,
       glossaryStale: glossaryStale(row),
       edited, glossaryMismatch,
       status: glossaryMismatch ? row.status : edited || drafts.has(row.id) ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
@@ -337,8 +337,6 @@
     return job.rows.filter(glossaryStale);
   }
   function pagePayload(body) {
-    const stale = job.rows.filter(glossaryStale);
-    const retry = job.rows.filter((row) => (row.status === 'failed' && row.edit === undefined) || glossaryStale(row));
     const drafts = new Set(body.draftIds || []);
     let rows = job.rows.map((row) => viewRow(row, drafts));
     const text = String(body.query || '').trim().toLocaleLowerCase();
