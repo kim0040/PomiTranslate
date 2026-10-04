@@ -245,6 +245,39 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(catalog["source"], "catalog")
             self.assertEqual(catalog["perMillionInput"], 3.0)
 
+    def test_estimate_counts_real_selected_blocks_and_one_reminder_per_matched_row(self) -> None:
+        glossary = normalize_entries([entry(f"term{i}", "가" * 500) for i in range(80)])
+        source = " ".join(row["source"] for row in glossary)
+        saved = {"provider": "openai", "model": "fixture-model", "batch_size": 1, "openrouter_reasoning": "disabled"}
+        records = [{"source": source}, {"source": "Unmatched row"}]
+        with tempfile.TemporaryDirectory(prefix="pomi-glossary-estimate-") as raw:
+            data = Path(raw)
+            with patch.object(desktop_entry, "_model_price", return_value={"input": .000001, "output": .000002}):
+                without = desktop_entry._estimate(records, saved, data)
+                estimate = desktop_entry._estimate(records, saved, data, glossary=glossary)
+            self.assertEqual(estimate["glossaryPromptChars"], len(prompt_block(glossary)))
+            self.assertGreater(estimate["inputTokens"] - without["inputTokens"], 12000)
+            self.assertGreater(estimate["cost"]["low"], without["cost"]["low"])
+            self.assertGreater(estimate["cost"]["high"], without["cost"]["high"])
+            self.assertEqual(estimate["requests"], 2)
+            self.assertEqual(estimate["requestRange"], {"low": 2, "high": 3})
+            self.assertEqual(estimate["glossaryRetryRequests"], 1)
+            self.assertGreater(estimate["inputTokensHigh"], estimate["inputTokens"])
+            config = core.merge_nested(core.DEFAULT_CONFIG, {"runtime": {"glossary_entries": glossary}})
+            translator = core.BatchTranslator(config)
+            provider = FakeProvider([{"0": "별칭"}, {"0": "가" * 500}, {"0": "다른 문장"}])
+            translator.client = provider
+            translator._translate_batch([source], 1)
+            translator._translate_batch(["Unmatched row"], 1)
+            self.assertEqual(len(provider.prompts), estimate["requestRange"]["high"])
+            self.assertIn(prompt_block(glossary), provider.prompts[0])
+            self.assertIn(prompt_block(glossary, reminder=True), provider.prompts[1])
+            self.assertNotIn("FIXED GLOSSARY", provider.prompts[2])
+            with patch.object(desktop_entry, "_model_price", return_value=None):
+                unknown = desktop_entry._estimate(records, saved, data, glossary=glossary)
+            self.assertIsNone(unknown["price"])
+            self.assertIsNone(unknown["cost"])
+
 
 if __name__ == "__main__":
     unittest.main()
