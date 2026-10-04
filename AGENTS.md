@@ -28,6 +28,8 @@ Linux Python23/Rust30/frontend62/browser114 PASS는 브랜치의 기존 기록�
 
 Phase2 이력은 `docs/history/phase2-completion-2026-10-01.md`와 `docs/history/sample-startup-validation-2026-10-01.md`를 따른다. Python20/frontend58/Rust28·native .mcc hash 복원·OpenRouter 최소 E2E는 당시 범위이며 후속 source의 native 증거로 복사하지 않는다. Desktop 항상 백업·앱 관리 backup/checkpoint, Legacy 유지, schema2 호환/schema3 부재 marker 복원을 유지한다.
 
+2026-10-04 상용 수준 UX 개편을 main에 통합했다: 적용 전 번역 검토·수정 재적용·실패만 재시도·비용 한도·용어집·설정 도우미·설정 탭·닫기 보호·OS 완료 알림·창 복원·중국어 간체 UI. browser fixture·Python·Rust·browser260 PASS이며 native 창·알림·실제 제공사·서명은 확인하지 않았다. UI 언어는 이제 ko/en/ja/zh다. [기록](docs/history/ux-overhaul-2026-10-04.md)
+
 ## 문서 정리 후 진입점
 
 사용자 문서: README.md(영어 메인) / docs/README.ko.md(한국어) / docs/user-guide.md / docs/privacy.md / docs/disclaimer.md. 작업 상태: docs/current-state.md / docs/follow-up-work.md. 이력: docs/history/. 라이선스: THIRD_PARTY_NOTICES.md / docs/legal/. 소개용 합성 screenshot은 docs/images/에서 의도적으로 추적하며 일반 output·report·world·DB·key는 제외한다. 과거 진행 저장은 checkpoint이며 최신 Phase2 완료 판정은 완료 기록을 따른다.
@@ -38,4 +40,4 @@ Phase2 이력은 `docs/history/phase2-completion-2026-10-01.md`와 `docs/history
 
 원격 URL은 2026-10-01 기존/새 주소의 동일 main SHA를 확인한 `https://github.com/kim0040/PomiTranslate.git`다. 원격 rename을 새로 실행한 것이 아니다. 로컬 checkout 폴더와 내부 mwt 이름은 유지한다.
 
-2026-10-02 현지화: README/사용 안내/개인정보/면책은 ko/en/ja/zh 문서를 제공한다. UI 언어는 여전히 ko/en/ja이며 zh는 영어 UI 화면을 사용하는 문서 언어다. [현지화 관리](docs/localization.md)의 catalog·SVG/PNG 생성·언어별 screenshot/manifest를 함께 갱신한다. 제품명·공식 부제·license 원문은 공통으로 보존한다. [작업 기록](docs/history/localization-2026-10-02.md)
+2026-10-02 현지화: README/사용 안내/개인정보/면책은 ko/en/ja/zh 문서를 제공한다. (2026-10-04부터 zh UI도 제공한다.) [현지화 관리](docs/localization.md)의 catalog·SVG/PNG 생성·언어별 screenshot/manifest를 함께 갱신한다. 제품명·공식 부제·license 원문은 공통으로 보존한다. [작업 기록](docs/history/localization-2026-10-02.md)

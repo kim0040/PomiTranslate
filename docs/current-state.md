@@ -1,4 +1,4 @@
-# 현재 상태 — 2026-10-02
+# 현재 상태 — 2026-10-04
 
 ## 판정
 
@@ -26,7 +26,7 @@
 - 같은 계정으로 DB와 key 파일을 모두 읽는 프로세스까지 막는 설계는 아니다. Windows permission 코드는 target typecheck만 통과했으며 native 검증 전이다.
 - OpenAI/Gemini/Anthropic/OpenRouter/Comet/Custom, provider endpoint 고정과 Custom wire format·URL 검증. Gemini는 헤더 인증, thinking 제어(3.x level/2.5 budget), 사고 토큰 사용량 합산, MAX_TOKENS 실패 처리. CLI 환경변수 호환과 Rust-owned sidecar 환경변수 차단을 구분한다.
 - 설정 그룹/disclosure, 종류별 scope 및 curated presets, 파일/key 규칙, global source overrides, performance/file retry/error 정책, 공개 JSON import/export/reset, literal `translate.py` 읽기 전용 preview, 명시적 확인 후 style helper.
-- System/Light/Dark 즉시 적용·설정 파일 저장·보기 메뉴 동기화·OS 변경 추적·시작 전 배경 적용, ko/en/ja semantic i18n. 중국어 UI는 현재 제공하지 않는다. 최신 macOS/Windows 창 확인은 남아 있다.
+- System/Light/Dark 즉시 적용·설정 파일 저장·보기 메뉴 동기화·OS 변경 추적·시작 전 배경 적용, ko/en/ja semantic i18n. 중국어 간체 UI는 2026-10-04부터 제공한다. 최신 macOS/Windows 창 확인은 남아 있다.
 - 도움말 화면·F1/⌘? 메뉴·첫 실행 Tour, 허용 목록 외부 링크·데이터 폴더 열기, About 앱 버전·license 뷰어. 공개 설정 import/export/reset과 전체 앱 두 단계 초기화(백업 유지, 저장된 키 삭제 선택).
 - 설정 파일 fsync·atomic replace·동일 내용 사본·손상본 보존/복구, app_prefs 테마·안내 동의 저장. 모델 catalog는 atomic write를 사용하며 설정과 같은 사본 복구는 구현하지 않았다.
 - updater 확인·자동 알림·작업 잠금·서명 검증 설치/재시작 경로 연결. 공개키는 비어 있고 signed release/latest.json 게시와 실제 업데이트 검증은 RELEASE-01에 남아 있다.
@@ -34,11 +34,13 @@
 - alternate app identifier는 명시적인 sidecar data root로 격리한다. 테스트 설정·DB·키·월드가 production root로 흘러가지 않는다.
 - 선택한 월드 밖으로 연결된 level/region/entity/resource pack은 읽기·API 전에 차단한다. resources.zip symlink는 내부 대상이어도 restore 경로 보존을 위해 차단한다. 큰 파일 지문/백업 해시는 스트리밍한다.
 
+2026-10-04 상용 수준 UX 개편: 적용 전 번역 검토(기본값)·행별 수정·실패한 문장만 다시 번역·적용 뒤 번역문 수정(작업 백업 복원 후 캐시 재적용, 중단 시 복구 snapshot·`reapply_interrupted`), 실패 이유 코드화, 비용 한도(`max_cost_usd`)·추론/용어집 여유를 포함한 추정·사용자 입력 단가, 전역·월드별 용어집(프롬프트 주입·불일치 1회 재요청·변경 시 적용 차단), 첫 실행 설정 도우미(저장하지 않은 키로 연결 확인·추천 모델·도착 언어 목록), 설정 탭(번역/스캔 범위/고급/앱)·표/칩 편집기, 진행 남은 시간·최근 번역·OS 완료 알림, 창 닫기/⌘Q 저장 확인(설정·도우미·용어집·검토 수정본)·작업 중 종료 보호 재확인, 창 크기·위치 복원, Rust 오류 코드화, 재방문 요약·백업 행 압축·후보 위치/`/tp` 복사·우클릭 메뉴·되돌리기, 중국어 간체 UI. 최종 gate check 0/0·frontend108·Python 전체·Rust63·browser260 PASS(macOS arm64 browser fixture). native 창·OS 알림·실제 제공사·설치본은 확인하지 않았다. 서명·공증·updater 키는 사용자 결정으로 제외. [기록](history/ux-overhaul-2026-10-04.md) · 남은 문제: [알려진 UI/UX 문제](ux-issues.md)
+
 2026-10-02 UI/UX 실사용 점검: 설정 이탈 시 저장 확인, 새 설치 설정 안내·돌아가기, 좁은 창 키보드 검토, toast 위치, 표시 언어 즉시 적용, 복원 확인 정리, 후속으로 시작 실패 시 도움말·정보 접근, 복원 후 다시 스캔 안내, 작업 영역 폭 기준 후보 상세 패널, 낮은 창의 검토 다음 단계 버튼 고정, 처음부터 다시 번역(비용 확인), 결과 화면 다음 행동·실패 목록 개수 안내 등. UI-only이며 Phase 상태는 바뀌지 않는다. [기록](history/ux-audit-2026-10-02.md) · 남은 문제: [알려진 UI/UX 문제](ux-issues.md)
 
 ## 문서·라이선스 정리
 
-2026-10-02 현지화 후속: 영어·한국어·일본어·중국어 간체 README/사용 안내/개인정보/면책을 같은 진입점으로 연결했다. 문자 에셋은 4개 언어의 공유4+안내16을 공통 catalog/SVG/PNG로 관리하며, 현재 UI 언어 ko/en/ja의 소개 화면9장을 합성 데이터로 다시 캡처했다. 중국어는 문서만 제공하며 영어 UI 화면을 명시한다. 타입 검사0오류/0경고·i18n3 PASS·문서 링크/이미지 hash/시각 검토는 이 범위의 결과이며 Phase3·native·release 완료 검증이 아니다. [문구·에셋 관리](localization.md) · [작업 기록](history/localization-2026-10-02.md)
+2026-10-02 현지화 후속: 영어·한국어·일본어·중국어 간체 README/사용 안내/개인정보/면책을 같은 진입점으로 연결했다. 문자 에셋은 4개 언어의 공유4+안내16을 공통 catalog/SVG/PNG로 관리하며, 현재 UI 언어 ko/en/ja의 소개 화면9장을 합성 데이터로 다시 캡처했다. 당시 중국어는 문서만 제공했고, 2026-10-04 중국어 UI와 중국어 소개 화면을 더했다. 타입 검사0오류/0경고·i18n3 PASS·문서 링크/이미지 hash/시각 검토는 이 범위의 결과이며 Phase3·native·release 완료 검증이 아니다. [문구·에셋 관리](localization.md) · [작업 기록](history/localization-2026-10-02.md)
 
 서비스 소개와 사용법은 root README(영어 메인)와 [한국어판](README.ko.md), 자세한 실행·복원은 user-guide, 비용·키 저장은 privacy, 개인 프로젝트/보증·책임 제한은 disclaimer로 구분했다. 기여자는 김현민(mini0227kim@gmail.com)이다. 기존 MIT를 유지하고 제3자 metadata 검토·미확인 플랫폼/배포 고지를 legal 문서와 LEGAL-01에 기록했다. 날짜별 기록은 history, 의도적인 합성 소개 화면은 images에서 관리한다. 2026-10-01 다국어 README(ko/en/ja/zh)를 같은 범위로 맞추고 user-guide에 설정·결과·CLI·문제 해결을 보강했고, 2026-10-02 메인 README를 영어로 전환하고 한국어판을 docs/README.ko.md로 옮기며 개인 프로젝트 배경 안내를 기여자 절로 이동했다. [2026-10-01 기록](history/docs-refresh-2026-10-01.md) · [2026-10-02 기록](history/readme-restructure-2026-10-02.md) 이번 문서 작업으로 유료 API·전체 matrix·installer 빌드를 실행하지 않았다.
 
