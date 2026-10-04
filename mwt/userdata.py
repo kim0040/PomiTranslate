@@ -343,6 +343,43 @@ def _job_key(world: Path | str) -> str:
     return str(Path(world).expanduser().resolve())
 
 
+def load_world_glossary(world: Path | str, root: Path | None = None) -> list[dict]:
+    """Load one world's glossary from app data, keyed exactly like its recent-job identity."""
+    path = user_data_dir(root) / "world-glossaries.json"
+    loaded = _read_settings_file(path) if path.exists() else None
+    worlds = loaded.get("worlds") if isinstance(loaded, dict) else None
+    entries = worlds.get(_job_key(world)) if isinstance(worlds, dict) else None
+    if not isinstance(entries, list):
+        return []
+    from mwt.glossary import normalize_entries
+
+    try:
+        return normalize_entries(entries, field="saved world glossary")
+    except ValueError:
+        return []
+
+
+def remember_world_glossary(world: Path | str, entries: list[dict], root: Path | None = None) -> list[dict]:
+    """Replace one world's glossary in app data; no file inside the world is touched."""
+    from mwt.glossary import normalize_entries
+
+    normalized = normalize_entries(entries, field="entries")
+    path = user_data_dir(root) / "world-glossaries.json"
+    key = _job_key(world)
+    with _settings_lock(root):
+        loaded = _read_settings_file(path) if path.exists() else None
+        if loaded is None:
+            if path.exists():
+                _keep_damaged_copy(path)
+            loaded = {"schema": SCHEMA, "worlds": {}}
+        worlds = loaded.get("worlds")
+        worlds = dict(worlds) if isinstance(worlds, dict) else {}
+        worlds[key] = normalized
+        document = {"schema": SCHEMA, "worlds": worlds}
+        durable_write_text(path, json.dumps(document, ensure_ascii=False, indent=2))
+    return normalized
+
+
 def _count(value) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0
 
@@ -424,7 +461,10 @@ def remember_app_prefs(updates: dict, root: Path | None = None) -> dict:
 
 
 # What a reset removes. Backups are never in this list: they are the only way back for a world.
-RESET_FILES = ("settings.json", "settings.backup.json", "settings.json.tmp", "settings.backup.json.tmp")
+RESET_FILES = (
+    "settings.json", "settings.backup.json", "settings.json.tmp", "settings.backup.json.tmp",
+    "world-glossaries.json", "world-glossaries.json.tmp",
+)
 RESET_DIRS = ("models", "scans", "jobs")
 
 

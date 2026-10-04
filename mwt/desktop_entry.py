@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -38,8 +39,17 @@ RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed", "awaiting_review", "
 REASONING_OUTPUT_FACTOR = 2
 
 
-def _settings_fingerprint(data_dir: Path) -> str:
+def _settings_fingerprint(data_dir: Path, world: Path | str | None = None) -> str:
     saved = _saved(data_dir)
+    from mwt.glossary import entries_hash, merge_entries, normalize_entries
+    from mwt.userdata import load_world_glossary
+
+    try:
+        global_glossary = normalize_entries(saved.get("glossary", []), field="saved glossary")
+    except ValueError:
+        global_glossary = []
+    world_glossary = load_world_glossary(world, data_dir) if world is not None else []
+    glossary = merge_entries(global_glossary, world_glossary)
     relevant = {
         key: saved.get(key, "")
         for key in (
@@ -62,6 +72,7 @@ def _settings_fingerprint(data_dir: Path) -> str:
     }
     relevant.update(
         {
+            "glossary_hash": entries_hash(glossary),
             "source_overrides": normalize_source_overrides(
                 saved.get("source_overrides", {}), field="saved source_overrides"
             ),
@@ -144,8 +155,10 @@ def _request_estimate(candidate_count: int, batch_size: int) -> int:
 
 
 def _model_price(saved: dict, data_dir: Path) -> dict | None:
-    """Per-token price from the model catalog the provider itself published, when it published one."""
+    """Prefer published per-token prices, then use a saved user price for this provider/model."""
     from mwt.userdata import load_model_catalog
+
+    from mwt.desktop_settings import normalize_custom_prices
 
     provider = str(saved.get("provider") or "")
     model = str(saved.get("model") or "")
@@ -158,10 +171,22 @@ def _model_price(saved: dict, data_dir: Path) -> dict | None:
             prompt = float(item.get("pricing_prompt"))
             completion = float(item.get("pricing_completion"))
         except (TypeError, ValueError):
-            return None
-        if prompt < 0 or completion < 0:
-            return None
-        return {"input": prompt, "output": completion, "perMillionInput": prompt * 1e6, "perMillionOutput": completion * 1e6}
+            break
+        if not math.isfinite(prompt) or not math.isfinite(completion) or prompt < 0 or completion < 0:
+            break
+        return {"input": prompt, "output": completion, "perMillionInput": prompt * 1e6, "perMillionOutput": completion * 1e6, "source": "catalog"}
+    try:
+        custom = normalize_custom_prices(saved.get("custom_prices", {}), field="saved custom_prices").get(f"{provider}/{model}")
+    except ValueError:
+        custom = None
+    if custom:
+        return {
+            "input": custom["input"] / 1_000_000,
+            "output": custom["output"] / 1_000_000,
+            "perMillionInput": custom["input"],
+            "perMillionOutput": custom["output"],
+            "source": "user",
+        }
     return None
 
 
@@ -223,6 +248,7 @@ def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
         "inputTokens": input_tokens,
         "outputTokens": output_tokens,
         "price": price,
+        "priceSource": price.get("source") if price else None,
         "cost": cost,
         "reasoningIncluded": reasoning,
     }
@@ -463,7 +489,7 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
         return {}
     try:
         current_scope = _scan_scope_fingerprint(data_dir)
-        current_translation = _settings_fingerprint(data_dir)
+        current_translation = _settings_fingerprint(data_dir, world)
     except (OSError, ValueError, RuntimeError):
         return {}
     preliminary: list[tuple[dict, dict, dict, dict]] = []
@@ -641,7 +667,16 @@ def _run_translator(
     from mwt.desktop_review import normalize_max_cost_usd
 
     max_cost_usd = normalize_max_cost_usd(saved.get("max_cost_usd", 0), field="saved max_cost_usd")
-    price = _model_price(saved, data_dir)
+    from mwt.glossary import entries_hash, merge_entries, normalize_entries
+    from mwt.userdata import load_world_glossary
+
+    try:
+        global_glossary = normalize_entries(saved.get("glossary", []), field="saved glossary")
+    except ValueError:
+        global_glossary = []
+    glossary_entries = merge_entries(global_glossary, load_world_glossary(world, data_dir))
+    glossary_hash = entries_hash(glossary_entries)
+    price = _model_price({**saved, "provider": provider, "model": model}, data_dir)
     config = merge_nested(
         DEFAULT_CONFIG,
         {
@@ -664,7 +699,7 @@ def _run_translator(
                 "authorized_external_pack_paths": [str(path) for path in selected_packs],
                 "expected_external_pack_fingerprints": external_pack_fingerprints or {},
                 "concurrency": int(saved.get("concurrency") or 4),
-                "translation_settings_fingerprint": _settings_fingerprint(data_dir),
+                "translation_settings_fingerprint": _settings_fingerprint(data_dir, world),
                 "on_translation_failure": "skip" if on_translation_failure == "skip" else "stop",
                 "max_batch_retries": int(max_batch_retries),
                 "continue_on_file_error": continue_on_file_error,
@@ -674,7 +709,9 @@ def _run_translator(
                 # The desktop keeps a finished job so its translations can be reviewed and corrected.
                 "keep_checkpoint": bool(scan_plan_id and not dry_run),
                 "max_cost_usd": 0.0 if budget_override else max_cost_usd,
-                "price": {"input": price["input"], "output": price["output"]} if price else None,
+                "price": {"input": price["input"], "output": price["output"], "source": price.get("source", "catalog")} if price else None,
+                "glossary_entries": glossary_entries,
+                "glossary_hash": glossary_hash,
                 "adopt_checkpoint": adopt_checkpoint,
                 "adopt_report": retry is not None,
                 "edits": edits or {},
@@ -720,6 +757,7 @@ def _run_translator(
         records = [_candidate_record(source, translator.occurrences.get(source)) for source in translator._candidate_order]
         report["candidate_preview"] = records[:candidate_limit]
         report["_candidate_records"] = records
+    report["price_source"] = price.get("source", "catalog") if price else None
     persisted_config = {
         **config,
         "scan": {**config["scan"], "overrides": persistent_source_overrides},
@@ -771,6 +809,16 @@ def _settings_payload(data_dir: Path, provider: str = "", *, check_keyring: bool
     if not saved.get("provider"):
         saved["provider"] = "openai"
     saved["openrouter_reasoning"] = normalize_reasoning(saved.get("openrouter_reasoning", "default"))
+    from mwt.desktop_settings import normalize_custom_prices
+    from mwt.glossary import normalize_entries
+    try:
+        saved["glossary"] = normalize_entries(saved.get("glossary", []), field="saved glossary")
+    except ValueError:
+        saved["glossary"] = []
+    try:
+        saved["custom_prices"] = normalize_custom_prices(saved.get("custom_prices", {}), field="saved custom_prices")
+    except ValueError:
+        saved["custom_prices"] = {}
     saved["source_overrides"] = normalize_source_overrides(
         saved.get("source_overrides", {}), field="saved source_overrides"
     )
@@ -883,6 +931,9 @@ def _translate_payload(report: dict) -> dict:
         "translationFailures": report.get("translation_failures", []),
         "keptOriginalSamples": report.get("kept_original_samples", []),
         "translationSamples": report.get("translation_samples", []),
+        "glossaryMismatchCount": len(report.get("glossary_mismatches") or []),
+        "glossaryMismatches": report.get("glossary_mismatches", []),
+        "priceSource": report.get("price_source"),
         # Everything this job has cost so far, not only the request that just ran.
         "usage": report.get("job_usage") or report.get("usage") or {},
     }
@@ -1000,6 +1051,56 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
     if kind == "notices.get":
         emit({"v": 1, "id": request_id, "type": "response.ok", "payload": payload()})
         return
+    if kind == "glossary.get":
+        from mwt.glossary import merge_entries, normalize_entries
+        from mwt.userdata import load_world_glossary
+
+        try:
+            global_entries = normalize_entries(_saved(data_dir).get("glossary", []), field="saved glossary")
+        except ValueError:
+            global_entries = []
+        world_entries = []
+        if body.get("world"):
+            world_value = body.get("world")
+            if not isinstance(world_value, str) or not world_value.strip():
+                raise RequestRefused("INVALID_REQUEST", "world must be a non-empty folder path")
+            world_entries = load_world_glossary(Path(world_value).expanduser(), data_dir)
+        emit({
+            "v": 1,
+            "id": request_id,
+            "type": "response.ok",
+            "payload": {
+                "global": global_entries,
+                "world": world_entries,
+                "effective": merge_entries(global_entries, world_entries),
+            },
+        })
+        return
+    if kind == "glossary.set":
+        from mwt.glossary import GlossaryValidationError, normalize_entries
+        from mwt.userdata import remember_user_settings, remember_world_glossary
+
+        scope = body.get("scope")
+        if scope not in {"global", "world"}:
+            raise RequestRefused("INVALID_REQUEST", "scope must be global or world")
+        try:
+            entries = normalize_entries(body.get("entries"), field="entries")
+        except GlossaryValidationError as exc:
+            raise RequestRefused("GLOSSARY_INVALID", str(exc), exc.details) from exc
+        if scope == "global":
+            remember_user_settings({"glossary": entries}, data_dir)
+        else:
+            world_value = body.get("world")
+            if not isinstance(world_value, str) or not world_value.strip():
+                raise RequestRefused("INVALID_REQUEST", "A world folder is required for a world glossary")
+            remember_world_glossary(Path(world_value).expanduser(), entries, data_dir)
+        emit({
+            "v": 1,
+            "id": request_id,
+            "type": "response.ok",
+            "payload": {"scope": scope, "entries": entries, "count": len(entries)},
+        })
+        return
     if kind == "settings.import_legacy":
         from mwt.desktop_legacy_import import parse_legacy_settings
 
@@ -1083,6 +1184,13 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         max_cost_usd = normalize_max_cost_usd(
             public_setting("maxCostUsd", "max_cost_usd", 0), field="maxCostUsd"
         )
+        from mwt.desktop_settings import normalize_custom_prices
+        from mwt.glossary import GlossaryValidationError, normalize_entries
+        try:
+            glossary = normalize_entries(public_setting("glossary", "glossary", []), field="glossary")
+        except GlossaryValidationError as exc:
+            raise RequestRefused("GLOSSARY_INVALID", str(exc), exc.details) from exc
+        custom_prices = normalize_custom_prices(public_setting("customPrices", "custom_prices", {}), field="customPrices")
         ui_language = str(body.get("uiLanguage") or saved.get("ui_language") or "ko")
         if ui_language not in {"ko", "en", "ja"}:
             raise ValueError("Unsupported interface language")
@@ -1177,6 +1285,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             "ui_language": ui_language,
             "review_before_apply": review_before_apply,
             "max_cost_usd": max_cost_usd,
+            "glossary": glossary,
+            "custom_prices": custom_prices,
         }
         if config["world_dir"] and Path(config["world_dir"]).expanduser().is_dir():
             path = str(Path(config["world_dir"]).expanduser().resolve())

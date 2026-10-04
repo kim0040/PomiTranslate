@@ -58,6 +58,7 @@
     { label: t(written ? 'result.stat.applied' : 'result.stat.prepared'), value: stats.translated ?? 0, tone: written ? 'ok' : '' },
     { label: t('result.stat.unchanged'), value: stats.unchanged ?? 0, tone: '' },
     { label: t('result.stat.failed'), value: stats.failed ?? 0, tone: (stats.failed ?? 0) > 0 ? 'bad' : '' },
+    { label: t('glossary.mismatchCount'), value: result?.glossaryMismatchCount ?? 0, tone: (result?.glossaryMismatchCount ?? 0) > 0 ? 'warn' : '' },
     { label: t('result.stat.kept'), value: stats.kept_original ?? 0, tone: (stats.kept_original ?? 0) > 0 ? 'warn' : '' },
     { label: t('result.stat.files'), value: result?.changedFileCount ?? 0, tone: '' },
     { label: t('result.stat.requests'), value: result?.providerRequests ?? 0, tone: '' }
@@ -123,12 +124,13 @@
         {/if}
       </dl>
     {/if}
+    {#if result.priceSource === 'user'}<p class="muted price-source" role="note">{t('settings.price.userBasis')}</p>{/if}
 
     {#if result.warnings?.length}
       <Callout tone="warning" title={t('result.warnings')}>
         <ul class="plain">
           {#each result.warnings as warning}
-            <li>{warnKnown.includes(warning.code) ? t(`scan.warn.${warning.code}` as MessageKey, { file: warning.file ?? '', count: warning.count ?? 0 }) : warning.message ?? t('scan.warn.unknown')}</li>
+            <li>{warning.code === 'GLOSSARY_MISMATCH' ? t('glossary.warning', { count: warning.count ?? result.glossaryMismatchCount ?? 0 }) : warnKnown.includes(warning.code) ? t(`scan.warn.${warning.code}` as MessageKey, { file: warning.file ?? '', count: warning.count ?? 0 }) : warning.message ?? t('scan.warn.unknown')}</li>
           {/each}
         </ul>
       </Callout>

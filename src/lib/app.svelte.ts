@@ -49,7 +49,7 @@ export const defaultSettings = (): Settings => ({
   provider: 'openai', model: '', base_url: '', wire_format: 'openai', target_language: '한국어', style_preset: 'neutral',
   openrouter_reasoning: 'default', style_prompt: '', custom_system_prompt: '', temperature: 0.3, batch_size: 40, request_timeout: 120, rpm_limit: 0,
   tpm_limit: 0, max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false, resource_pack_options: resourcePackOptions(), external_resource_pack_paths: [], skip_target_language_text: true,
-  max_file_write_retries: 2, continue_on_file_error: true, review_before_apply: true, max_cost_usd: 0, source_overrides: {},
+  max_file_write_retries: 2, continue_on_file_error: true, review_before_apply: true, max_cost_usd: 0, source_overrides: {}, glossary: [], custom_prices: {},
   ui_language: 'ko', last_world_dir: '', scan_options: normalizedScanOptions()
 });
 
@@ -1204,6 +1204,8 @@ export class AppState {
         continueOnFileError: s.continue_on_file_error,
         reviewBeforeApply: s.review_before_apply !== false,
         maxCostUsd: s.max_cost_usd ?? 0,
+        glossary: s.glossary ?? [],
+        customPrices: s.custom_prices ?? {},
         sourceOverrides: s.source_overrides ?? {},
         concurrency: s.concurrency,
         resourcePackEnabled: s.resource_pack_enabled,

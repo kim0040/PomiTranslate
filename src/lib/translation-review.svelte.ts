@@ -7,7 +7,7 @@ export const MAX_REVIEW_PAGES = 12;
 /** Longest edit the sidecar accepts. Longer text is refused there too; this only marks the row early. */
 export const MAX_EDIT_CHARS = 32000;
 
-export const emptyCounts = (): TranslationCounts => ({ all: 0, translated: 0, failed: 0, kept: 0, edited: 0 });
+export const emptyCounts = (): TranslationCounts => ({ all: 0, translated: 0, failed: 0, kept: 0, edited: 0, glossary_mismatch: 0 });
 
 export type TranslationPlan = { worldDir: string; scanPlanId: string };
 
@@ -76,7 +76,7 @@ export class TranslationReview {
 
   /** Rows that will be written by the next apply: translated by the AI or edited by hand. */
   get applyCount(): number {
-    return this.counts.translated + this.counts.edited;
+    return this.counts.translated + this.counts.edited + this.counts.glossary_mismatch;
   }
 
   private draftIds(): string[] {

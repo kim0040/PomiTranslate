@@ -16,7 +16,7 @@ from mwt.tokens import _without_trailing_reset, preserve_tokens, tokens_preserve
 # NBT stores a string with a 16-bit length; the core keeps the original instead of writing more.
 MAX_EDIT_BYTES = 30_000
 MAX_EDIT_CHARS = 32_000
-STATES = {"all", "translated", "failed", "kept", "edited"}
+STATES = {"all", "translated", "failed", "kept", "edited", "glossary_mismatch"}
 
 
 def load_job(checkpoint_path: Path) -> dict[str, Any]:
@@ -119,12 +119,19 @@ def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[st
     """Every string of the job, in scan order, with what would be written for it."""
     excluded = _excluded_ids(job)
     manual = _manual_by_source(job, saved_overrides)
+    report = job.get("report") if isinstance(job.get("report"), dict) else {}
+    mismatch_sources = {
+        str(item.get("source")) for item in report.get("glossary_mismatches", [])
+        if isinstance(item, dict) and isinstance(item.get("source"), str)
+    }
     rows: list[dict[str, Any]] = []
     for item in plan.get("candidates", []):
         if not isinstance(item, dict) or str(item.get("id")) in excluded:
             continue
         source = str(item.get("source") or "")
         status, shown, reason, detail, ai = _effective(source, job, manual)
+        if source in mismatch_sources and status in {"translated", "kept"}:
+            status, reason, detail = "glossary_mismatch", "glossary_mismatch", ""
         row = {
             "id": str(item.get("id")),
             "source": source,
@@ -156,7 +163,7 @@ def translations_page(
         if row["id"] in draft_ids:
             row["status"] = "edited"
     counts = {"all": len(rows)}
-    for name in ("translated", "failed", "kept", "edited"):
+    for name in ("translated", "failed", "kept", "edited", "glossary_mismatch"):
         counts[name] = sum(1 for row in rows if row["status"] == name)
     state = str(body.get("state") or "all")
     if state not in STATES:

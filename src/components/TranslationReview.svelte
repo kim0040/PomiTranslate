@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
-  import type { TranslationRow, TranslationState } from '../lib/api';
+  import type { GlossaryEntry, TranslationRow, TranslationState } from '../lib/api';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber, formatUsd } from '../lib/format';
   import { exceedsCap } from '../lib/workflow';
@@ -11,6 +11,7 @@
   import Callout from './Callout.svelte';
   import Dialog from './Dialog.svelte';
   import Icon from './Icon.svelte';
+  import GlossarySheet from './GlossarySheet.svelte';
 
   const review = app.translationReview;
   // A job that was written once can only be written again by restoring its own backup first.
@@ -21,6 +22,13 @@
   let confirmApply = $state(false);
   let confirmBudget = $state(false);
   let query = $state(review.query);
+  let glossaryOpen = $state(false);
+  let glossaryEntry = $state<GlossaryEntry | null>(null);
+
+  function openGlossary(sourceText = '', targetText = ''): void {
+    glossaryEntry = sourceText ? { source: sourceText, target: targetText, mode: 'translate', note: '', caseSensitive: false } : null;
+    glossaryOpen = true;
+  }
 
   function select(row: TranslationRow, open: boolean): void {
     selected = row;
@@ -79,7 +87,8 @@
     { value: 'translated', key: 'translationReview.state.translated' },
     { value: 'failed', key: 'translationReview.state.failed' },
     { value: 'kept', key: 'translationReview.state.kept' },
-    { value: 'edited', key: 'translationReview.state.edited' }
+    { value: 'edited', key: 'translationReview.state.edited' },
+    { value: 'glossary_mismatch', key: 'translationReview.state.glossaryMismatch' }
   ];
 
   function setQuery(value: string): void {
@@ -103,7 +112,9 @@
   const estimateText = $derived.by(() => {
     if (!estimate?.cost) return t('run.cost.unknown');
     const band = t('run.cost.band', { low: formatUsd(estimate.cost.low, app.locale), high: formatUsd(estimate.cost.high, app.locale) });
-    return estimate.reasoningIncluded ? `${band} · ${t('run.estimate.reasoning')}` : band;
+    const reasoning = estimate.reasoningIncluded ? ` · ${t('run.estimate.reasoning')}` : '';
+    const source = estimate.priceSource === 'user' ? ` · ${t('settings.price.userBasis')}` : '';
+    return `${band}${reasoning}${source}`;
   });
   const retryOverBudget = $derived(exceedsCap(estimate, app.settings.max_cost_usd));
   const actionCount = $derived(corrections ? review.dirtyCount : review.applyCount);
@@ -146,6 +157,7 @@
       <span class="pill pill-success num">{t('translationReview.count.translated', { count: formatNumber(review.counts.translated, app.locale) })}</span>
       {#if failedCount > 0}<span class="pill pill-danger num">{t('translationReview.count.failed', { count: formatNumber(failedCount, app.locale) })}</span>{/if}
       <span class="pill pill-accent num">{t('translationReview.count.edited', { count: formatNumber(review.counts.edited, app.locale) })}</span>
+      {#if review.counts.glossary_mismatch > 0}<span class="pill pill-warning num">{t('translationReview.count.glossaryMismatch', { count: formatNumber(review.counts.glossary_mismatch, app.locale) })}</span>{/if}
       {#if review.dirtyCount > 0}<span class="pill pill-warning num">{t('translationReview.count.unsaved', { count: formatNumber(review.dirtyCount, app.locale) })}</span>{/if}
     </div>
   </header>
@@ -184,11 +196,14 @@
         </button>
       {/each}
     </div>
+    <button type="button" class="btn btn-secondary btn-sm" disabled={!app.worldDir} onclick={() => openGlossary()}>
+      <Icon name="book" size={15} /> {t('glossary.worldButton')}
+    </button>
   </div>
 
   <div class="workarea" class:wide class:compact={workareaWidth < PANEL_FULL} bind:this={workarea}>
     <div class="tablewrap"><TranslationTable bind:this={table} {review} selectedId={selected?.id ?? ''} onSelect={select} /></div>
-    {#if wide}<div class="detailwrap"><TranslationDetail {review} row={selected} /></div>{/if}
+    {#if wide}<div class="detailwrap"><TranslationDetail {review} row={selected} onQuickAdd={openGlossary} /></div>{/if}
   </div>
 
   <footer class="foot">
@@ -219,10 +234,12 @@
 
 {#if !wide && selected && detailOpen}
   <Dialog title={t('translationReview.detail.title')} onClose={() => (detailOpen = false)}>
-    <TranslationDetail {review} row={selected} showHeading={false} />
+    <TranslationDetail {review} row={selected} onQuickAdd={openGlossary} showHeading={false} />
     {#snippet actions()}<button type="button" class="btn btn-primary" onclick={() => (detailOpen = false)}>{t('common.close')}</button>{/snippet}
   </Dialog>
 {/if}
+
+<GlossarySheet bind:open={glossaryOpen} world={app.worldDir} initialEntry={glossaryEntry} initialScope="world" />
 
 {#if confirmApply}
   <ApplyDialog {corrections} onClose={() => (confirmApply = false)} onConfirm={() => { confirmApply = false; void app.applyTranslations(); }} />

@@ -151,7 +151,7 @@ class ReviewApplyTests(unittest.TestCase):
         self.assertEqual(page["total"], 4)
         self.assertEqual(len(page["rows"]), 2)
         self.assertTrue(page["hasMore"])
-        self.assertEqual(page["counts"], {"all": 4, "translated": 1, "failed": 1, "kept": 1, "edited": 1})
+        self.assertEqual(page["counts"], {"all": 4, "translated": 1, "failed": 1, "kept": 1, "edited": 1, "glossary_mismatch": 0})
         for state, expected in {"translated": "Alpha", "failed": "Beta", "kept": "Gamma", "edited": "Delta"}.items():
             row = self.page(state=state)["rows"]
             self.assertEqual(len(row), 1)

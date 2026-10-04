@@ -16,6 +16,11 @@ export type ScanOptions = Record<ScanFlag, boolean> & {
   component_translate_key_prefixes: string[];
 };
 export type ResourcePackOptions = { source_lang_files: string[]; target_lang_file: string; skip_if_target_exists: boolean };
+export type GlossaryMode = 'translate' | 'keep';
+export type GlossaryEntry = { source: string; target: string; mode: GlossaryMode; note: string; caseSensitive: boolean };
+export type GlossaryScope = 'global' | 'world';
+export type GlossaryPayload = { global: GlossaryEntry[]; world: GlossaryEntry[]; effective: GlossaryEntry[] };
+export type CustomPrice = { input: number; output: number; updatedAt?: string };
 
 export type Settings = {
   provider: Provider | string;
@@ -39,6 +44,8 @@ export type Settings = {
   review_before_apply?: boolean;
   /** Spending cap in USD; 0 means no cap. */
   max_cost_usd?: number;
+  glossary?: GlossaryEntry[];
+  custom_prices?: Record<string, CustomPrice>;
   source_overrides?: Record<string, string>;
   concurrency?: number;
   resource_pack_enabled?: boolean;
@@ -109,7 +116,8 @@ export type Estimate = {
   sourceChars: number;
   inputTokens: number;
   outputTokens: number;
-  price: { input: number; output: number; perMillionInput: number; perMillionOutput: number } | null;
+  price: { input: number; output: number; perMillionInput: number; perMillionOutput: number; source?: 'catalog' | 'user' } | null;
+  priceSource?: 'catalog' | 'user' | null;
   cost: { low: number; high: number } | null;
   /** True when the high end already includes an allowance for reasoning tokens. */
   reasoningIncluded?: boolean;
@@ -169,6 +177,9 @@ export type TranslationResult = {
   candidateCount: number;
   changedFileCount: number;
   providerRequests?: number;
+  glossaryMismatchCount?: number;
+  glossaryMismatches?: { source: string; reason: 'glossary_mismatch' }[];
+  priceSource?: 'catalog' | 'user' | null;
   backupSetId?: string;
   recoverySetId?: string;
   errors?: { scope?: string; code?: string; message?: string; file?: string }[];
@@ -180,7 +191,7 @@ export type TranslationResult = {
   usage?: TranslationUsage;
 };
 
-export type TranslationState = 'all' | 'translated' | 'failed' | 'kept' | 'edited';
+export type TranslationState = 'all' | 'translated' | 'failed' | 'kept' | 'edited' | 'glossary_mismatch';
 
 export type TranslationRow = {
   id: string;
@@ -365,6 +376,14 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
   const result = backendQueue.then(run);
   backendQueue = result.then(() => undefined, () => undefined);
   return result;
+}
+
+export async function getGlossary(world?: string): Promise<GlossaryPayload> {
+  return callBackend<GlossaryPayload>('glossary.get', world ? { world } : {});
+}
+
+export async function setGlossary(scope: GlossaryScope, entries: GlossaryEntry[], world?: string): Promise<{ scope: GlossaryScope; entries: GlossaryEntry[]; count: number }> {
+  return callBackend<{ scope: GlossaryScope; entries: GlossaryEntry[]; count: number }>('glossary.set', { scope, entries, ...(world ? { world } : {}) });
 }
 
 export async function cancelBackend(): Promise<boolean> {

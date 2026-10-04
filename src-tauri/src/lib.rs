@@ -40,6 +40,8 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "settings.get",
     "settings.import_legacy",
     "settings.set",
+    "glossary.get",
+    "glossary.set",
     "credentials.delete",
     "worlds.list",
     "worlds.remember",
@@ -779,6 +781,8 @@ mod tests {
             "models.list",
             "prefs.set",
             "app.reset",
+            "glossary.get",
+            "glossary.set",
         ] {
             assert!(is_allowed_request(kind), "{kind} must be allowed");
         }
@@ -853,6 +857,8 @@ mod tests {
             "settings.import_legacy",
             "prefs.set",
             "app.reset",
+            "glossary.get",
+            "glossary.set",
             "scan.start",
             "candidates.page",
             "estimate.get",
