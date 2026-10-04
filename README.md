@@ -6,15 +6,16 @@
 
 English | [한국어](docs/README.ko.md) | [日本語](docs/README.ja.md) | [简体中文](docs/README.zh.md)
 
-The app interface is available in **Korean, English and Japanese**. Simplified Chinese is a documentation language. The **translation target language** is a separate setting and accepts your own language name.
+The app interface is available in **Korean, English, Japanese and Simplified Chinese**. The **translation target language** is a separate setting and accepts your own language name.
 
 When an adventure map greets you with signs, books and item descriptions you cannot read, PomiTranslate turns that text into a language you know. Scan the world first to see what would be translated, review the candidates, then apply your own translations or send the rest to an AI provider you choose — with a verified backup taken before anything is written.
 
 What you can do with PomiTranslate:
 
 - **Scan safely** — see what would be translated without changing world files or calling any API.
-- **Review and edit** — search, filter, exclude strings, or enter your own translations.
-- **Translate with AI** — OpenAI, Gemini, Anthropic, OpenRouter, Comet or a custom endpoint, with estimated request counts and costs before you start.
+- **Review and edit** — search, filter, exclude strings, or enter your own translations, and keep names consistent with a glossary.
+- **Translate with AI** — OpenAI, Gemini, Anthropic, OpenRouter, Comet or a custom endpoint, guided by a first-run setup assistant, with estimated request counts and a cost range before you start and an optional spending cap.
+- **Check before you apply** — review and edit the translations first, retry only the failed ones, and fix them again after applying without sending new AI requests.
 - **Apply with confidence** — changes are written only after a verified backup, and any earlier point can be restored.
 
 > **In development:** the main flows have been exercised in an isolated development app on macOS Apple Silicon. Signed installers, clean-machine Windows/Linux validation and the final paid-translation workflow remain unfinished. [Current status (Korean)](docs/current-state.md) · [Follow-up work (Korean)](docs/follow-up-work.md)
@@ -23,13 +24,14 @@ What you can do with PomiTranslate:
 
 ## How it works
 
-PomiTranslate reads the folder you select directly; it does not copy the world into the app. Work proceeds in five steps, and the scan and review steps never change world files.
+PomiTranslate reads the folder you select directly; it does not copy the world into the app. Work proceeds in six steps, and the scan, review and translation-review steps never change world files.
 
 1. **Select a world** — open a Java Edition world folder (with level.dat) or a server root folder. The app shows the dimensions it found, the world's data format (DataVersion), an in-world resource pack and the number of stored backups. Bedrock worlds, legacy `.mcr`, `.linear` and worlds in use by a running game or server are blocked before anything starts.
 2. **Scan** — find the text worth translating. This step calls no translation API and writes nothing. It summarizes unique strings, total occurrences, the estimated number of API requests and the text kinds it found, and reports unreadable chunks or unsupported formats as warnings while leaving the originals untouched.
 3. **Review** — search, sort and filter candidates by kind or state. Exclude strings you do not want translated, or type your own translation for a string. A sentence used in several places is translated once and applied everywhere.
-4. **Run** — check the target world, translation language, provider and model, the number of strings to send, the estimated request count and cost, and the safety backup, then start. World files stay untouched until every translation finishes successfully.
-5. **Result and restore** — review changed files, translated/failed/kept strings, tokens used and reported cost. If you want to undo the run, restore any backup point from Backups; the state right before a restore is kept as a recovery snapshot.
+4. **Run** — check the target world, translation language, provider and model, the number of strings to send, the estimated request count and cost range, an optional spending cap, and the safety backup, then start. The run shows its progress with the remaining time and the most recent translations, and stops at the cap if you set one. World files stay untouched while it translates.
+5. **Review and apply** — by default, the translations open in a review screen before anything is written. Edit a translation (formatting codes are validated), retry only the failed ones, then apply to the world after a verified backup. After applying, **Edit translations** restores that job's backup and reapplies the saved translations plus your edits without sending any AI request.
+6. **Result and restore** — review changed files, translated/failed/kept strings, tokens used and reported cost. If you want to undo the run, restore any backup point from Backups; the state right before a restore is kept as a recovery snapshot.
 
 ## Screenshots
 
@@ -62,13 +64,31 @@ The screenshots show the **English interface** of the current Svelte UI, capture
 - Search, sort (world order, source text, frequency, kind), filter by kind or state, and include or exclude in bulk.
 - See every occurrence of a string and enter manual translations. If you only apply manual translations, no translation API request is needed.
 - Skip text already written in the target language to avoid paying for re-translation.
+- Readable locations (dimension and coordinates), a copyable teleport command, a right-click or keyboard context menu, and undo for bulk include/exclude.
+- A scan home summary shows the last scan, the last translation and a card to continue an interrupted job.
+
+### Glossary
+
+- Keep a global glossary and a per-world glossary of terms to always translate a given way or to leave untranslated. Import and export JSON or CSV, or add a term from a candidate in one click.
+- Only the terms that appear in a batch are sent with its request. If an answer breaks a rule, the app asks once more with a reminder and otherwise flags the sentence for review.
+- Glossaries live in app data, never in the world folder. Changing the glossary after translating refreshes only the affected sentences before you apply.
 
 ### Providers and models
 
 - Configure OpenAI, Gemini, Anthropic, OpenRouter, Comet or a Custom endpoint (OpenAI/Anthropic-compatible wire formats). Available models depend on your provider and account.
 - Look up model lists and, when pricing is known, the price per million tokens. OpenRouter's public catalog is fetched automatically, and this lookup does not save settings.
 - Choose OpenRouter or Gemini reasoning as model default, off, or a supported effort. Models that require reasoning cannot be turned off, and an unsupported effort cannot be saved.
+- Set up everything in a first-run assistant: pick a provider (with a link to its key page), paste the key to check the connection automatically (the typed key is used for that one request and not stored until you save), choose a recommended model with its price, and set the target language and style.
 - Set the target language and a style preset (neutral, casual, formal, polite, story or a custom system prompt), plus extra instructions. The style-brief helper is a separate AI request and may cost money.
+- When the catalog has no price for a model, enter your own input and output prices and the estimate uses them.
+- Settings are split into Translation, Scan scope, Advanced and App tabs; the save bar appears only for changes that need saving, and file/key rules and manual translations have chip and table editors.
+
+### Review, apply and cost control
+
+- By default, translations open in a review screen before the world is written. Edit any row (formatting codes and placeholders are validated), see why a sentence failed in plain language, and retry only the failed ones.
+- After applying, **Edit translations** restores the job's backup and reapplies the cached translations plus your edits, with no AI requests and with crash-safe recovery.
+- Set a spending cap in USD: the app warns if the estimated maximum exceeds it, and a run that reaches the cap stops before writing and can be continued later. Estimates include reasoning and glossary allowances.
+- Progress shows the remaining time and recent translations, and an optional OS notification tells you when a long job finishes in the background.
 
 ### Safe writes and restore
 
@@ -92,21 +112,22 @@ The screenshots show the **English interface** of the current Svelte UI, capture
 ### Desktop experience
 
 - A Tauri 2 + Svelte 5 shell with a Python core; the desktop app opens no localhost server for its UI.
-- Korean, English and Japanese UI, with system, light and dark themes. The View menu zooms the interface from 75% to 200%.
-- Feels like a desktop app: unified macOS title bar, fixed sidebar and toolbar with only the content scrolling, menu shortcuts (`Cmd/Ctrl+O` open world, `Cmd+,` settings, `Cmd/Ctrl+F` find), drag a world folder onto the window, a list of worlds from your Minecraft saves folders (with icons), Dock/taskbar progress, and quit protection while a job runs.
+- Korean, English, Japanese and Simplified Chinese UI, with system, light and dark themes. The View menu zooms the interface from 75% to 200%.
+- Feels like a desktop app: unified macOS title bar, fixed sidebar and toolbar with only the content scrolling, menu shortcuts (`Cmd/Ctrl+O` open world, `Cmd+,` settings, `Cmd/Ctrl+F` find), drag a world folder onto the window, a list of worlds from your Minecraft saves folders (with icons), Dock/taskbar progress, quit protection while a job runs, a prompt before closing with unsaved settings, and a remembered window size and position.
 - Command blocks: `tellraw`/`title` text is read in both JSON and Java 1.21.5+ SNBT form; only changed strings are rewritten in their original quoting, and unreadable commands are kept and reported.
 - A CLI built on the same core. Keys saved in the desktop app and the CLI's keyring/environment variables are not shared automatically.
 
 ## Usage
 
 1. Close Minecraft or the server and make an independent **copy of the world**.
-2. In Settings, choose the provider, model and target language, and add any translation instructions. When using AI translation, enter and save your own API key.
+2. On first launch, follow the setup assistant (or open Settings) to choose the provider, model and target language, and add any translation instructions. When using AI translation, enter and save your own API key.
 3. In **Select world → Scan**, open the copy and read the coverage and warnings.
 4. In **Review**, exclude strings and enter manual translations.
-5. In **Run**, check the target, reasoning, external transfer and estimated cost, then start.
-6. Review the **Result** and verify the text in game. To undo, restore from **Backups**.
+5. In **Run**, check the target, reasoning, external transfer, estimated cost and spending cap, then start.
+6. In the translation review, fix any translations, retry failed ones and apply to the world. You can still edit translations after applying.
+7. Review the **Result** and verify the text in game. To undo, restore from **Backups**.
 
-Cost estimates can differ from the actual bill. Reasoning tokens, retries and model routing are not included in the estimate, so check your provider dashboard as well. The [user guide](docs/user-guide.en.md) covers settings, restore and CLI usage in more detail.
+Cost estimates can differ from the actual bill. Retries, account or routing differences and reporting delays are not captured by the estimate, so check your provider dashboard as well. The [user guide](docs/user-guide.en.md) covers settings, restore and CLI usage in more detail.
 
 ### Running from source
 

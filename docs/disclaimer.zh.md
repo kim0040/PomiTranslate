@@ -2,7 +2,7 @@
 
 [English](disclaimer.en.md) · [한국어](disclaimer.md) · [日本語](disclaimer.ja.md) · [简体中文](disclaimer.zh.md)
 
-> 本页是简体中文文档；应用界面目前仅支持韩语、英语和日语。
+> 本页是简体中文文档；应用界面支持韩语、英语、日语和简体中文。
 
 ## 个人项目
 
