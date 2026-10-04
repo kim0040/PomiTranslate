@@ -10,7 +10,7 @@ const filesUnder = (path) => readdirSync(resolve(root, path), { withFileTypes: t
 const sources = [...filesUnder('src'), 'tests/frontend/preview.html', 'tests/frontend/tauri-fixture-init.js', 'package.json', 'pnpm-lock.yaml', 'scripts/capture-docs.playwright.js'].sort();
 const sourceHash = sha(sources.map((path) => `${path}\0${sha(readFileSync(resolve(root, path)))}\n`).join(''));
 const images = [];
-for (const locale of ['ko', 'en', 'ja']) {
+for (const locale of ['ko', 'en', 'ja', 'zh']) {
   for (const screen of ['review', 'settings', 'run']) {
     const path = `locales/${locale}/${screen}.png`;
     const bytes = readFileSync(resolve(root, 'docs/images', path));

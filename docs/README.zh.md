@@ -37,28 +37,27 @@ PomiTranslate 会直接读取你选择的文件夹，不会把世界复制到应
 
 ## 界面截图
 
-> **英文界面截图：** 以下三张截图目前仍展示 Svelte UI 的 English interface，使用合成数据；应用本身已提供简体中文界面。
 
 ### 检查候选文本
 
-![英文界面：候选搜索、类型筛选和手动翻译编辑](images/locales/en/review.png)
+![候选搜索、类型筛选和手动翻译编辑](images/locales/zh/review.png)
 
 按类型或状态搜索和筛选，排除字符串，或直接填写自己的译文。还可以查看同一原文出现在哪些位置。`§` 等格式代码以及 `%s`、`{0}` 等占位符会保留，使游戏仍能正确显示文本。
 
 ### 提供商、模型和推理设置
 
-![英文界面：提供商、模型、推理模式和密钥保存状态](images/locales/en/settings.png)
+![提供商、模型、推理模式和密钥保存状态](images/locales/zh/settings.png)
 
 OpenRouter 和 Gemini 推理可以使用**模型默认值**、在支持时**关闭**或使用**自定义强度**。查询模型支持情况与保存设置是两个独立操作，保存/放弃更改栏固定在窗口底部。
 
 <details>
 <summary>执行前摘要</summary>
 
-![英文界面：推理、请求数、预计费用和外部传输提示](images/locales/en/run.png)
+![推理、请求数、预计费用和外部传输提示](images/locales/zh/run.png)
 
 </details>
 
-这些截图展示当前 Svelte UI 的**英文界面**，使用**合成数据**在 Chromium 中捕获。图中的模型、世界和费用仅用于说明；截图不证明实际用量、native 安装或特定模型支持。[截图说明](images/README.md)
+这些截图展示当前 Svelte UI 的**简体中文界面**，使用**合成数据**在 Chromium 中捕获。图中的模型、世界和费用仅用于说明；截图不证明实际用量、native 安装或特定模型支持。[截图说明](images/README.md)
 
 ## 功能
 
