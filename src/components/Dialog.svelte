@@ -5,12 +5,13 @@
   let {
     title,
     dismissible = true,
+    hideClose = false,
     size = 'normal',
     tone = 'normal',
     onClose,
     children,
     actions
-  }: { title: string; dismissible?: boolean; size?: 'normal' | 'wide'; tone?: 'normal' | 'danger'; onClose: () => void; children?: Snippet; actions?: Snippet } = $props();
+  }: { title: string; dismissible?: boolean; hideClose?: boolean; size?: 'normal' | 'wide'; tone?: 'normal' | 'danger'; onClose: () => void; children?: Snippet; actions?: Snippet } = $props();
 
   let dialog: HTMLDialogElement | undefined = $state();
   const titleId = `dialog-${Math.random().toString(36).slice(2, 8)}`;
@@ -38,7 +39,7 @@
 <dialog bind:this={dialog} class="dialog" class:wide={size === 'wide'} class:danger={tone === 'danger'} aria-labelledby={titleId} oncancel={handleCancel}>
   <div class="head">
     <h2 id={titleId}>{title}</h2>
-    {#if dismissible}
+    {#if dismissible && !hideClose}
       <button type="button" class="btn btn-quiet btn-icon btn-sm close" aria-label={t('common.close')} onclick={onClose}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
       </button>

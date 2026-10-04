@@ -80,6 +80,7 @@ export type BackupSummary = {
 export type CandidateLocation = {
   kind?: string;
   holder?: string;
+  dimension?: string;
   pos?: [number, number, number] | null;
   detail?: string;
   chunk?: [number, number];
@@ -181,6 +182,17 @@ export type ResumeStatus = {
   translatedCount?: number;
   reason?: string;
   backupSetId?: string;
+  lastJob?: LastJob | null;
+};
+
+export type LastJob = {
+  world: string;
+  at: number;
+  status: 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | string;
+  translated: number;
+  failed: number;
+  changedFiles: number;
+  candidateCount: number;
 };
 
 /** App state kept with the settings file (not in the web view's storage, which cleaners can clear). */
@@ -193,6 +205,7 @@ export type AppPrefs = {
   update_auto_check: boolean;
   update_last_check: number;
   update_skipped_version: string;
+  notify_on_finish: boolean;
 };
 
 export type BootstrapPayload = {
@@ -205,6 +218,7 @@ export type BootstrapPayload = {
   worldInspection: WorldInspection | null;
   backups: BackupSummary[];
   resume: ResumeStatus;
+  lastJob?: LastJob | null;
 };
 
 export type ProviderUsage = {
@@ -279,7 +293,7 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
       // Rust reports transport and shell failures as text. The queue prevents normal UI requests
       // from reaching its single-process BUSY guard.
       const text = cause instanceof Error ? cause.message : String(cause);
-      const code = ['CORE_HANDSHAKE_TIMEOUT', 'BOOTSTRAP_TIMEOUT'].includes(text)
+      const code = /^[A-Z][A-Z0-9_]+$/.test(text)
         ? text : /still running/i.test(text) ? 'BUSY' : 'TRANSPORT';
       throw new BackendError(text, code);
     }

@@ -16,7 +16,6 @@ const HOSTS: &[&str] = &[
     "platform.openai.com",
     "console.anthropic.com",
     "www.cometapi.com",
-    "cometapi.com",
 ];
 const CONTACT: &str = "mailto:mini0227kim@gmail.com";
 
@@ -31,7 +30,10 @@ pub fn allowed(url: &str) -> bool {
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.port().is_none()
-        && parsed.host_str().is_some_and(|host| HOSTS.contains(&host))
+        && parsed.host_str().is_some_and(|host| {
+            HOSTS.contains(&host)
+                && (host != "www.cometapi.com" || parsed.path() == "/console/token")
+        })
 }
 
 #[tauri::command]
@@ -84,6 +86,29 @@ pub fn reveal_data_folder<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::allowed;
+
+    #[test]
+    fn every_api_key_page_the_help_screen_lists_opens() {
+        for page in [
+            "https://platform.openai.com/api-keys",
+            "https://aistudio.google.com/app/apikey",
+            "https://console.anthropic.com/settings/keys",
+            "https://openrouter.ai/settings/keys",
+            "https://www.cometapi.com/console/token",
+        ] {
+            assert!(allowed(page), "{page} must open");
+        }
+        // The host is exact: a look-alike or a plain-http Comet address never opens.
+        for refused in [
+            "http://www.cometapi.com/console/token",
+            "https://www.cometapi.com.evil.example/console/token",
+            "https://api.cometapi.com/console/token",
+            "https://www.cometapi.com/console/other",
+            "https://cometapi.com@evil.example/console/token",
+        ] {
+            assert!(!allowed(refused), "{refused} must not open");
+        }
+    }
 
     #[test]
     fn only_known_https_addresses_and_the_contact_open() {

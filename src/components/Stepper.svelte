@@ -6,9 +6,21 @@
   const order = $derived(STEPS.indexOf(app.step));
   const isDone = (step: Step) => STEPS.indexOf(step) < order && app.stepReached[step];
   const label = (step: Step) => t(`step.${step}` as MessageKey);
+  let nav: HTMLElement | undefined = $state();
+  let width = $state(1200);
+  const compact = $derived(width < 980);
+
+  $effect(() => {
+    const toolbar = nav?.parentElement;
+    if (!toolbar) return;
+    width = toolbar.clientWidth;
+    const observer = new ResizeObserver(([entry]) => { width = entry.contentRect.width; });
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  });
 </script>
 
-<nav class="stepper" aria-label={t('step.list')}>
+<nav bind:this={nav} class="stepper" class:compact aria-label={t('step.list')}>
   <ol>
     {#each STEPS as step, index (step)}
       {@const current = app.step === step}
@@ -19,22 +31,25 @@
           class="step"
           disabled={!reachable && !current}
           aria-label={`${label(step)}${isDone(step) ? ` (${t('step.done')})` : current ? ` (${t('step.current')})` : ''}`}
+          title={label(step)}
           aria-current={current ? 'step' : undefined}
           onclick={() => app.goStep(step)}
         >
           <span class="marker" aria-hidden="true">
             {#if isDone(step)}<Icon name="check" size={14} />{:else}{index + 1}{/if}
           </span>
-          <span class="name">{label(step)}</span>
+          {#if !compact || current}<span class="name">{label(step)}</span>{/if}
           {#if isDone(step)}<span class="sr-only"> ({t('step.done')})</span>{/if}
           {#if current}<span class="sr-only"> ({t('step.current')})</span>{/if}
         </button>
       </li>
     {/each}
   </ol>
+  {#if compact}<span class="step-count" aria-hidden="true">{order + 1}/{STEPS.length}</span>{/if}
 </nav>
 
 <style>
+  .stepper { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
   ol { display: flex; align-items: center; gap: 0; margin: 0; padding: 0; list-style: none; }
   li { display: flex; align-items: center; }
   li + li::before { content: ''; width: clamp(12px, 3vw, 36px); height: 2px; background: var(--border-strong); margin-inline: var(--space-1); border-radius: 2px; }
@@ -46,5 +61,6 @@
   li.current .marker { border-color: var(--accent); color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft); }
   li.current .step { color: var(--text); }
   @media (hover: hover) { .step:not(:disabled):hover { background: var(--bg-hover); color: var(--text); } }
-  @media (max-width: 1080px) { li:not(.current) .name { display: none; } li:not(.current) .step { padding-inline: var(--space-1); } }
+  .stepper.compact li:not(.current) .step { padding-inline: var(--space-1); }
+  .step-count { flex: none; color: var(--text-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 </style>

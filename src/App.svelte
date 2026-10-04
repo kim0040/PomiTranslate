@@ -3,7 +3,7 @@
   import { app } from './lib/app.svelte';
   import { t, type MessageKey } from './lib/i18n/index.svelte';
   import { applyTheme, storedTheme, watchSystemTheme } from './lib/theme';
-  import { inShell, isMac, onDropPath, onMenu, openExternal, requestAttention, setMenuLabels, setTaskProgress, setWindowTitle } from './lib/native';
+  import { inShell, isMac, onDropPath, onMenu, openExternal, requestAttention, setMenuLabels, setTaskProgress, setUnsavedSettings, setWindowTitle } from './lib/native';
   import { baseName } from './lib/format';
   import Sidebar from './components/Sidebar.svelte';
   import Stepper from './components/Stepper.svelte';
@@ -111,6 +111,7 @@
   });
 
   const pageTitles: Record<string, MessageKey> = { backups: 'nav.backups', settings: 'nav.settings', about: 'nav.about', help: 'nav.help' };
+  $effect(() => { void setUnsavedSettings(app.settingsDirty); });
 </script>
 
 <a class="skip" href="#main-content">{t('app.skip')}</a>

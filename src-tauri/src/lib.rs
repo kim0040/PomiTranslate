@@ -1,4 +1,5 @@
 mod app_menu;
+mod close_guard;
 mod credentials;
 mod desktop_links;
 mod document_export;
@@ -8,6 +9,7 @@ mod sidecar_paths;
 mod startup;
 mod startup_theme;
 mod updates;
+mod window_state;
 mod zoom_menu;
 
 use std::{fs, path::PathBuf, sync::Mutex};
@@ -78,6 +80,16 @@ const KEY_INJECTED_REQUESTS: &[&str] = &[
     "translate.start",
     "translate.resume",
 ];
+
+pub(crate) const CODE_BUSY: &str = "BUSY";
+pub(crate) const CODE_CORE_STOPPED: &str = "CORE_STOPPED";
+
+/// Errors reach the page as a stable code, which the page maps to catalog text in the user's
+/// language. The English detail stays in the log: it never carries a path or a key.
+fn coded(code: &'static str, detail: &str) -> String {
+    eprintln!("[pomitranslate] {code}: {detail}");
+    code.to_string()
+}
 
 fn is_allowed_request(kind: &str) -> bool {
     ALLOWED_REQUESTS.contains(&kind)
@@ -157,7 +169,7 @@ fn drain_complete_lines(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
 fn credential_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map_err(|_| "Application data directory is unavailable".into())
+        .map_err(|_| coded("DATA_DIR_UNAVAILABLE", "Application data directory is unavailable"))
 }
 
 #[tauri::command]
@@ -188,24 +200,24 @@ async fn sidecar_request(
     let kind = request
         .get("type")
         .and_then(Value::as_str)
-        .ok_or("Missing request type")?
+        .ok_or_else(|| coded("INVALID_REQUEST", "Missing request type"))?
         .to_string();
     if !is_allowed_request(&kind) {
-        return Err("Unsupported request type".into());
+        return Err(coded("UNSUPPORTED_REQUEST", "Unsupported request type"));
     }
     let id = request
         .get("id")
         .and_then(Value::as_str)
-        .ok_or("Missing request id")?
+        .ok_or_else(|| coded("INVALID_REQUEST", "Missing request id"))?
         .to_string();
     if request.get("v").and_then(Value::as_u64) != Some(1) {
-        return Err("Unsupported protocol version".into());
+        return Err(coded("UNSUPPORTED_REQUEST", "Unsupported protocol version"));
     }
 
     let _request_guard = state
         .request_gate
         .try_lock()
-        .map_err(|_| "Another PomiTranslate operation is still running")?;
+        .map_err(|_| coded(CODE_BUSY, "Another PomiTranslate operation is still running"))?;
 
     let provider = request
         .get("payload")
@@ -215,7 +227,7 @@ async fn sidecar_request(
         .to_string();
     if kind == "credentials.delete" {
         if provider.is_empty() {
-            return Err("Missing credential provider".into());
+            return Err(coded("INVALID_REQUEST", "Missing credential provider"));
         }
         credentials.delete(&credential_root(&app)?, &provider)?;
         return Ok(serde_json::json!({
@@ -239,7 +251,7 @@ async fn sidecar_request(
         let payload = request
             .get_mut("payload")
             .and_then(Value::as_object_mut)
-            .ok_or("Invalid settings payload")?;
+            .ok_or_else(|| coded("INVALID_REQUEST", "Invalid settings payload"))?;
         provider_boundary::validate(payload)?;
         let supplied = zeroize::Zeroizing::new(match payload.remove("apiKey") {
             Some(Value::String(value)) => value,
@@ -256,7 +268,7 @@ async fn sidecar_request(
         let payload = request
             .get_mut("payload")
             .and_then(Value::as_object_mut)
-            .ok_or("Invalid provider payload")?;
+            .ok_or_else(|| coded("INVALID_REQUEST", "Invalid provider payload"))?;
         provider_boundary::validate(payload)?;
         // Frontend cannot bypass the selected store with an arbitrary supplied key.
         payload.remove("apiKey");
@@ -331,26 +343,26 @@ async fn exchange_sidecar(
     let id = request
         .get("id")
         .and_then(Value::as_str)
-        .ok_or("Missing request id")?
+        .ok_or_else(|| coded("INVALID_REQUEST", "Missing request id"))?
         .to_owned();
     let app_data = credential_root(app)?;
     let data_dir = sidecar_paths::core_data_dir(&app_data, &app.config().identifier)?;
     let report_dir = app_data.join("reports");
-    fs::create_dir_all(&report_dir).map_err(|_| "Cannot create the report directory")?;
+    fs::create_dir_all(&report_dir).map_err(|_| coded("DATA_DIR_UNAVAILABLE", "Cannot create the report directory"))?;
     let cancel_path = report_dir.join("active-operation.cancel");
     let mut receiver = {
         let mut active = state
             .process
             .lock()
-            .map_err(|_| "Sidecar state is unavailable")?;
+            .map_err(|_| coded("INTERNAL_STATE", "Sidecar state is unavailable"))?;
         if active.is_some() {
-            return Err("Another PomiTranslate operation is still running".into());
+            return Err(coded(CODE_BUSY, "Another PomiTranslate operation is still running"));
         }
         let _ = fs::remove_file(&cancel_path);
         let command = app
             .shell()
             .sidecar("pomi-sidecar")
-            .map_err(|_| "Packaged translation core is unavailable")?
+            .map_err(|_| coded("CORE_UNAVAILABLE", "Packaged translation core is unavailable"))?
             .args(sidecar_paths::arguments(
                 &data_dir,
                 &report_dir,
@@ -358,9 +370,9 @@ async fn exchange_sidecar(
             ));
         let (receiver, mut child) = command
             .spawn()
-            .map_err(|_| "Could not start the translation core")?;
+            .map_err(|_| coded("CORE_START_FAILED", "Could not start the translation core"))?;
         let mut line =
-            zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| "Invalid request")?);
+            zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| coded("INVALID_REQUEST", "Invalid request"))?);
         if let Some(secret) = request
             .get_mut("payload")
             .and_then(Value::as_object_mut)
@@ -373,7 +385,7 @@ async fn exchange_sidecar(
         line.push(b'\n');
         if child.write(&line).is_err() {
             let _ = child.kill();
-            return Err("Could not send the request to the translation core".into());
+            return Err(coded("CORE_WRITE_FAILED", "Could not send the request to the translation core"));
         }
         *active = Some(ActiveProcess {
             child,
@@ -387,19 +399,20 @@ async fn exchange_sidecar(
     let result: Result<Value, String> = 'events: loop {
         let event = match deadlines.receive(saw_hello, receiver.recv()).await {
             Ok(event) => event,
-            Err(code) => break Err(code.into()),
+            Err(code) => break Err(coded(code, "Translation core did not answer in time")),
         };
         match event {
             Some(CommandEvent::Stdout(bytes)) => {
                 stdout_buffer.extend_from_slice(&bytes);
                 if stdout_buffer.len() > 8 * 1024 * 1024 {
-                    break Err("Translation core returned an oversized message".into());
+                    break Err(coded("CORE_BAD_MESSAGE", "Translation core returned an oversized message"));
                 }
                 for line in drain_complete_lines(&mut stdout_buffer) {
                     let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-                        break 'events Err(
-                            "Translation core returned an invalid JSONL message".into()
-                        );
+                        break 'events Err(coded(
+                            "CORE_BAD_MESSAGE",
+                            "Translation core returned an invalid JSONL message",
+                        ));
                     };
                     if message.get("type").and_then(Value::as_str) == Some("system.hello") {
                         let version = message
@@ -407,15 +420,19 @@ async fn exchange_sidecar(
                             .and_then(|value| value.get("protocolVersion"))
                             .and_then(Value::as_u64);
                         if version != Some(1) {
-                            break 'events Err(
-                                "Translation core protocol version does not match".into()
-                            );
+                            break 'events Err(coded(
+                                "CORE_PROTOCOL_MISMATCH",
+                                "Translation core protocol version does not match",
+                            ));
                         }
                         saw_hello = true;
                         continue;
                     }
                     if !saw_hello {
-                        break 'events Err("Translation core did not complete its handshake".into());
+                        break 'events Err(coded(
+                            "CORE_PROTOCOL_MISMATCH",
+                            "Translation core did not complete its handshake",
+                        ));
                     }
                     if message.get("id").and_then(Value::as_str) == Some(id.as_str())
                         && message
@@ -435,7 +452,10 @@ async fn exchange_sidecar(
                 // The sidecar may include private world paths and provider errors.
             }
             Some(CommandEvent::Error(_)) | Some(CommandEvent::Terminated(_)) | None => {
-                break Err("Translation core stopped before it returned a result".into());
+                break Err(coded(
+                    CODE_CORE_STOPPED,
+                    "Translation core stopped before it returned a result",
+                ));
             }
             Some(_) => continue,
         }
@@ -476,11 +496,11 @@ fn cancel_active(state: State<'_, ActiveSidecar>) -> Result<bool, String> {
     let active = state
         .process
         .lock()
-        .map_err(|_| "Sidecar state is unavailable")?;
+        .map_err(|_| coded("INTERNAL_STATE", "Sidecar state is unavailable"))?;
     let Some(process) = active.as_ref() else {
         return Ok(false);
     };
-    fs::write(&process.cancel_path, b"cancel").map_err(|_| "Could not request cancellation")?;
+    fs::write(&process.cancel_path, b"cancel").map_err(|_| coded("CANCEL_FAILED", "Could not request cancellation"))?;
     Ok(true)
 }
 
@@ -497,12 +517,25 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(window_state::flags())
+                .build(),
+        )
         .manage(ActiveSidecar::default())
         .manage(credentials::Credentials::default())
+        .manage(close_guard::CloseGuard::default())
         .setup(|app| {
             zoom_menu::install(app)?;
             startup_theme::apply(app);
             Ok(())
+        })
+        .on_page_load(|webview, _payload| {
+            if webview.label() == "main" {
+                window_state::guard(webview.app_handle());
+                window_state::mark_ready();
+            }
         })
         .on_menu_event(|app, event| {
             if !app_menu::select(app, event.id().as_ref()) {
@@ -522,15 +555,29 @@ pub fn run() {
             desktop_links::data_locations,
             desktop_links::reveal_data_folder,
             update_check,
-            update_install
+            update_install,
+            close_guard::set_unsaved_settings,
+            close_guard::close_guard_ack,
+            close_guard::finish_close
         ])
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+                window_state::save_normal_geometry(window);
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let active = window.state::<ActiveSidecar>();
-                if active.request_gate.try_lock().is_err() {
-                    api.prevent_close();
-                    // Tell the window why it did not close, instead of ignoring the click.
-                    let _ = window.emit("pomi-close-blocked", true);
+                let job_running = window.state::<ActiveSidecar>().request_gate.try_lock().is_err();
+                let unsaved = window.state::<close_guard::CloseGuard>().unsaved();
+                match close_guard::decide(job_running, unsaved, close_guard::Source::Window) {
+                    close_guard::Decision::Allow => {}
+                    close_guard::Decision::BlockJob => {
+                        api.prevent_close();
+                        // Tell the window why it did not close, instead of ignoring the click.
+                        let _ = window.emit("pomi-close-blocked", true);
+                    }
+                    close_guard::Decision::AskUnsaved(source) => {
+                        api.prevent_close();
+                        close_guard::ask_page(window.app_handle(), source);
+                    }
                 }
             }
         })
@@ -539,16 +586,27 @@ pub fn run() {
         .run(|app, event| {
             // Quitting (Cmd+Q, the app menu, a session logout) skips CloseRequested. Hold it the same
             // way while a scan, write or restore owns the core, instead of killing it mid-write.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                let active = app.state::<ActiveSidecar>();
-                if code.is_none() && active.request_gate.try_lock().is_err() {
-                    api.prevent_exit();
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        let _ = window.emit("pomi-close-blocked", true);
+            // A request with an exit code came from the app itself (an update restart, or the
+            // answer to the unsaved-settings question): it always goes through.
+            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = &event {
+                let job_running = app.state::<ActiveSidecar>().request_gate.try_lock().is_err();
+                let unsaved = app.state::<close_guard::CloseGuard>().unsaved();
+                match close_guard::decide(job_running, unsaved, close_guard::Source::Quit) {
+                    close_guard::Decision::Allow => {}
+                    close_guard::Decision::BlockJob => {
+                        api.prevent_exit();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = window.emit("pomi-close-blocked", true);
+                        }
+                        return;
                     }
-                    return;
+                    close_guard::Decision::AskUnsaved(source) => {
+                        api.prevent_exit();
+                        close_guard::ask_page(app, source);
+                        return;
+                    }
                 }
             }
             #[cfg(target_os = "macos")]
@@ -725,6 +783,18 @@ mod tests {
                 "{kind} must not receive the API key"
             );
         }
+    }
+
+    #[test]
+    fn errors_that_reach_the_page_are_stable_codes_not_english_sentences() {
+        for code in [CODE_BUSY, CODE_CORE_STOPPED] {
+            assert!(
+                code.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                "{code} must look like a code"
+            );
+        }
+        assert_eq!(CODE_CORE_STOPPED, "CORE_STOPPED");
+        assert_eq!(coded(CODE_CORE_STOPPED, "detail stays in the log"), "CORE_STOPPED");
     }
 
     #[test]

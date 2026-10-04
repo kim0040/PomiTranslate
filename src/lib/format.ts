@@ -1,4 +1,4 @@
-import type { Locale } from './i18n/index.svelte';
+import type { Locale, MessageKey } from './i18n/index.svelte';
 import { translate } from './i18n/index.svelte';
 import type { CandidateLocation } from './api';
 
@@ -57,14 +57,44 @@ export function middleEllipsis(path: string, max = 56): string {
 
 const HOLDER_PREFIX = /^minecraft:/;
 
-/** "oak_sign (10, 64, 20)" or, when the position is unknown, the chunk. */
-export function describeLocation(location: CandidateLocation, locale: Locale): string {
-  const holder = (location.holder ?? '').replace(HOLDER_PREFIX, '');
-  const [x, y, z] = location.pos ?? [];
-  if (holder && location.pos) return `${holder} (${x}, ${y}, ${z})`;
-  if (holder) return holder;
+/** Dimension name, localized text kind and block coordinates; unknown holder IDs remain in a tooltip. */
+export function describeLocation(location: CandidateLocation, locale: Locale, fallbackKind?: string): string {
+  const dimension = dimensionId(location);
+  const dimensionLabel = dimension === 'minecraft:overworld' ? translate(locale, 'review.dimension.overworld')
+    : dimension === 'minecraft:the_nether' ? translate(locale, 'review.dimension.nether')
+    : dimension === 'minecraft:the_end' ? translate(locale, 'review.dimension.end') : dimension;
+  const kindId = location.kind || fallbackKind;
+  const kind = kindId ? translate(locale, `kind.${kindId}` as MessageKey)
+    : (location.holder ?? '').replace(HOLDER_PREFIX, '').replaceAll('_', ' ');
+  if (location.pos) {
+    const [x, y, z] = location.pos;
+    return `${dimensionLabel} · ${kind} · ${translate(locale, 'review.location.coordinates', { x, y, z })}`;
+  }
+  if (kind) return `${dimensionLabel} · ${kind}`;
   const [cx, cz] = location.chunk ?? [];
-  return cx === undefined || cz === undefined ? '' : translate(locale, 'detail.chunk', { x: cx, z: cz });
+  return cx === undefined || cz === undefined ? dimensionLabel : `${dimensionLabel} · ${translate(locale, 'detail.chunk', { x: cx, z: cz })}`;
+}
+
+/** Infer vanilla or custom dimension IDs from the scan-relative file path. */
+export function dimensionId(location: CandidateLocation): string {
+  if (location.dimension) return location.dimension;
+  const file = (location.file ?? '').replace(/\\/g, '/');
+  if (/(?:^|\/)DIM-1(?:\/|$)/.test(file)) return 'minecraft:the_nether';
+  if (/(?:^|\/)DIM1(?:\/|$)/.test(file)) return 'minecraft:the_end';
+  const custom = file.match(/(?:^|\/)dimensions\/([^/]+)\/([^/]+)(?:\/|$)/);
+  if (custom) return `${custom[1]}:${custom[2]}`;
+  return 'minecraft:overworld';
+}
+
+export function rawLocation(location: CandidateLocation): string {
+  const parts = [location.holder, location.pos ? `(${location.pos.join(', ')})` : '', location.file ?? ''].filter(Boolean);
+  return parts.join(' · ');
+}
+
+export function teleportCommand(location: CandidateLocation): string {
+  const pos = location.pos;
+  if (!pos || pos.length !== 3 || !pos.every(Number.isFinite)) return '';
+  return `/execute in ${dimensionId(location)} run tp @s ${pos.join(' ')}`;
 }
 
 /** "front:2" → "Front, line 2". Unknown details are shown as they came. */

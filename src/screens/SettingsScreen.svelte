@@ -852,14 +852,18 @@
 </div>
 
 {#if app.pendingLeave}
-  <Dialog title={t('settings.leave.title')} onClose={() => app.resolveLeave(false)}>
-    <p>{t('settings.leave.body')}</p>
+  <Dialog
+    title={t(app.pendingCloseSource ? 'settings.close.title' : 'settings.leave.title')}
+    hideClose={!!app.pendingCloseSource}
+    onClose={() => app.resolveLeave(false)}
+  >
+    <p>{t(app.pendingCloseSource ? 'settings.close.body' : 'settings.leave.body')}</p>
     {#if hasBlockingError}<p class="field-error" role="alert">{t('settings.fixErrors')}</p>{/if}
     {#snippet actions()}
-      <button type="button" class="btn btn-quiet leave-stay" disabled={!!app.busy} onclick={() => app.resolveLeave(false)}>{t('settings.leave.stay')}</button>
-      <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={leaveWithoutSaving}>{t('settings.leave.discard')}</button>
+      <button type="button" class="btn btn-quiet leave-stay" disabled={!!app.busy} onclick={() => app.resolveLeave(false)}>{t(app.pendingCloseSource ? 'settings.close.stay' : 'settings.leave.stay')}</button>
+      <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={leaveWithoutSaving}>{t(app.pendingCloseSource ? 'settings.close.discard' : 'settings.leave.discard')}</button>
       <button type="button" class="btn btn-primary" data-autofocus disabled={!!app.busy || hasBlockingError} onclick={saveAndLeave}>
-        {t(app.busy === 'settings' ? 'settings.saving' : 'settings.leave.save')}
+        {t(app.busy === 'settings' ? 'settings.saving' : app.pendingCloseSource ? 'settings.close.save' : 'settings.leave.save')}
       </button>
     {/snippet}
   </Dialog>

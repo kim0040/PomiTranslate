@@ -409,6 +409,16 @@ def main() -> None:
                 assert translated["payload"]["backupSetId"]
                 assert any(item["type"] == "translate.progress" for item in translation_events)
                 assert hashes(world) != original
+                job_bootstrap = exchange(
+                    proc,
+                    {"v": 1, "id": "last-job-bootstrap", "type": "app.bootstrap", "payload": {"worldDir": str(world), "credentialOwner": "rust"}},
+                )
+                last_job = job_bootstrap["payload"]["lastJob"]
+                assert last_job["world"] == world.name
+                assert last_job["at"] > 0 and last_job["status"] == "completed"
+                assert last_job["translated"] == 1 and last_job["failed"] == 0
+                assert last_job["changedFiles"] == translated["payload"]["changedFileCount"]
+                assert last_job["candidateCount"] == translated["payload"]["candidateCount"]
                 backups = exchange(
                     proc,
                     {"v": 1, "id": "backups", "type": "backups.list", "payload": {"worldDir": str(world)}},

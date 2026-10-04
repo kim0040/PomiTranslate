@@ -16,8 +16,10 @@ from mwt.desktop_entry import handle  # noqa: E402
 from mwt.userdata import (  # noqa: E402
     APP_PREF_DEFAULTS,
     load_app_prefs,
+    load_last_job,
     load_user_settings,
     remember_app_prefs,
+    remember_last_job,
     remember_model_catalog,
     remember_user_settings,
     settings_path,
@@ -57,11 +59,13 @@ def main() -> None:
 
         # App state: validated, durable, merged with defaults; a settings save keeps it.
         assert load_app_prefs(root) == APP_PREF_DEFAULTS
-        prefs = remember_app_prefs({"theme": "dark", "notice_accepted": True}, root)
+        assert APP_PREF_DEFAULTS["notify_on_finish"] is True
+        prefs = remember_app_prefs({"theme": "dark", "notice_accepted": True, "notify_on_finish": False}, root)
         assert prefs["theme"] == "dark" and prefs["notice_accepted"] and prefs["update_auto_check"] is True
+        assert prefs["notify_on_finish"] is False
         remember_user_settings({"model": "other"}, root)
         assert load_app_prefs(root)["theme"] == "dark", "a settings save must not drop app state"
-        for bad in ({"theme": "neon"}, {"notice_accepted": "yes"}, {"unknown": 1}, {"update_last_check": -1}):
+        for bad in ({"theme": "neon"}, {"notice_accepted": "yes"}, {"notify_on_finish": "yes"}, {"unknown": 1}, {"update_last_check": -1}):
             try:
                 remember_app_prefs(bad, root)
             except ValueError:
@@ -71,6 +75,17 @@ def main() -> None:
         assert response["type"] == "response.ok" and response["payload"]["prefs"]["tutorial_seen"] is True
         boot = call(root, "app.bootstrap", {"credentialOwner": "rust"})
         assert boot["payload"]["prefs"]["theme"] == "dark" and boot["payload"]["prefs"]["tutorial_seen"] is True
+        summary = remember_last_job(
+            Path("/synthetic/world"),
+            {"status": "partial", "translation": {"translated": 4, "failed": 2}, "changed_file_count": 3, "candidate_text_count": 8},
+            root,
+            now=1791064800,
+        )
+        assert summary == {"at": 1791064800.0, "status": "partial", "translated": 4, "failed": 2, "changedFiles": 3, "candidateCount": 8}
+        assert load_last_job(Path("/synthetic/world"), root) == {
+            "world": "world", "at": 1791064800.0, "status": "partial", "translated": 4,
+            "failed": 2, "changedFiles": 3, "candidateCount": 8,
+        }
 
         # Reset: needs an explicit confirmation, removes app state, keeps backups and damaged copies.
         remember_model_catalog("openrouter", [{"id": "m"}], root)
