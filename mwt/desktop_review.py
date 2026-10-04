@@ -134,6 +134,7 @@ def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[st
             continue
         source = str(item.get("source") or "")
         status, shown, reason, detail, ai = _effective(source, job, manual)
+        edited = status == "edited"
         if glossary is not None and shown and status != "failed":
             from mwt.glossary import output_matches
             mismatch = not output_matches(source, shown, glossary)
@@ -149,6 +150,8 @@ def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[st
             "kind": str(item.get("kind") or "other"),
             "occurrences": int(item.get("occurrences") or 1),
             "ai": ai,
+            "edited": edited,
+            "glossaryMismatch": bool(mismatch and shown and status != "failed"),
             "glossaryStale": source in (stale_sources or set()),
         }
         if reason:

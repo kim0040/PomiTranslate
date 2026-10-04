@@ -453,10 +453,313 @@ class ReviewApplyTests(unittest.TestCase):
         self.scan()
         self.calls.clear()
         with patch.object(entry, "_model_price", return_value={"input": .001, "output": .001}):
-            result = self.start(budgetOverride=True)
+            result = self.start(budgetDisabled=True)
         self.assertEqual(result["status"], "awaiting_review")
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(load_user_settings(self.data)["max_cost_usd"], 0.05)
+
+    def test_estimate_override_keeps_cap_and_disabled_is_one_run_on_start_resume_and_retry(self):
+        self.settings(maxCostUsd=0.05)
+        self.scan(["First", "Second", "Third"])
+        baseline = self.hashes()
+        self.cost = 0.05
+        capped = self.start(budgetOverride=True)
+        self.assertEqual(capped["status"], "budget_stopped")
+        self.assertEqual(capped["providerRequests"], 1)
+        self.assertAlmostEqual(capped["usage"]["cost"], 0.05)
+        self.calls.clear()
+        uncapped = self.start(budgetDisabled=True)
+        self.assertEqual(uncapped["status"], "awaiting_review")
+        self.assertEqual(uncapped["providerRequests"], 3)
+        self.assertAlmostEqual(uncapped["usage"]["cost"], 0.15)
+        self.assertEqual(self.calls, [["First"], ["Second"], ["Third"]])
+        self.assertEqual(load_user_settings(self.data)["max_cost_usd"], 0.05)
+        self.start(budgetOverride=True)
+        resumed = self.ok("translate.resume", apiKey="synthetic-test-key", budgetDisabled=True)
+        self.assertEqual(resumed["status"], "awaiting_review")
+        self.assertEqual(resumed["providerRequests"], 2)
+        self.start()
+        retry = self.ok("translate.retry_failed", scanPlanId=self.plan["scanPlanId"],
+                        apiKey="synthetic-test-key", budgetOverride=True)
+        self.assertEqual(retry["status"], "budget_stopped")
+        self.assertEqual(retry["providerRequests"], 1)
+        retry = self.ok("translate.retry_failed", scanPlanId=self.plan["scanPlanId"],
+                        apiKey="synthetic-test-key", budgetDisabled=True)
+        self.assertEqual(retry["status"], "awaiting_review")
+        self.assertEqual(self.hashes(), baseline)
+        self.assertEqual(load_user_settings(self.data)["max_cost_usd"], 0.05)
+        for kind in ("translate.start", "translate.resume", "translate.retry_failed"):
+            refused = self.call(kind, **self.identity, apiKey="synthetic-test-key", budgetDisabled="true")
+            self.assertEqual(refused["error"]["code"], "INVALID_REQUEST")
+
+    def test_retry_metadata_estimates_exact_stale_failed_union_and_refresh_only(self):
+        self.scan(["Mira", "Failed"])
+        baseline = self.hashes()
+        def fail(values):
+            if "Failed" in values.values():
+                raise RuntimeError("invalid JSON")
+            return {key: "미라" for key in values}
+        self.behavior = fail
+        self.start()
+        self.ok("glossary.set", scope="world", world=str(self.world), entries=[{"source": "Mira", "target": "미라"}])
+        meta = self.page()["meta"]
+        self.assertEqual(meta["failedCount"], 1)
+        self.assertEqual(meta["retryCount"], 2)
+        self.assertEqual(meta["retryEstimate"]["candidateCount"], 2)
+        self.assertEqual(meta["retryEstimate"]["requests"], 2)
+        self.assertEqual(meta["retryEstimate"]["requestRange"], {"low": 2, "high": 3})
+        self.assertEqual(meta["glossaryRefreshCount"], 1)
+        self.assertEqual(meta["glossaryRefreshEstimate"]["candidateCount"], 1)
+        self.calls.clear()
+        self.behavior = lambda values: {key: "미라" if value == "Mira" else "실패 문장" for key, value in values.items()}
+        self.ok("translate.retry_failed", scanPlanId=self.plan["scanPlanId"], apiKey="synthetic-test-key")
+        self.assertEqual(self.calls, [["Mira"], ["Failed"]])
+        self.assertEqual(self.hashes(), baseline)
+        meta = self.page()["meta"]
+        self.assertEqual(meta["retryCount"], 0)
+        self.assertIsNone(meta["retryEstimate"])
+        self.assertEqual(meta["glossaryRefreshCount"], 0)
+        self.assertIsNone(meta["glossaryRefreshEstimate"])
+
+    def test_world_glossary_estimate_get_counts_each_selected_batch_without_transmission(self):
+        self.scan(["Mira arrives", "Mira returns", "Other row"])
+        baseline = self.hashes()
+        before = self.ok("estimate.get", scanPlanId=self.plan["scanPlanId"])
+        glossary = [{"source": "Mira", "target": "가" * 500}]
+        self.ok("glossary.set", scope="world", world=str(self.world), entries=glossary)
+        after = self.ok("estimate.get", scanPlanId=self.plan["scanPlanId"])
+        self.assertGreater(after["inputTokens"], before["inputTokens"])
+        self.assertEqual(after["requestRange"], {"low": 3, "high": 5})
+        selected = self.ok("estimate.get", scanPlanId=self.plan["scanPlanId"],
+                           excludedCandidateIds=[self.ids["Mira returns"]])
+        self.assertEqual(selected["requestRange"], {"low": 2, "high": 3})
+        self.assertEqual(after["glossaryPromptChars"], selected["glossaryPromptChars"] * 2)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.hashes(), baseline)
+
+    def test_saved_edited_mismatch_keeps_origin_flag_even_with_a_draft_and_reverts(self):
+        self.settings(glossary=[{"source": "Mira", "target": "미라"}])
+        self.scan(["Mira"])
+        self.behavior = lambda values: {key: "미라" for key in values}
+        self.start()
+        self.ok("translate.apply", **self.identity, edits={self.ids["Mira"]: "별칭"}, acknowledgeGlossaryMismatch=True)
+        row = self.page()["rows"][0]
+        self.assertEqual(row["status"], "glossary_mismatch")
+        self.assertTrue(row["edited"])
+        self.assertTrue(row["glossaryMismatch"])
+        drafted = self.page(draftIds=[row["id"]])["rows"][0]
+        self.assertEqual(drafted["status"], "edited")
+        self.assertTrue(drafted["edited"])
+        self.assertTrue(drafted["glossaryMismatch"])
+        self.ok("translate.reapply", **self.identity, edits={row["id"]: None})
+        reverted = self.page()["rows"][0]
+        self.assertFalse(reverted["edited"])
+        self.assertFalse(reverted["glossaryMismatch"])
+        self.assertEqual(self.written(), ["미라"])
+
+    def test_reapply_gap_failure_is_restart_visible_and_second_reapply_uses_baseline(self):
+        self.scan(["First", "Second"])
+        baseline = self.hashes()
+        original = (self.world / "region/r.0.0.mca").read_bytes()
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        applied_hashes = self.hashes()
+        applied_bytes = (self.world / "region/r.0.0.mca").read_bytes()
+        with patch.object(entry, "_run_translator", side_effect=OSError("synthetic gap failure")):
+            response = self.call("translate.reapply", **self.identity, edits={self.ids["First"]: "수정"})
+        self.assertEqual(response["error"]["code"], "REAPPLY_INTERRUPTED")
+        recovery_id = response["error"]["details"]["recoverySetId"]
+        self.assertEqual(self.hashes(), baseline)
+        self.verified_backup(recovery_id, applied_bytes)
+        # Every read reloads disk, as a newly launched sidecar would, with no in-memory job.
+        self.assertEqual(self.job()["report"]["status"], "reapply_interrupted")
+        self.assertIsNone(self.job()["applied"])
+        self.assertEqual(self.page()["meta"]["status"], "reapply_interrupted")
+        self.assertEqual(self.page()["meta"]["recoverySetId"], recovery_id)
+        self.assertEqual(self.ok("resume.status")["status"], "reapply_interrupted")
+        self.assertEqual(self.ok("resume.status")["recoverySetId"], recovery_id)
+        self.assertEqual(self.call("translate.resume")["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.assertEqual(self.call("translate.start", **self.identity)["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.assertEqual(self.call("translate.retry_failed", scanPlanId=self.plan["scanPlanId"])["error"]["code"], "REAPPLY_INTERRUPTED")
+        result = self.ok("translate.reapply", **self.identity)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["recoverySetId"], recovery_id)
+        self.assertEqual(self.written(), ["수정", "번역 Second"])
+        self.verified_backup(result["backupSetId"], original)
+        self.ok("restore.start", backupSetId=recovery_id)
+        self.assertEqual(self.hashes(), applied_hashes)
+
+    def test_reapply_partial_write_failure_keeps_recovery_and_refuses_nonbaseline_retry(self):
+        self.scan(["First"])
+        write_region(self.world / "region/r.1.0.mca", {0: (2, nbt_bytes(compound("sign", string("Text1", '{"text":"Second"}'))), False)})
+        self.scan()
+        baseline = self.hashes()
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        applied = self.hashes()
+        write = core.WorldTranslator._write_world_bytes
+        written = []
+        def fail_second(writer, path, content):
+            written.append(path)
+            if len(written) == 2:
+                raise OSError("synthetic partial-write failure")
+            return write(writer, path, content)
+        with patch.object(core.WorldTranslator, "_write_world_bytes", new=fail_second):
+            response = self.call("translate.reapply", **self.identity, edits={self.ids["First"]: "수정"})
+        self.assertEqual(response["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.assertEqual(len(written), 2)
+        self.assertNotEqual(self.hashes(), baseline)
+        self.assertNotEqual(self.hashes(), applied)
+        recovery_id = response["error"]["details"]["recoverySetId"]
+        self.assertEqual(self.ok("resume.status")["status"], "reapply_interrupted")
+        before = self.hashes()
+        self.assertEqual(self.call("translate.reapply", **self.identity)["error"]["code"], "WORLD_CHANGED_SINCE_APPLY")
+        self.assertEqual(self.hashes(), before)
+        self.ok("restore.start", backupSetId=recovery_id)
+        self.assertEqual(self.hashes(), applied)
+        self.assertTrue(self.page()["meta"]["applied"])
+        self.ok("translate.reapply", **self.identity, edits={self.ids["First"]: "수정"})
+        self.assertEqual(self.written(), ["수정"])
+
+    def test_reapply_crash_after_restore_survives_old_checkpoint_on_restart(self):
+        self.scan(["First", "Second"])
+        baseline = self.hashes()
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        old_checkpoint = entry._checkpoint_path(self.data, self.plan["scanPlanId"]).read_bytes()
+        applied = self.hashes()
+        with patch.object(entry, "_run_translator", side_effect=SystemExit("synthetic process death")):
+            with self.assertRaises(SystemExit):
+                self.call("translate.reapply", **self.identity)
+        self.assertEqual(self.hashes(), baseline)
+        self.assertEqual(entry._checkpoint_path(self.data, self.plan["scanPlanId"]).read_bytes(), old_checkpoint)
+        self.assertEqual(self.job()["report"]["status"], "reapply_interrupted")
+        resume = self.ok("resume.status")
+        self.assertEqual(resume["status"], "reapply_interrupted")
+        self.ok("restore.start", backupSetId=resume["recoverySetId"])
+        self.assertEqual(self.hashes(), applied)
+        self.assertTrue(self.page()["meta"]["applied"])
+
+    def test_reapply_crash_after_partial_write_survives_core_checkpoint_replacement(self):
+        self.scan(["First"])
+        write_region(self.world / "region/r.1.0.mca", {0: (2, nbt_bytes(compound("sign", string("Text1", '{"text":"Second"}'))), False)})
+        self.scan()
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        applied = self.hashes()
+        write = core.WorldTranslator._write_world_bytes
+        attempted = []
+        crashed = []
+        def crash_second(writer, path, content):
+            attempted.append(path)
+            if len(attempted) == 2:
+                crashed.append(writer)
+                raise SystemExit("synthetic process death during write")
+            return write(writer, path, content)
+        with patch.object(core.WorldTranslator, "_write_world_bytes", new=crash_second):
+            with self.assertRaises(SystemExit):
+                self.call("translate.reapply", **self.identity, edits={self.ids["First"]: "수정"})
+        # The real process's death releases OS session locks; this in-process simulation must
+        # release only its synthetic-world locks before acting as the restarted sidecar.
+        crashed[0].release_write_lock()
+        raw_job = json.loads(entry._checkpoint_path(self.data, self.plan["scanPlanId"]).read_text())
+        self.assertTrue(raw_job["completed_region_files"])
+        self.assertNotEqual(raw_job["report"]["status"], "reapply_interrupted")
+        self.assertEqual(self.job()["report"]["status"], "reapply_interrupted")
+        self.assertIsNone(self.job()["applied"])
+        self.assertEqual(self.page()["meta"]["status"], "reapply_interrupted")
+        resume = self.ok("resume.status")
+        self.assertEqual(resume["status"], "reapply_interrupted")
+        self.ok("restore.start", backupSetId=resume["recoverySetId"])
+        self.assertEqual(self.hashes(), applied)
+
+    def test_reapply_cancel_after_restore_returns_interrupted_with_recovery(self):
+        self.scan(["First", "Second"])
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        applied = self.hashes()
+        self.cancel.write_text("synthetic cancellation")
+        response = self.call("translate.reapply", **self.identity)
+        self.assertEqual(response["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.cancel.unlink()
+        self.ok("restore.start", backupSetId=response["error"]["details"]["recoverySetId"])
+        self.assertEqual(self.hashes(), applied)
+
+    def test_reapply_failure_to_commit_completion_keeps_recovery_after_successful_writes(self):
+        self.scan(["First", "Second"])
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        applied = self.hashes()
+        durable = entry._durable_json
+        def fail_completion(path, value):
+            if path == entry._reapply_path(self.data, self.plan["scanPlanId"]) and value.get("phase") == "completed":
+                raise OSError("synthetic journal commit failure")
+            return durable(path, value)
+        with patch.object(entry, "_durable_json", side_effect=fail_completion):
+            response = self.call("translate.reapply", **self.identity, edits={self.ids["First"]: "수정"})
+        self.assertEqual(response["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.assertEqual(self.written(), ["수정", "번역 Second"])
+        self.assertEqual(self.job()["report"]["status"], "reapply_interrupted")
+        self.ok("restore.start", backupSetId=response["error"]["details"]["recoverySetId"])
+        self.assertEqual(self.hashes(), applied)
+
+    def test_reapply_journal_exists_before_first_restore_write_and_partial_restore_is_recoverable(self):
+        self.scan(["First"])
+        write_region(self.world / "region/r.1.0.mca", {0: (2, nbt_bytes(compound("sign", string("Text1", '{"text":"Second"}'))), False)})
+        self.scan()
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        applied = self.hashes()
+        replace = os.replace
+        attempts = []
+        def fail_restore(source, destination):
+            target = Path(destination)
+            if target.suffix == ".mca" and target.is_relative_to(self.world):
+                journal = json.loads(entry._reapply_path(self.data, self.plan["scanPlanId"]).read_text())
+                self.assertEqual(journal["phase"], "restoring")
+                recovery = BackupSet.open_existing(self.world, journal["recoverySetId"], backup_store(self.world, self.data))
+                for row in recovery.entries:
+                    if row.get("restoreAction") != "remove_created":
+                        self.assertEqual(file_sha256(recovery.root / row["path"]), applied[row["path"]])
+                attempts.append(target)
+                if len(attempts) == 2:
+                    raise OSError("synthetic restore failure")
+            return replace(source, destination)
+        with patch.object(os, "replace", side_effect=fail_restore):
+            response = self.call("translate.reapply", **self.identity)
+        self.assertEqual(response["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.assertEqual(len(attempts), 2)
+        self.assertNotEqual(self.hashes(), applied)
+        self.ok("restore.start", backupSetId=response["error"]["details"]["recoverySetId"])
+        self.assertEqual(self.hashes(), applied)
+
+    def test_reapply_recovery_removes_new_external_chunk_after_partial_write(self):
+        from mwt.region import SECTOR, external_chunk_path
+        target = self.world / "region/r.0.0.mca"
+        raw = nbt_bytes(compound("sign", string("Text1", '{"text":"Hello sign"}')))
+        name = b"Padding"
+        count = 255 * SECTOR - 5 - 32 - len(raw) - (1 + 2 + len(name) + 4)
+        raw = raw[:-1] + b"\x07" + len(name).to_bytes(2, "big") + name + count.to_bytes(4, "big") + bytes(count) + raw[-1:]
+        write_region(target, {0: (3, raw, False)})
+        self.scan()
+        self.behavior = lambda values: {key: "Short" for key in values}
+        self.start()
+        self.ok("translate.apply", **self.identity)
+        mcc = external_chunk_path(target, 0)
+        self.assertFalse(mcc.exists())
+        applied = self.hashes()
+        write = core.WorldTranslator._write_world_bytes
+        def fail_region(writer, path, content):
+            if path.suffix == ".mca":
+                raise OSError("synthetic failure after new external chunk")
+            return write(writer, path, content)
+        with patch.object(core.WorldTranslator, "_write_world_bytes", new=fail_region):
+            response = self.call("translate.reapply", **self.identity, edits={self.ids["Hello sign"]: "Long " + "x" * 200})
+        self.assertEqual(response["error"]["code"], "REAPPLY_INTERRUPTED")
+        self.assertTrue(mcc.exists())
+        self.ok("restore.start", backupSetId=response["error"]["details"]["recoverySetId"])
+        self.assertFalse(mcc.exists())
+        self.assertEqual(self.hashes(), applied)
 
     def test_cancel_keeps_checkpoint_and_can_resume(self):
         self.scan(["First", "Second"])

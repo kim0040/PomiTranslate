@@ -77,7 +77,7 @@ def test_public_catalog() -> None:
         with patch.dict(os.environ, {"POMI_API_KEY": "synthetic-inherited-key"}), patch("mwt.secrets.load_api_key", side_effect=AssertionError("public lookup must not read keys")), patch.object(LLMProviderClient, "_request_json", return_value=catalog) as network, patch.object(entry, "emit") as emit:
             entry.handle(request, data / "reports", data)
             method, url = network.call_args.args
-            assert method == "GET" and url == "https://openrouter.ai/api/v1/models?output_modalities=text"
+            assert method == "GET" and url == "https://openrouter.ai/api/v1/models"
             assert "Authorization" not in network.call_args.kwargs["headers"]
             reply = emit.call_args.args[0]
             assert reply["type"] == "response.ok" and reply["payload"]["cached"] is False

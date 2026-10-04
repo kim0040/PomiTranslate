@@ -224,12 +224,17 @@
   function glossaryHash(source) { return JSON.stringify(effectiveGlossary().filter((entry) => termMatches(source, entry))); }
   function glossaryStale(row) { return row.status !== 'failed' && job.glossaryHashes?.[row.source] !== glossaryHash(row.source); }
   const viewRow = (row, drafts = new Set()) => {
-    const edited = row.edit !== undefined || drafts.has(row.id);
+    const savedEdited = row.edit !== undefined;
+    const edited = savedEdited || drafts.has(row.id);
+    const translated = savedEdited ? row.edit : row.status === 'failed' ? '' : row.ai;
+    const glossaryMismatch = !!translated && (row.status === 'glossary_mismatch' || effectiveGlossary().some((entry) =>
+      termMatches(row.source, entry) && !termMatches(translated, { ...entry, source: entry.mode === 'keep' ? entry.source : entry.target, caseSensitive: entry.mode === 'translate' || entry.caseSensitive })
+    ));
     return {
       id: row.id, source: row.source, kind: row.kind, occurrences: row.occurrences, ai: row.status === 'failed' ? '' : row.ai,
-      translated: row.edit !== undefined ? row.edit : row.status === 'failed' ? '' : row.ai,
+      translated, edited: savedEdited, glossaryMismatch,
       glossaryStale: glossaryStale(row),
-      status: edited ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
+      status: drafts.has(row.id) ? 'edited' : glossaryMismatch ? 'glossary_mismatch' : edited ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
       ...(row.status === 'failed' && row.edit === undefined ? { reason: row.reason, detail: row.detail } : {})
     };
   };
@@ -243,12 +248,16 @@
     }
     return counts;
   }
-  function retryEstimate() {
-    const failed = job.rows.filter((row) => row.status === 'failed' && row.edit === undefined).length;
-    if (!failed) return null;
-    return { ...estimate, candidateCount: failed, requests: Math.ceil(failed / 40), cost: { low: 0.000042 * failed, high: 0.000084 * failed } };
+  function actionEstimate(rows) {
+    if (!rows.length) return null;
+    const requests = Math.ceil(rows.length / settings.batch_size);
+    const glossaryRetryRequests = rows.filter((row) => effectiveGlossary().some((entry) => termMatches(row.source, entry))).length;
+    return { ...estimate, candidateCount: rows.length, requests, requestRange: { low: requests, high: requests + glossaryRetryRequests }, glossaryRetryRequests,
+      cost: { low: 0.000042 * rows.length, high: 0.000084 * (rows.length + glossaryRetryRequests) } };
   }
   function pagePayload(body) {
+    const stale = job.rows.filter(glossaryStale);
+    const retry = job.rows.filter((row) => (row.status === 'failed' && row.edit === undefined) || glossaryStale(row));
     const drafts = new Set(body.draftIds || []);
     let rows = job.rows.map((row) => viewRow(row, drafts));
     const text = String(body.query || '').trim().toLocaleLowerCase();
@@ -261,9 +270,9 @@
     const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
     return {
       rows: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, counts: jobCounts(drafts),
-      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests }, retryEstimate: retryEstimate(),
+      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, recoverySetId: job.recoverySetId || '', failedCount: job.rows.filter((row) => row.status === 'failed').length, unsentCount: job.rows.filter(isUnsent).length, usage: { ...job.usage, requests: job.requests }, retryCount: retry.length, retryEstimate: actionEstimate(retry),
         glossaryActive: effectiveGlossary().length > 0, glossaryStaleCount: job.rows.filter(glossaryStale).length,
-        glossaryRefreshEstimate: job.rows.some(glossaryStale) ? { ...estimate, cost: { low: 0.00004, high: 0.00008 } } : null, glossaryRefreshed: !!job.glossaryRefreshed }
+        glossaryRefreshCount: stale.length, glossaryRefreshEstimate: actionEstimate(stale), glossaryRefreshed: !!job.glossaryRefreshed }
     };
   }
   function jobResult(status, extra = {}) {

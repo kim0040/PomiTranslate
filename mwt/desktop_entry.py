@@ -188,8 +188,59 @@ def _checkpoint_path(data_dir: Path, scan_plan_id: str) -> Path:
     return data_dir / "jobs" / f"{scan_plan_id}.checkpoint.json"
 
 
+def _reapply_path(data_dir: Path, scan_plan_id: str) -> Path:
+    return _checkpoint_path(data_dir, scan_plan_id).with_suffix(".reapply.json")
+
+
+def _durable_json(path: Path, value: dict) -> None:
+    """Atomic replacement, with file and directory flush before a world mutation."""
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(raw)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _reapply_journal(data_dir: Path, scan_plan_id: str) -> dict:
+    path = _reapply_path(data_dir, scan_plan_id)
+    if not path.is_file():
+        return {}
+    # A broken journal must fail closed, rather than reveal an obsolete applied checkpoint.
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("job"), dict):
+        raise ValueError("Invalid reapply recovery journal")
+    return value if value.get("phase") != "completed" else {}
+
+
+def _interrupted_job(journal: dict) -> dict:
+    job = {**journal["job"], "edits": dict(journal.get("edits", journal["job"].get("edits")) or {})}
+    job["resume"] = {**(job.get("resume") or {}), "excluded_candidate_ids": journal.get(
+        "excludedCandidateIds", (job.get("resume") or {}).get("excluded_candidate_ids", []))}
+    job["applied"] = None  # The previous applied fingerprint no longer describes this world.
+    job["report"] = {**(job.get("report") or {}), "status": "reapply_interrupted"}
+    job["reapply"] = {key: journal.get(key) for key in (
+        "recoverySetId", "backupSetId", "restoredWorldFingerprint", "restoredExternalFingerprints", "originalApplied",
+    )}
+    job["saved_at"] = journal.get("savedAt") or job.get("saved_at") or 0
+    return job
+
+
 def _request_estimate(candidate_count: int, batch_size: int) -> int:
-    """Translation batches across the whole world, so this is exact unless a provider call fails."""
+    """Initial translation batches, before glossary reminders or provider-error retries."""
     return -(-int(candidate_count) // max(1, int(batch_size))) if candidate_count else 0
 
 
@@ -255,10 +306,17 @@ def _reasoning_may_bill(saved: dict, data_dir: Path) -> bool:
     return choice != "disabled"  # Unknown model: assume it may think unless disabled.
 
 
-def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
-    """Requests are exact. Tokens and cost are an estimate calibrated on one real run: the cost
-    band's upper edge is twice the list price, the ratio that run showed, and counts reasoning
-    tokens as extra output when the model may think (REASONING_OUTPUT_FACTOR)."""
+def _estimate(records: list[dict], saved: dict, data_dir: Path, *, glossary: list[dict] | None = None) -> dict:
+    """Estimate selected batches plus up to one glossary reminder per matched source.
+
+    Tokens use the existing character heuristic, including the real selected glossary blocks.
+    The high band allows every matched row's reminder and possible reasoning, then doubles
+    list cost for ordinary estimation uncertainty. Provider-error retries are not bounded here.
+    """
+    from mwt.glossary import matching_entries, normalize_entries, prompt_block
+
+    if glossary is None:
+        glossary = normalize_entries(saved.get("glossary") or [], field="saved glossary")
     source_overrides = normalize_source_overrides(
         saved.get("source_overrides", {}), field="saved source_overrides"
     )
@@ -269,23 +327,46 @@ def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
     ]
     count = len(translatable)
     chars = sum(len(str(record.get("source") or "")) for record in translatable)
-    batch_size = int(saved.get("batch_size") or 40)
+    batch_size = max(1, int(saved.get("batch_size") or 40))
     requests = _request_estimate(count, batch_size)
-    input_tokens = requests * 450 + int(count * 4 + chars / 3.2)
-    output_tokens = int(count * 5 + chars * 0.85)
+    texts = [str(record.get("source") or "") for record in translatable]
+    glossary_chars = sum(len(prompt_block(matching_entries(texts[start:start + batch_size], glossary)))
+                         for start in range(0, count, batch_size))
+    matched_texts = [(text, matching_entries([text], glossary)) for text in texts]
+    reminder_texts = [(text, matched) for text, matched in matched_texts if matched]
+    reminder_requests = len(reminder_texts)
+    reminder_chars = sum(len(text) for text, _ in reminder_texts)
+    reminder_prompt_chars = sum(len(prompt_block(matched, reminder=True)) for _, matched in reminder_texts)
+    input_tokens = requests * 450 + math.ceil(count * 4 + (chars + glossary_chars) / 3.2)
+    # Fixed spellings may be much longer than the source terms. Include that known output
+    # expansion instead of pricing a 500-character target as a short source word.
+    def output_chars(text: str, matched: list[dict]) -> int:
+        return max(len(text), sum(len(e["target"] if e["mode"] == "translate" else e["source"]) for e in matched))
+
+    output_size = sum(output_chars(text, matched) for text, matched in matched_texts)
+    output_tokens = math.ceil(count * 5 + output_size * 0.85)
+    input_tokens_high = input_tokens + reminder_requests * 450 + math.ceil(
+        reminder_requests * 4 + (reminder_chars + reminder_prompt_chars) / 3.2)
+    output_tokens_high = output_tokens + math.ceil(reminder_requests * 5 + sum(
+        output_chars(text, matched) for text, matched in reminder_texts) * 0.85)
     price = _model_price(saved, data_dir)
     cost = None
     reasoning = _reasoning_may_bill(saved, data_dir)
     if price and count:
         low = input_tokens * price["input"] + output_tokens * price["output"]
         factor = REASONING_OUTPUT_FACTOR if reasoning else 1
-        cost = {"low": low, "high": (input_tokens * price["input"] + output_tokens * factor * price["output"]) * 2}
+        cost = {"low": low, "high": (input_tokens_high * price["input"] + output_tokens_high * factor * price["output"]) * 2}
     return {
         "candidateCount": count,
         "requests": requests,
+        "requestRange": {"low": requests, "high": requests + reminder_requests},
+        "glossaryRetryRequests": reminder_requests,
+        "glossaryPromptChars": glossary_chars,
         "sourceChars": chars,
         "inputTokens": input_tokens,
         "outputTokens": output_tokens,
+        "inputTokensHigh": input_tokens_high,
+        "outputTokensHigh": output_tokens_high,
         "price": price,
         "priceSource": price.get("source") if price else None,
         "cost": cost,
@@ -552,13 +633,19 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
             resume = checkpoint.get("resume") or {}
             report = checkpoint.get("report") or {}
             scan_plan_id = str(resume.get("scan_plan_id") or "")
+            journal = _reapply_journal(data_dir, scan_plan_id)
+            if journal:
+                checkpoint = _interrupted_job(journal)
+                resume = checkpoint.get("resume") or {}
+                report = checkpoint.get("report") or {}
+            interrupted = report.get("status") == "reapply_interrupted"
             plan = _load_scan_plan(data_dir, scan_plan_id)
             if (
                 checkpoint.get("version") != 2
-                or report.get("status") not in RESUMABLE_STATUSES
+                or (report.get("status") not in RESUMABLE_STATUSES and not interrupted)
                 or Path(str(checkpoint.get("world_dir") or "")).expanduser().resolve() != resolved_world
-                or plan.get("scopeFingerprint") != current_scope
-                or resume.get("translation_settings_fingerprint") != current_translation
+                or (not interrupted and plan.get("scopeFingerprint") != current_scope)
+                or (not interrupted and resume.get("translation_settings_fingerprint") != current_translation)
                 or plan.get("worldFingerprint") != resume.get("expected_world_fingerprint")
             ):
                 continue
@@ -576,7 +663,8 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
     candidates: list[dict] = []
     for checkpoint, resume, report, plan in preliminary:
         try:
-            if checkpoint.get("world_fingerprint") != current_world:
+            interrupted = report.get("status") == "reapply_interrupted"
+            if not interrupted and checkpoint.get("world_fingerprint") != current_world:
                 continue
             scan_plan_id = str(resume.get("scan_plan_id") or "")
             plan_candidates = [item for item in plan.get("candidates", []) if isinstance(item, dict)]
@@ -606,6 +694,7 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
                     "savedAt": float(checkpoint.get("saved_at") or 0),
                     "backupSetId": str(report.get("backup_set_id") or ""),
                     "status": str(report.get("status") or ""),
+                    "recoverySetId": str((checkpoint.get("reapply") or {}).get("recoverySetId") or ""),
                     "translatedCount": len(checkpoint.get("translation_cache") or {}),
                     "failedCount": len(checkpoint.get("failures") or {}),
                     "reason": next(
@@ -651,6 +740,7 @@ def _run_translator(
     adopt_checkpoint: dict | None = None,
     retry: tuple[list[str], list[str]] | None = None,
     budget_override: bool = False,
+    budget_disabled: bool = False,
 ) -> dict:
     import os
 
@@ -761,7 +851,9 @@ def _run_translator(
                 "apply_only": bool(apply_only),
                 # The desktop keeps a finished job so its translations can be reviewed and corrected.
                 "keep_checkpoint": bool(scan_plan_id and not dry_run),
-                "max_cost_usd": 0.0 if budget_override else max_cost_usd,
+                # An estimate override grants a start only. Unlimited spending is a separate
+                # explicit, one-run authorization and never changes the saved preference.
+                "max_cost_usd": 0.0 if budget_disabled else max_cost_usd,
                 "price": {"input": price["input"], "output": price["output"], "source": price.get("source", "catalog")} if price else None,
                 "glossary_entries": glossary_entries,
                 "glossary_hash": glossary_hash,
@@ -968,6 +1060,9 @@ def _load_job(data_dir: Path, scan_plan_id: str, world: Path) -> dict:
     from mwt.desktop_review import load_job
 
     job = load_job(_checkpoint_path(data_dir, scan_plan_id))
+    journal = _reapply_journal(data_dir, scan_plan_id)
+    if journal:
+        job = _interrupted_job(journal)
     try:
         same_world = Path(str(job.get("world_dir") or "")).expanduser().resolve() == world.expanduser().resolve()
     except (OSError, RuntimeError):
@@ -1040,26 +1135,32 @@ def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_d
     page = translations_page(plan, job, overrides, body, glossary=glossary, stale_sources=set(stale))
     rows = [row for row in job_rows(plan, job, overrides) if row["status"] == "failed"]
     failed_records = [{"source": row["source"]} for row in rows]
+    retry_sources = list(dict.fromkeys(stale + [row["source"] for row in rows]))
+    retry_records = [{"source": text} for text in retry_sources]
     applied = job.get("applied") or {}
     report = job.get("report") or {}
     page["meta"] = {
         "status": str(report.get("status") or ""),
         "applied": bool(applied),
-        "backupSetId": str(applied.get("backup_set_id") or ""),
+        "backupSetId": str(applied.get("backup_set_id") or (job.get("reapply") or {}).get("backupSetId") or ""),
+        "recoverySetId": str((job.get("reapply") or {}).get("recoverySetId") or ""),
         "failedCount": len(failed_records),
         "unsentCount": sum(1 for row in rows if row.get("reason") in UNSENT_REASONS),
         "usage": job.get("usage_total") or {},
-        "retryEstimate": _estimate(failed_records, saved, data_dir) if failed_records else None,
+        "retryCount": len(retry_records),
+        "retryEstimate": _estimate(retry_records, saved, data_dir, glossary=glossary) if retry_records else None,
         "glossaryActive": bool(glossary),
         "glossaryStaleCount": len(stale),
-        "glossaryRefreshEstimate": _estimate([{"source": text} for text in stale], saved, data_dir) if stale else None,
+        "glossaryRefreshCount": len(stale),
+        "glossaryRefreshEstimate": _estimate([{"source": text} for text in stale], saved, data_dir, glossary=glossary) if stale else None,
         "glossaryRefreshed": bool(job.get("glossary_refreshed")),
     }
     return page
 
 
 def _restore_backup(world: Path, backup_id: str, data_dir: Path, *,
-                    expected_fingerprint: str = "", expected_external: dict | None = None) -> tuple[BackupSet, str]:
+                    expected_fingerprint: str = "", expected_external: dict | None = None,
+                    before_restore=None) -> tuple[BackupSet, str]:
     """Put a backup set back (keeping what it replaces as a recovery set) and say which set that is."""
     stores = _backup_stores(world, data_dir)
     if backup_id == "latest":
@@ -1086,6 +1187,43 @@ def _restore_backup(world: Path, backup_id: str, data_dir: Path, *,
             target = Path(path)
             if target.is_symlink() or not target.is_file() or file_sha256(target) != digest:
                 raise RequestRefused("WORLD_CHANGED_SINCE_APPLY", "An external resource pack changed after this job was applied.")
+        if before_restore is not None:
+            # Prepare a separately durable recovery snapshot before restore can replace even
+            # one byte. BackupSet.restore also retains its normal recovery set for legacy callers.
+            verified = BackupSet.open_existing(world, selected.backup_id, selected.store, external_files=allowed)
+            recovery = BackupSet.new(world, kind="recovery", store=stores[0], external_files=allowed)
+            targets = [verified._target(entry) for entry in verified.entries]
+            for target in targets:
+                if target.is_file():
+                    recovery.add(target)
+            # Reapply can move an internal chunk to .mcc or restore a previously removed .mcc.
+            # Preserve absence as well as bytes so recovery does not leave newly created files.
+            from mwt.region import RegionFile, external_chunk_path
+            absent = {target for target in targets if not target.exists() and target.suffix == ".mcc"}
+            for target in targets:
+                if target.suffix == ".mca" and target.is_file():
+                    absent.update(external_chunk_path(target, chunk.index)
+                                  for chunk in RegionFile.read(target).chunks if not chunk.empty
+                                  and not external_chunk_path(target, chunk.index).exists())
+            for target in sorted(absent):
+                recovery.record_new_external_chunk(target)
+            recovery.publish_latest()
+            # copy2/manifest atomic replacement alone do not guarantee crash durability.
+            for path in recovery.root.rglob("*"):
+                if path.is_file():
+                    with path.open("rb") as stream:
+                        os.fsync(stream.fileno())
+            if os.name != "nt":
+                directories = [path for path in recovery.root.rglob("*") if path.is_dir()]
+                for path in [*sorted(directories, key=lambda p: len(p.parts), reverse=True), recovery.root, recovery.store]:
+                    descriptor = os.open(path, os.O_RDONLY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+            before_restore(selected, recovery.backup_id)
+            selected.restore(recovery_store=stores[0])
+            return selected, recovery.backup_id
         return selected, selected.restore(recovery_store=stores[0])
     finally:
         session.release()
@@ -1102,7 +1240,7 @@ def _prune_finished_jobs(data_dir: Path, world: Path, keep_plan_id: str) -> None
         if path == keep:
             continue
         try:
-            job = json.loads(path.read_text(encoding="utf-8"))
+            job = _load_job(data_dir, path.name.split(".", 1)[0], world)
             if (
                 (job.get("report") or {}).get("status") in {"completed", "partial"}
                 and Path(str(job.get("world_dir") or "")).expanduser().resolve() == world.expanduser().resolve()
@@ -1639,7 +1777,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             )
         last_scan = _last_scan_summary(data_dir, world) if report.get("status") == "completed" else None
         saved = _saved(data_dir)
-        estimate = _estimate(records, saved, data_dir)
+        estimate = _estimate(records, saved, data_dir, glossary=_effective_glossary(data_dir, world))
         kind_counts: dict[str, int] = {}
         for record in records:
             kind_counts[record["kind"]] = kind_counts.get(record["kind"], 0) + 1
@@ -1693,7 +1831,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             and str(item.get("source") or "") in source_overrides
         )
         included = [item for item in plan.get("candidates", []) if isinstance(item, dict) and item.get("id") not in skipped]
-        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": _estimate(included, saved, data_dir)})
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": _estimate(included, saved, data_dir, glossary=_effective_glossary(data_dir, world))})
         return
     if kind == "candidates.page":
         scan_plan_id = str(body.get("scanPlanId") or "")
@@ -1743,6 +1881,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     }
                 )
                 return
+            if resumable.get("status") == "reapply_interrupted":
+                raise RequestRefused("REAPPLY_INTERRUPTED", "Restore the recovery snapshot or reapply the saved translations.",
+                                     {"recoverySetId": resumable.get("recoverySetId")})
             body = {
                 "fingerprint": resumable["fingerprint"],
                 "scanPlanId": resumable["scanPlanId"],
@@ -1756,6 +1897,10 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         fingerprint = str(body.get("fingerprint") or "")
         scan_plan_id = str(body.get("scanPlanId") or "")
         stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id)
+        pending_reapply = (_load_job(data_dir, scan_plan_id, world).get("reapply") or {})
+        if pending_reapply:
+            raise RequestRefused("REAPPLY_INTERRUPTED", "Restore the recovery snapshot or reapply the saved translations.",
+                                 {"recoverySetId": pending_reapply.get("recoverySetId")})
         excluded = [
             str(candidate_id)
             for candidate_id in body.get("excludedCandidateIds", [])
@@ -1797,8 +1942,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         }
         manual_only = bool(included_ids) and not uncovered_ids
         review = saved.get("review_before_apply", True) is not False
-        if not isinstance(body.get("budgetOverride", False), bool):
-            raise ValueError("budgetOverride must be true or false")
+        normalize_review_before_apply(body.get("budgetOverride", False), field="budgetOverride")
+        normalize_review_before_apply(body.get("budgetDisabled", False), field="budgetDisabled")
         report = _run_translator(
             world,
             dry_run=False,
@@ -1821,6 +1966,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             desktop_context=body if body.get("credentialOwner") == "rust" else None,
             review_before_apply=review,
             budget_override=body.get("budgetOverride", False),
+            budget_disabled=body.get("budgetDisabled", False),
         )
         try:
             from mwt.userdata import remember_last_job
@@ -1837,7 +1983,14 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         if not fingerprint or not scan_plan_id:
             raise RequestRefused("SCAN_REQUIRED", "Run Scan Only and review its result before translating.")
         job = _load_job(data_dir, scan_plan_id, world)
-        stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id, applied=job.get("applied") if reapply else None)
+        interrupted = job.get("reapply") or {}
+        validation_applied = job.get("applied") if reapply else None
+        if interrupted:
+            if not reapply:
+                raise RequestRefused("REAPPLY_INTERRUPTED", "Restore the recovery snapshot or reapply the saved translations.",
+                                     {"recoverySetId": interrupted.get("recoverySetId")})
+            validation_applied = {"external_pack_fingerprints": interrupted.get("restoredExternalFingerprints") or {}}
+        stored_plan = _validated_plan(data_dir, fingerprint, scan_plan_id, applied=validation_applied)
         if not job:
             raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
         applied = job.get("applied") or {}
@@ -1852,7 +2005,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             raise RequestRefused(
                 "EDITS_INVALID", "Some edited translations cannot be written.", {"rows": problems}
             )
-        if reapply and not (job_applied and applied.get("backup_set_id")):
+        if reapply and not (interrupted or (job_applied and applied.get("backup_set_id"))):
             raise RequestRefused("NOTHING_TO_REAPPLY", "This job has no applied backup to restore first.")
         if not reapply and job_applied:
             raise RequestRefused("ALREADY_APPLIED", "This job was already written to the world.")
@@ -1884,43 +2037,96 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         )
         resume = job.get("resume") or {}
         manual = {k: v for k, v in (resume.get("manual_overrides") or {}).items() if isinstance(v, str)}
-        recovery_id = ""
-        if reapply:
-            from mwt.safety import world_fingerprint
+        recovery_id = str(interrupted.get("recoverySetId") or "")
+        journal = _reapply_journal(data_dir, scan_plan_id) if reapply else {}
+        journal_path = _reapply_path(data_dir, scan_plan_id)
 
-            if world_fingerprint(world.expanduser().resolve()) != applied.get("world_fingerprint"):
-                # The world changed after the write (the player kept playing, or another tool
-                # touched it). Restoring the old backup would throw that work away.
-                raise RequestRefused(
-                    "WORLD_CHANGED_SINCE_APPLY",
-                    "The world changed after the translation was written, so its backup cannot be restored first.",
-                )
-            _restored, recovery_id = _restore_backup(
-                world, str(applied["backup_set_id"]), data_dir,
-                expected_fingerprint=str(applied["world_fingerprint"]),
-                expected_external=applied.get("external_pack_fingerprints") or {},
+        def journal_restore(_selected, recovery_set_id):
+            nonlocal journal, recovery_id
+            recovery_id = recovery_set_id
+            journal = {
+                "version": 1, "phase": "restoring", "savedAt": time.time(),
+                "job": job, "edits": checked_job["edits"],
+                "excludedCandidateIds": excluded,
+                "recoverySetId": recovery_id, "backupSetId": applied["backup_set_id"],
+                "originalApplied": applied, "restoredWorldFingerprint": fingerprint,
+                "restoredExternalFingerprints": {
+                    path: info["sha256"] for path, info in stored_plan.get("externalPackFingerprints", {}).items()
+                },
+            }
+            _durable_json(journal_path, journal)
+
+        try:
+            if reapply:
+                from mwt.safety import world_fingerprint, file_sha256
+
+                expected = interrupted.get("restoredWorldFingerprint") if interrupted else applied.get("world_fingerprint")
+                if world_fingerprint(world.expanduser().resolve()) != expected:
+                    raise RequestRefused(
+                        "WORLD_CHANGED_SINCE_APPLY",
+                        "The world no longer matches the saved state. Restore the recovery snapshot before reapplying.",
+                    )
+                if not interrupted:
+                    _restore_backup(
+                        world, str(applied["backup_set_id"]), data_dir,
+                        expected_fingerprint=str(applied["world_fingerprint"]),
+                        expected_external=applied.get("external_pack_fingerprints") or {},
+                        before_restore=journal_restore,
+                    )
+                if world_fingerprint(world) != journal["restoredWorldFingerprint"]:
+                    raise OSError("Restored world does not match the scan baseline")
+                for path, digest in journal.get("restoredExternalFingerprints", {}).items():
+                    target = Path(path)
+                    if target.is_symlink() or not target.is_file() or file_sha256(target) != digest:
+                        raise OSError("Restored external pack does not match the scan baseline")
+                journal.update(phase="applying", savedAt=time.time(), edits=checked_job["edits"], excludedCandidateIds=excluded)
+                _durable_json(journal_path, journal)
+            report = _run_translator(
+                world,
+                dry_run=False,
+                report_path=report_dir / "translate-report.json",
+                fingerprint=fingerprint,
+                data_dir=data_dir,
+                excluded_candidate_ids=excluded,
+                progress_callback=lambda event: emit(
+                    {"v": 1, "id": request_id, "type": "translate.progress", "payload": event}
+                ),
+                cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
+                allow_keyring_fallback=False,
+                manual_overrides=manual,
+                skip_provider_validation=True,
+                scan_plan_id=scan_plan_id,
+                external_pack_fingerprints=stored_plan.get("externalPackFingerprints", {}),
+                on_translation_failure="skip",
+                apply_only=True,
+                edits=edits_by_source,
+                adopt_checkpoint={**checked_job, "applied": None} if reapply else job,
             )
-        report = _run_translator(
-            world,
-            dry_run=False,
-            report_path=report_dir / "translate-report.json",
-            fingerprint=fingerprint,
-            data_dir=data_dir,
-            excluded_candidate_ids=excluded,
-            progress_callback=lambda event: emit(
-                {"v": 1, "id": request_id, "type": "translate.progress", "payload": event}
-            ),
-            cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
-            allow_keyring_fallback=False,
-            manual_overrides=manual,
-            skip_provider_validation=True,
-            scan_plan_id=scan_plan_id,
-            external_pack_fingerprints=stored_plan.get("externalPackFingerprints", {}),
-            on_translation_failure="skip",
-            apply_only=True,
-            edits=edits_by_source,
-            adopt_checkpoint=job,
-        )
+            if reapply:
+                # A cancelled/failed/invalidated run or a skipped write is an interrupted
+                # reapply, even if the core returned a report rather than raising.
+                write_errors = [item for item in report.get("errors", [])
+                                if item.get("scope") not in {"provider", "translation", "budget"}]
+                if report.get("status") not in {"completed", "partial"} or write_errors:
+                    raise OSError("Reapply did not finish all writes")
+                finished_journal = {**journal, "phase": "completed", "savedAt": time.time()}
+                _durable_json(journal_path, finished_journal)
+                journal = finished_journal
+        except Exception as exc:
+            if interrupted and isinstance(exc, RequestRefused):
+                raise  # Fingerprint refusal before a new attempt leaves recovery available.
+            if reapply and journal and journal.get("phase") != "completed":
+                # The active journal already gives restart readers the honest state even if
+                # this checkpoint update fails (disk full, process termination, etc.).
+                try:
+                    _durable_json(_checkpoint_path(data_dir, scan_plan_id), _interrupted_job(journal))
+                except OSError:
+                    pass
+                raise RequestRefused(
+                    "REAPPLY_INTERRUPTED", "Reapply was interrupted. Restore the recovery snapshot or try reapply again.",
+                    {"recoverySetId": recovery_id},
+                ) from exc
+            raise
         try:
             from mwt.userdata import remember_last_job
 
@@ -1938,6 +2144,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         job = _load_job(data_dir, scan_plan_id, world)
         if not job:
             raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
+        if job.get("reapply"):
+            raise RequestRefused("REAPPLY_INTERRUPTED", "Restore the recovery snapshot or reapply the saved translations.",
+                                 {"recoverySetId": job["reapply"].get("recoverySetId")})
         stored_plan = _validated_plan(
             data_dir, str(stored_plan.get("worldFingerprint") or ""), scan_plan_id, applied=job.get("applied"),
         )
@@ -1982,6 +2191,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             adopt_checkpoint=job,
             retry=(ordered, sources),
             budget_override=normalize_review_before_apply(body.get("budgetOverride", False), field="budgetOverride"),
+            budget_disabled=normalize_review_before_apply(body.get("budgetDisabled", False), field="budgetDisabled"),
         )
         try:
             from mwt.userdata import remember_last_job
@@ -2003,6 +2213,22 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         return
     if kind == "restore.start":
         selected, recovery_id = _restore_backup(world, str(body.get("backupSetId") or "latest"), data_dir)
+        # Restoring a reapply recovery snapshot returns the original applied job as well as
+        # its bytes. Keep the snapshot itself; only settle its active journal after validation.
+        from mwt.safety import world_fingerprint, file_sha256
+        for path in (data_dir / "jobs").glob("*.checkpoint.reapply.json"):
+            scan_plan_id = path.name.split(".", 1)[0]
+            journal = _reapply_journal(data_dir, scan_plan_id)
+            if not journal or journal.get("recoverySetId") != selected.backup_id:
+                continue
+            original = journal.get("originalApplied") or {}
+            if world_fingerprint(world) != original.get("world_fingerprint"):
+                continue
+            if any(not Path(target).is_file() or Path(target).is_symlink() or file_sha256(Path(target)) != digest
+                   for target, digest in (original.get("external_pack_fingerprints") or {}).items()):
+                continue
+            _durable_json(_checkpoint_path(data_dir, scan_plan_id), journal["job"])
+            _durable_json(path, {**journal, "phase": "completed", "savedAt": time.time()})
         emit(
             {
                 "v": 1,
