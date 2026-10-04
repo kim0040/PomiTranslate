@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { TranslationRow, TranslationState } from '../lib/api';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
@@ -129,6 +129,10 @@
     const row = await review.row(index);
     if (row) select(row, !wide);
   }
+  // After a refused apply the view is rebuilt; it opens on the first row to fix, with its reason.
+  onMount(() => {
+    if (review.refusedIds.length) void tick().then(jumpToProblem);
+  });
 </script>
 
 <div class="review">

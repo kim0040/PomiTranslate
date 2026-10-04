@@ -35,7 +35,7 @@ test('translating stops for review and writes nothing until the person applies',
   const resumes = await requests(page, 'translate.resume');
   expect(resumes).toHaveLength(1);
   // The result step is not reachable before something was applied.
-  await expect(page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 결과/ })).toBeDisabled();
+  await expect(page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^완료 결과/ })).toBeDisabled();
 });
 
 test('a broken formatting code is refused per row, then a fixed edit is applied with zero provider requests', async ({ page }) => {
@@ -89,12 +89,12 @@ test('search and state chips narrow the table, and edits survive leaving and com
   await page.getByRole('button', { name: /^실패 2$/ }).click();
   await expect(page.locator('tr[data-index]')).toHaveCount(2);
   await page.getByRole('button', { name: /^전체/ }).click();
-  await page.getByRole('searchbox', { name: '번역 결과 검색' }).fill('열쇠');
+  await page.getByRole('searchbox', { name: '번역 결과 검색' }).fill('북문');
   await expect(page.locator('tr[data-index]')).toHaveCount(1);
-  await expect(page.locator('tr[data-index]')).toContainText('The Lost Key Shop');
+  await expect(page.locator('tr[data-index]')).toContainText('Merchant of the Northern Gate');
 
-  await row(page, 'The Lost Key Shop').click();
-  await page.locator('#translation-edit').fill('열쇠 가게');
+  await row(page, 'Merchant of the Northern Gate').click();
+  await page.locator('#translation-edit').fill('북문 상인');
   await expect(page.locator('.counts')).toContainText('저장 전 수정 1');
 
   // Leave for another page and another step: the unsaved edit is still there.
@@ -102,11 +102,11 @@ test('search and state chips narrow the table, and edits survive leaving and com
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   await expect(reviewHeading(page)).toBeVisible();
   await expect(page.locator('.counts')).toContainText('저장 전 수정 1');
-  await row(page, 'The Lost Key Shop').click();
-  await expect(page.locator('#translation-edit')).toHaveValue('열쇠 가게');
+  await row(page, 'Merchant of the Northern Gate').click();
+  await expect(page.locator('#translation-edit')).toHaveValue('북문 상인');
   // Reverting goes back to the AI's own answer.
   await page.getByRole('button', { name: 'AI 번역으로 되돌리기' }).click();
-  await expect(page.locator('#translation-edit')).toHaveValue('잃어버린 열쇠 상점');
+  await expect(page.locator('#translation-edit')).toHaveValue('북문의 상인');
   await expect(page.locator('.counts')).not.toContainText('저장 전 수정');
 });
 
@@ -121,12 +121,12 @@ test('failed rows are retried on their own, with the cost shown first', async ({
 
   const retry = page.getByRole('button', { name: '실패한 2개 다시 번역' });
   await expect(retry).toBeVisible();
-  await expect(page.getByText(/예상 비용 약 \$/)).toBeVisible();
+  await expect(page.getByText(/예상 비용 약 US\$/)).toBeVisible();
   await expect(page.getByRole('button', { name: '월드에 적용 (3개)' })).toBeVisible();
   await retry.click();
 
   await expect(page.getByRole('button', { name: '월드에 적용 (5개)' })).toBeVisible();
-  await expect(page.getByRole('button', { name: /^실패/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^실패 0$/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /다시 번역$/ })).toHaveCount(0);
   expect(await requests(page, 'translate.retry_failed')).toHaveLength(1);
 });
@@ -270,7 +270,7 @@ test('failure reasons are readable per code, with the provider text behind "deta
   await expect(page.getByRole('button', { name: '처음부터 다시 스캔' })).toHaveClass(/btn-secondary/);
   await retry.click();
   await expect(reviewHeading(page)).toBeVisible();
-  await expect(page.getByRole('button', { name: '월드에 적용 (5개)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '월드에 적용 (6개)' })).toBeVisible();
   expect(await requests(page, 'translate.retry_failed')).toHaveLength(1);
 });
 
@@ -372,16 +372,22 @@ for (const size of [{ width: 1180, height: 800 }, { width: 840, height: 620 }]) 
     // The source column stays readable beside the detail panel.
     const width = await page.locator('td.c-source').first().evaluate((cell) => cell.getBoundingClientRect().width);
     expect(width).toBeGreaterThan(160);
-    if (size.width < 1000) {
-      // Narrow: the detail opens as a sheet that holds the editor.
-      await expect(page.getByRole('dialog').locator('#translation-edit')).toBeVisible();
-    }
+    // Beside the table when there is room, as a sheet when there is not: the editor is always reachable.
+    await expect(page.locator('#translation-edit')).toBeVisible();
   });
 }
 
-test('the review view reads in English and Japanese', async ({ page }) => {
-  await toReview(page, 'scenario=run&fail=1&locale=en');
-  await expect(page.getByRole('heading', { level: 1, name: 'Review translations', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Apply to world \(4\)$/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Translate 1 failed again' })).toBeVisible();
-});
+const locales = [
+  { locale: 'en', steps: 'Steps', run: 'Translate', resume: 'Resume Translation', title: 'Review translations', apply: /^Apply to world \(4\)$/, retry: 'Translate 1 failed again' },
+  { locale: 'ja', steps: '手順一覧', run: '翻訳', resume: '翻訳を再開', title: '翻訳結果の確認', apply: /^ワールドに適用 \(4件\)$/, retry: '失敗した 1 件を翻訳し直す' }
+];
+for (const item of locales) {
+  test(`the review view reads in ${item.locale}`, async ({ page }) => {
+    await open(page, `scenario=run&fail=1&locale=${item.locale}`);
+    await page.getByRole('navigation', { name: item.steps }).getByRole('button', { name: new RegExp(`^${item.run}`) }).click();
+    await page.getByRole('button', { name: item.resume, exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: item.title, exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: item.apply })).toBeVisible();
+    await expect(page.getByRole('button', { name: item.retry })).toBeVisible();
+  });
+}

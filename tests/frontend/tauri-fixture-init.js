@@ -168,7 +168,8 @@
     if (job) return job;
     const current = scenario();
     const kind = current.startsWith('result-') ? current.slice(7) : 'review';
-    return makeJob(kind, excluded ?? (['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review'].includes(current) || current.startsWith('result-') ? ['tellraw'] : []));
+    // The result scenarios describe a job over all six sentences; the others leave the command text out.
+    return makeJob(kind, current.startsWith('result-') ? [] : excluded ?? (['scanned', 'review', 'run', 'run-progress', 'dark-review'].includes(current) ? ['tellraw'] : []));
   }
   const viewRow = (row, drafts = new Set()) => {
     const edited = row.edit !== undefined || drafts.has(row.id);

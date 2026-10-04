@@ -158,7 +158,8 @@ test('a saved job can start over only after a cost warning', async ({ page }) =>
   await expect(dialog).toHaveCount(0);
   await page.getByRole('button', { name: '처음부터 다시 번역' }).click();
   await page.getByRole('dialog').getByRole('button', { name: '처음부터 번역' }).click();
-  await expect(page.getByRole('heading', { name: '번역 결과', exact: true })).toBeVisible();
+  // Translating stops for review first; nothing is written until the person applies.
+  await expect(page.getByRole('heading', { level: 1, name: '번역 결과 검토', exact: true })).toBeVisible();
   const kinds = await page.evaluate(() => (window as unknown as { __pomiRequests: { type: string }[] }).__pomiRequests.map((request) => request.type));
   expect(kinds).toContain('translate.start');
   expect(kinds).not.toContain('translate.resume');
@@ -166,6 +167,14 @@ test('a saved job can start over only after a cost warning', async ({ page }) =>
 
 test('results say what to do next and how much of a failure list is shown', async ({ page }) => {
   await open(page, 'scenario=result-partial');
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
+  // The whole list comes from the saved table, not from the result's short preview.
+  await expect(page.getByText('실패한 문장 2개 전체입니다.')).toBeVisible();
+});
+
+test('without a saved table the result still says how much of the failure list is shown', async ({ page }) => {
+  await open(page, 'scenario=result-partial&nocp=1');
   await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByText('실패한 2개 중 1개만 보여 줍니다.')).toBeVisible();
