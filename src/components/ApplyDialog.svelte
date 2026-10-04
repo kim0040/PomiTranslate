@@ -28,6 +28,9 @@
     {#if review.dirtyCount > 0}<p class="note">{t('apply.edited', { count: formatNumber(review.dirtyCount, app.locale) })}</p>{/if}
   {/if}
   <p class="note">{t('apply.noRequests')}</p>
+  {#if review.meta?.glossaryActive}
+    <p class="note" role="alert">{t('glossary.applyWarning', { count: formatNumber(review.counts.glossary_mismatch, app.locale) })}</p>
+  {/if}
   {#snippet actions()}
     <button type="button" class="btn btn-secondary" data-autofocus onclick={onClose}>{t('common.cancel')}</button>
     <button type="button" class="btn btn-primary" onclick={onConfirm}>{corrections ? t('apply.reapplyConfirm') : t('apply.confirm')}</button>

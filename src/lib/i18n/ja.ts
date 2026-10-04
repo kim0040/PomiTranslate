@@ -1108,4 +1108,13 @@ export const ja: Record<MessageKey, string> = {
   "settings.costProtection.capError": "0～1,000 USD の範囲で入力してください。",
   "settings.app.notifyOnFinish": "作業完了時に通知",
   "settings.app.notifyOnFinishHelp": "アプリが背面にあるとき、スキャンや翻訳が終わると通知します。",
+  "glossary.changedTitle": "用語集が変更されました",
+  "glossary.changedHelp": "影響を受ける{count}件を再翻訳してから適用してください。他の翻訳とスキャン結果は保持されます。",
+  "glossary.retranslate": "影響を受ける文を再翻訳（{count}）",
+  "glossary.needsCheck": "用語を再確認",
+  "glossary.applyWarning": "現在、用語の確認が必要な翻訳は{count}件です。手動で修正した翻訳も固定用語と一致するか確認してください。続行すると、残っている用語の不一致も適用されます。",
+  "error.GLOSSARY_CHANGED": "用語集が変更されました。確認画面で影響を受ける文を再翻訳してから適用してください。",
+  "error.GLOSSARY_MISMATCH_UNCONFIRMED": "用語集と異なる翻訳があります。確認画面の適用案内を確認してから再度お試しください。",
+  "error.GLOSSARY_INVALID": "用語集の項目を確認してください。表示されたエラーを修正してから保存してください。",
+  "glossary.unsavedHelp": "用語集に未保存の変更があります。保存するか、変更を破棄してから移動してください。",
 };

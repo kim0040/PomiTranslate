@@ -66,6 +66,9 @@
     {#if row.status === 'glossary_mismatch'}
       <p class="mismatch" role="note"><Icon name="alert-triangle" size={15} /> {t('glossary.mismatchHelp')}</p>
     {/if}
+    {#if row.glossaryStale}
+      <p class="mismatch" role="note">{t('glossary.changedHelp', { count: 1 })}</p>
+    {/if}
 
     <section class="block">
       <div class="label-row">

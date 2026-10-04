@@ -22,6 +22,7 @@ from mwt.glossary import (
     matching_entries,
     merge_entries,
     normalize_entries,
+    output_matches,
     prompt_block,
 )
 from mwt.userdata import load_world_glossary, remember_user_settings, remember_world_glossary
@@ -44,6 +45,72 @@ class FakeProvider:
 
 
 class GlossaryTests(unittest.TestCase):
+    def test_limits_and_unmatched_prompt(self) -> None:
+        for rows in [[entry("x" * 201, "ok")], [entry("Mira", "x" * 501)],
+                     [{**entry("Mira", "미라"), "note": "x" * 501}],
+                     [entry(f"term {index}", "용어") for index in range(2001)]]:
+            with self.assertRaises(GlossaryValidationError):
+                normalize_entries(rows)
+        config = core.merge_nested(core.DEFAULT_CONFIG, {"runtime": {"glossary_entries": [entry("Mira", "미라")]}})
+        translator = core.BatchTranslator(config)
+        translator.client = FakeProvider([{"0": "다른 문장"}])
+        translator._translate_batch(["Other row"], 1)
+        self.assertNotIn("FIXED GLOSSARY", translator.client.prompts[0])
+        self.assertEqual(len(translator.client.prompts), 1)
+
+    def test_cli_saved_glossary_reaches_batch_using_the_custom_data_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pomi-glossary-cli-") as temporary:
+            data = Path(temporary) / "data"
+            rows = [entry("Elder Mira", "장로 미라")]
+            remember_user_settings({"glossary": rows}, data)
+            config = core.merge_nested(core.DEFAULT_CONFIG, {
+                "world_dir": temporary, "runtime": {"data_dir": str(data), "checkpoint_enabled": False},
+            })
+            with patch.object(LLMProviderClient, "translate_mapping", side_effect=AssertionError("no network")):
+                translator = core.WorldTranslator(config)
+            self.assertEqual(translator.translator.glossary_entries, rows)
+            provider = FakeProvider([{"0": "장로 미라"}])
+            translator.translator.client = provider
+            translator.translator._translate_batch(["Elder Mira"], 1)
+            self.assertIn("FIXED GLOSSARY", provider.prompts[0])
+            self.assertNotIn("glossary_entries", config["runtime"])
+
+    def test_keep_cjk_and_exact_target_spelling_post_checks(self) -> None:
+        rows = [entry("Mira", "", mode="keep"), entry("古代竜", "고대룡"), entry("village", "New Village")]
+        self.assertTrue(output_matches("Miraと古代竜", "Mira와 고대룡", rows))
+        self.assertFalse(output_matches("Miraと古代竜", "미라와 고대룡", rows))
+        self.assertFalse(output_matches("古代竜", "고대 드래곤", rows))
+        self.assertFalse(output_matches("village", "new village", rows))
+        config = core.merge_nested(core.DEFAULT_CONFIG, {"runtime": {"glossary_entries": rows}})
+        translator = core.BatchTranslator(config)
+        provider = FakeProvider([{"0": "미라와 고대 드래곤"}, {"0": "Mira와 고대룡"}])
+        translator.client = provider
+        self.assertEqual(translator._translate_batch(["Miraと古代竜"], 1)["Miraと古代竜"], "Mira와 고대룡")
+        self.assertEqual(len(provider.prompts), 2)
+        self.assertNotIn("village", provider.prompts[0])
+
+    def test_glossary_retry_cannot_remove_protected_tokens(self) -> None:
+        config = core.merge_nested(core.DEFAULT_CONFIG, {"runtime": {"glossary_entries": [entry("Mira", "미라")]}})
+        translator = core.BatchTranslator(config)
+        provider = FakeProvider([{"0": "§6다른 이름 %s"}, {"0": "미라"}])
+        translator.client = provider
+        self.assertEqual(translator._translate_batch(["§6Mira %s"], 1)["§6Mira %s"], "§6다른 이름 %s")
+        self.assertEqual(translator.glossary_mismatches, {"§6Mira %s"})
+
+    def test_budget_counts_the_glossary_retry_and_stops_before_the_next_batch(self) -> None:
+        config = core.merge_nested(core.DEFAULT_CONFIG, {
+            "batch_size": 1, "runtime": {"glossary_entries": [entry("Mira", "미라")], "concurrency": 1,
+            "max_cost_usd": 0.0002, "price": {"input": 0.000001, "output": 0.000001}},
+        })
+        translator = core.BatchTranslator(config)
+        translator.client = FakeProvider([{"0": "다른 이름"}, {"0": "미라"}])
+        LLMProviderClient.reset_counters()
+        with self.assertRaises(core.BudgetStopped):
+            translator.translate_texts(["Mira", "Other row"])
+        self.assertEqual(LLMProviderClient.request_count, 2)
+        self.assertEqual(LLMProviderClient.usage["prompt_tokens"], 200)
+        self.assertEqual(translator.cache, {"Mira": "미라"})
+
     def test_validation_reports_row_errors_and_allows_keep_with_ignored_target(self) -> None:
         valid = normalize_entries([entry("Elder Mira", "", mode="keep")])
         self.assertEqual(valid[0]["target"], "")
@@ -140,7 +207,11 @@ class GlossaryTests(unittest.TestCase):
             self.assertEqual(first_scope, desktop_entry._scan_scope_fingerprint(data_dir))
             self.assertEqual(first_plan_id, desktop_entry._scan_plan_id("same-world", desktop_entry._scan_scope_fingerprint(data_dir)))
             remember_world_glossary(world, [entry("Elder Mira", "장로 미라")], data_dir)
-            self.assertEqual(load_world_glossary(world, data_dir)[0]["target"], "장로 미라")
+            self.assertEqual(first_translation, desktop_entry._settings_fingerprint(data_dir, world))
+            remember_world_glossary(world, [entry("Elder Mira", "월드 미라")], data_dir)
+            self.assertNotEqual(first_translation, desktop_entry._settings_fingerprint(data_dir, world))
+            self.assertEqual(first_plan_id, desktop_entry._scan_plan_id("same-world", desktop_entry._scan_scope_fingerprint(data_dir)))
+            self.assertEqual(load_world_glossary(world, data_dir)[0]["target"], "월드 미라")
             self.assertTrue((data_dir / "world-glossaries.json").exists())
             self.assertFalse((world / "world-glossaries.json").exists())
 

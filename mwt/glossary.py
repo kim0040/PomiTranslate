@@ -127,6 +127,9 @@ def merge_entries(global_entries: Any, world_entries: Any = None) -> list[dict[s
 
 def contains_term(text: str, entry: dict[str, Any]) -> bool:
     """Match Latin terms at word boundaries and CJK terms as substrings."""
+    # A color prefix is not part of a word: §6Mira is visibly Mira. This is only
+    # a matching view; the provider and the token guard still receive the original.
+    text = _FORMAT_CODE.sub("", text)
     source = str(entry.get("source") or "")
     if not source:
         return False
@@ -134,7 +137,8 @@ def contains_term(text: str, entry: dict[str, Any]) -> bool:
     if _CJK.search(source) or not _LATIN.search(source):
         haystack, needle = (text, source) if case_sensitive else (text.casefold(), source.casefold())
         return needle in haystack
-    pattern = re.compile(rf"(?<!\w){re.escape(source)}(?!\w)", 0 if case_sensitive else re.IGNORECASE)
+    latin_word = r"A-Za-z0-9_\u00c0-\u024f\u1e00-\u1eff"
+    pattern = re.compile(rf"(?<![{latin_word}]){re.escape(source)}(?![{latin_word}])", 0 if case_sensitive else re.IGNORECASE)
     return pattern.search(text) is not None
 
 
@@ -146,10 +150,13 @@ def matching_entries(texts: list[str], entries: list[dict[str, Any]]) -> list[di
 def output_matches(source: str, answer: str, entries: list[dict[str, Any]]) -> bool:
     """Check every matched fixed translation or untranslated term in one answer."""
     for entry in entries:
+        if not contains_term(source, entry):
+            continue
         expected = entry["target"] if entry["mode"] == "translate" else entry["source"]
         if not expected:
             continue
-        probe = {**entry, "source": expected}
+        # Fixed target spelling is exact even when source matching ignores case.
+        probe = {**entry, "source": expected, "caseSensitive": entry["mode"] == "translate" or entry["caseSensitive"]}
         if not contains_term(answer, probe):
             return False
     return True
@@ -177,6 +184,15 @@ def prompt_block(entries: list[dict[str, Any]], *, reminder: bool = False) -> st
 def entries_hash(entries: list[dict[str, Any]]) -> str:
     encoded = json.dumps(entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def source_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def row_hashes(texts: list[str], entries: list[dict[str, Any]]) -> dict[str, str]:
+    """Snapshots contain only hashes, never a copy of glossary terms in a job/report."""
+    return {source_hash(text): entries_hash(matching_entries([text], entries)) for text in texts}
 
 
 def export_json(entries: Any) -> str:

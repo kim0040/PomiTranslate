@@ -193,7 +193,8 @@
     job = {
       kind, rows, status: kind === 'review' ? 'awaiting_review' : kind === 'success' ? 'completed' : kind, excluded: [...skip],
       applied: kind === 'success' || kind === 'partial', backupSetId: kind === 'success' || kind === 'partial' ? backups[0].backupSetId : '',
-      usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }
+      usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true },
+      glossaryHashes: Object.fromEntries(rows.map((row) => [row.source, glossaryHash(row.source)]))
     };
     return job;
   }
@@ -204,11 +205,27 @@
     // The result scenarios describe a job over all six sentences; the others leave the command text out.
     return makeJob(kind, current.startsWith('result-') ? [] : excluded ?? (['scanned', 'review', 'run', 'run-progress', 'dark-review'].includes(current) ? ['tellraw'] : []));
   }
+  function effectiveGlossary() {
+    const worldEntries = window.__pomiWorldGlossaries?.[worldDir] || [];
+    return [...(settings.glossary || []).filter((entry) => !worldEntries.some((other) =>
+      entry.source === other.source || ((!entry.caseSensitive || !other.caseSensitive) && entry.source.toLowerCase() === other.source.toLowerCase())
+    )), ...worldEntries];
+  }
+  function termMatches(text, entry) {
+    const source = entry.source;
+    if (!source) return false;
+    if (/[\u3040-\u30ff\u3400-\u9fff]/.test(source)) return (entry.caseSensitive ? text : text.toLowerCase()).includes(entry.caseSensitive ? source : source.toLowerCase());
+    const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?<!\\w)${escaped}(?!\\w)`, entry.caseSensitive ? '' : 'i').test(text);
+  }
+  function glossaryHash(source) { return JSON.stringify(effectiveGlossary().filter((entry) => termMatches(source, entry))); }
+  function glossaryStale(row) { return row.status !== 'failed' && job.glossaryHashes?.[row.source] !== glossaryHash(row.source); }
   const viewRow = (row, drafts = new Set()) => {
     const edited = row.edit !== undefined || drafts.has(row.id);
     return {
       id: row.id, source: row.source, kind: row.kind, occurrences: row.occurrences, ai: row.status === 'failed' ? '' : row.ai,
       translated: row.edit !== undefined ? row.edit : row.status === 'failed' ? '' : row.ai,
+      glossaryStale: glossaryStale(row),
       status: edited ? 'edited' : row.status === 'translated' && row.ai === row.source ? 'kept' : row.status,
       ...(row.status === 'failed' && row.edit === undefined ? { reason: row.reason, detail: row.detail } : {})
     };
@@ -233,7 +250,9 @@
     const limit = Math.max(1, Math.min(500, Number(body.limit || 100)));
     return {
       rows: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, counts: jobCounts(drafts),
-      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, usage: job.usage, retryEstimate: retryEstimate() }
+      meta: { status: job.status, applied: job.applied, backupSetId: job.backupSetId, failedCount: job.rows.filter((row) => row.status === 'failed').length, usage: job.usage, retryEstimate: retryEstimate(),
+        glossaryActive: effectiveGlossary().length > 0, glossaryStaleCount: job.rows.filter(glossaryStale).length,
+        glossaryRefreshEstimate: job.rows.some(glossaryStale) ? { ...estimate, cost: { low: 0.00004, high: 0.00008 } } : null, glossaryRefreshed: !!job.glossaryRefreshed }
     };
   }
   function jobResult(status, extra = {}) {
@@ -543,6 +562,14 @@
         [10, { event: 'phase_start', phase: 'translate', total: job.rows.filter((row) => row.status === 'failed').length, requests_estimate: 1 }]
       ]);
       await sleep(80);
+      const stale = job.rows.filter(glossaryStale);
+      for (const row of stale) {
+        row.ai = effectiveGlossary().filter((entry) => termMatches(row.source, entry)).reduce((answer, entry) =>
+          entry.mode === 'keep' ? answer : answer.replaceAll(entry.source, entry.target), row.source);
+        row.status = 'translated';
+      }
+      if (stale.length && job.applied) job.glossaryRefreshed = true;
+      job.glossaryHashes = Object.fromEntries(job.rows.map((row) => [row.source, glossaryHash(row.source)]));
       if (query.get('retryFail') !== '1') job.rows.forEach((row) => { if (row.status === 'failed' && row.edit === undefined) { row.status = 'translated'; row.reason = ''; row.detail = ''; } });
       job.status = 'awaiting_review';
       job.usage = { ...job.usage, prompt_tokens: job.usage.prompt_tokens + 120, completion_tokens: job.usage.completion_tokens + 40, cost: job.usage.cost + 0.00006 };
@@ -551,6 +578,8 @@
     if (type === 'translate.apply' || type === 'translate.reapply') {
       ensureJob(['tellraw']);
       const reapply = type === 'translate.reapply';
+      if (job.rows.some(glossaryStale)) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_CHANGED', message: 'Re-check glossary', recoverable: true } };
+      if (job.rows.some((row) => row.status === 'glossary_mismatch') && !body.acknowledgeGlossaryMismatch) return { v: 1, id: request.id, type: 'response.error', error: { code: 'GLOSSARY_MISMATCH_UNCONFIRMED', message: 'Review mismatches', recoverable: true } };
       if (!reapply && job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'ALREADY_APPLIED', message: 'Use reapply', recoverable: true } };
       if (reapply && !job.applied) return { v: 1, id: request.id, type: 'response.error', error: { code: 'NOTHING_TO_REAPPLY', message: 'Nothing to reapply', recoverable: true } };
       if (query.get('worldChanged') === '1' && reapply) return { v: 1, id: request.id, type: 'response.error', error: { code: 'WORLD_CHANGED_SINCE_APPLY', message: 'World changed', recoverable: true } };

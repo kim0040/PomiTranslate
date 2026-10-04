@@ -177,8 +177,8 @@
   }));
   const customPriceIncomplete = $derived((customPriceInput.trim() === '') !== (customPriceOutput.trim() === ''));
   const customPriceDraftDirty = $derived(!!snapshot && (
-    customPriceInput !== (savedSelectedPrice ? String(savedSelectedPrice.input) : '') ||
-    customPriceOutput !== (savedSelectedPrice ? String(savedSelectedPrice.output) : '')
+    (customPriceInput.trim() ? Number(customPriceInput) : null) !== (savedSelectedPrice?.input ?? null) ||
+    (customPriceOutput.trim() ? Number(customPriceOutput) : null) !== (savedSelectedPrice?.output ?? null)
   ));
   const reasoningMetadata = $derived(reasoningModel?.reasoning);
   const reasoningSupported = $derived(supportsReasoning(reasoningModel));
@@ -420,6 +420,7 @@
 
   function discardDraft(): void {
     draftEpoch += 1;
+    lastPriceSelection = '';
     draft = copySettings(app.settings);
     snapshot = copySettings(app.settings);
     apiKey = '';
@@ -467,6 +468,7 @@
 
   function resetDraft(): void {
     draftEpoch += 1;
+    lastPriceSelection = '';
     draft = copySettings({ ...defaultSettings(), ui_language: app.locale, last_world_dir: app.worldDir });
     apiKey = '';
     showApiKey = false;

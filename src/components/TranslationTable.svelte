@@ -142,7 +142,7 @@
                 {:else if shown.status === 'glossary_mismatch'}<Icon name="alert-triangle" size={12} />
                 {:else if shown.status === 'edited'}<Icon name="pencil" size={12} />
                 {:else}<Icon name="minus" size={12} />{/if}
-                {t(statusKey[shown.status])}
+                {row.glossaryStale ? t('glossary.needsCheck') : t(statusKey[shown.status])}
               </span>
               {#if problem}<span class="warn"><Icon name="alert-triangle" size={12} /> {t('translationReview.fixThis')}</span>{/if}
             </td>

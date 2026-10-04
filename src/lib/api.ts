@@ -199,6 +199,7 @@ export type TranslationRow = {
   source: string;
   translated: string;
   status: Exclude<TranslationState, 'all'>;
+  glossaryStale?: boolean;
   kind: string;
   occurrences: number;
   /** The unedited AI answer, empty when there is none. Used to revert an edit. */
@@ -217,6 +218,10 @@ export type TranslationPageMeta = {
   failedCount: number;
   usage: TranslationUsage;
   retryEstimate: Estimate | null;
+  glossaryActive?: boolean;
+  glossaryStaleCount?: number;
+  glossaryRefreshEstimate?: Estimate | null;
+  glossaryRefreshed?: boolean;
 };
 
 export type TranslationPage = {
@@ -297,8 +302,8 @@ export type ModelInfo = {
   reasoning?: { mandatory?: boolean; default_enabled?: boolean; default_effort?: string; supported_efforts?: string[] | null };
   id: string;
   display_name?: string;
-  pricing_prompt?: string;
-  pricing_completion?: string;
+  pricing_prompt?: string | null;
+  pricing_completion?: string | null;
   context_length?: number;
   /** False for models made for something other than translating text (image, audio, embeddings...). */
   suitable?: boolean;

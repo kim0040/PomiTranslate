@@ -115,7 +115,8 @@ def _manual_by_source(job: dict[str, Any], saved_overrides: dict[str, str]) -> d
     return manual
 
 
-def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[str, str]) -> list[dict[str, Any]]:
+def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[str, str], *,
+             glossary: list[dict] | None = None, stale_sources: set[str] | None = None) -> list[dict[str, Any]]:
     """Every string of the job, in scan order, with what would be written for it."""
     excluded = _excluded_ids(job)
     manual = _manual_by_source(job, saved_overrides)
@@ -130,7 +131,12 @@ def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[st
             continue
         source = str(item.get("source") or "")
         status, shown, reason, detail, ai = _effective(source, job, manual)
-        if source in mismatch_sources and status in {"translated", "kept"}:
+        if glossary is not None and shown and status != "failed":
+            from mwt.glossary import output_matches
+            mismatch = not output_matches(source, shown, glossary)
+        else:
+            mismatch = source in mismatch_sources
+        if mismatch and status != "failed":
             status, reason, detail = "glossary_mismatch", "glossary_mismatch", ""
         row = {
             "id": str(item.get("id")),
@@ -140,6 +146,7 @@ def job_rows(plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[st
             "kind": str(item.get("kind") or "other"),
             "occurrences": int(item.get("occurrences") or 1),
             "ai": ai,
+            "glossaryStale": source in (stale_sources or set()),
         }
         if reason:
             row["reason"] = reason
@@ -154,10 +161,11 @@ def failed_sources(plan: dict[str, Any], job: dict[str, Any], saved_overrides: d
 
 
 def translations_page(
-    plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[str, str], body: dict[str, Any]
+    plan: dict[str, Any], job: dict[str, Any], saved_overrides: dict[str, str], body: dict[str, Any], *,
+    glossary: list[dict] | None = None, stale_sources: set[str] | None = None,
 ) -> dict[str, Any]:
     """Filter and slice the job on this side so the count and the rows always agree."""
-    rows = job_rows(plan, job, saved_overrides)
+    rows = job_rows(plan, job, saved_overrides, glossary=glossary, stale_sources=stale_sources)
     draft_ids = {str(item) for item in body.get("draftIds") or []}
     for row in rows:
         if row["id"] in draft_ids:

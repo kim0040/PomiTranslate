@@ -115,7 +115,11 @@
         next = rows.map((row) => {
           if (!row || typeof row !== 'object') throw new Error('invalid row');
           const item = row as Partial<GlossaryEntry>;
-          return { source: String(item.source ?? ''), target: String(item.target ?? ''), mode: item.mode ?? 'translate', note: String(item.note ?? ''), caseSensitive: item.caseSensitive === true };
+          if (typeof item.source !== 'string' || (item.target !== undefined && typeof item.target !== 'string') ||
+              (item.note !== undefined && typeof item.note !== 'string') ||
+              (item.caseSensitive !== undefined && typeof item.caseSensitive !== 'boolean') ||
+              (item.mode !== undefined && item.mode !== 'translate' && item.mode !== 'keep')) throw new Error('invalid row');
+          return { source: item.source, target: item.target ?? '', mode: item.mode ?? 'translate', note: item.note ?? '', caseSensitive: item.caseSensitive ?? false };
         });
       }
       entries = next;

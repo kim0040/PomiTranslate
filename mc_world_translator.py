@@ -638,6 +638,7 @@ class BatchTranslator:
     def _apply_glossary_check(self, texts: list[str], answers: dict[str, str]) -> dict[str, str]:
         """Retry only rows that violate a matching term, once, without exposing terms in events."""
         from mwt.glossary import contains_term, matching_entries, output_matches
+        from mwt.tokens import _without_trailing_reset, tokens_preserved
 
         batch_entries = matching_entries(texts, self.glossary_entries)
         for text in texts:
@@ -672,7 +673,8 @@ class BatchTranslator:
                 # unresolved glossary mismatch, while the ordinary run status handles its cost.
                 self.glossary_mismatches.add(text)
                 continue
-            if isinstance(retried, str) and output_matches(text, retried, matched):
+            if (isinstance(retried, str) and output_matches(text, retried, matched)
+                    and tokens_preserved(text, _without_trailing_reset(text, retried))):
                 answers[text] = retried
                 self.glossary_mismatches.discard(text)
             else:
@@ -906,7 +908,10 @@ class WorldTranslator(TextExtractionMixin):
             from mwt.userdata import load_user_settings
 
             try:
-                glossary_entries = normalize_entries(load_user_settings().get("glossary", []), field="saved glossary")
+                data_dir = self.runtime_config.get("data_dir")
+                glossary_entries = normalize_entries(
+                    load_user_settings(Path(data_dir) if data_dir else None).get("glossary", []), field="saved glossary"
+                )
             except ValueError:
                 glossary_entries = []
         self.runtime_config["glossary_entries"] = glossary_entries
@@ -963,7 +968,7 @@ class WorldTranslator(TextExtractionMixin):
             else:
                 self.edits[source] = text
         self.translator = None if config["dry_run"] else BatchTranslator(
-            config,
+            self.config,
             progress_callback=lambda event: self.emit(
                 event["event"], **{key: value for key, value in event.items() if key != "event"}
             ),
@@ -1026,6 +1031,7 @@ class WorldTranslator(TextExtractionMixin):
 
     def checkpoint_payload(self) -> dict[str, Any]:
         from mwt.safety import world_fingerprint
+        from mwt.glossary import row_hashes
 
         self.refresh_report_counts()
         return {
@@ -1039,6 +1045,8 @@ class WorldTranslator(TextExtractionMixin):
             "resume": {
                 "scan_plan_id": str(self.runtime_config.get("scan_plan_id") or ""),
                 "translation_settings_fingerprint": str(self.runtime_config.get("translation_settings_fingerprint") or ""),
+                "glossary_hash": self.runtime_config["glossary_hash"],
+                "glossary_row_hashes": row_hashes(list(self.candidate_texts), self.runtime_config["glossary_entries"]),
                 "expected_world_fingerprint": str(self.runtime_config.get("expected_world_fingerprint") or ""),
                 "excluded_candidate_ids": list(self.runtime_config.get("excluded_candidate_ids") or []),
                 "manual_overrides": dict(self.scan_config.get("overrides") or {}),
@@ -1055,6 +1063,7 @@ class WorldTranslator(TextExtractionMixin):
             "usage_total": self.usage_total(),
             "stop_code": self.stop_code,
             "applied": self.applied,
+            "glossary_refreshed": bool(self.runtime_config.get("glossary_refreshed")),
             "saved_at": time.time(),
         }
 
@@ -1924,7 +1933,10 @@ class WorldTranslator(TextExtractionMixin):
             }
             for text, reason in list(self.translator.failed.items())[:20]
         ]
-        mismatches = sorted(self.translator.glossary_mismatches)
+        from mwt.glossary import output_matches
+        mismatches = sorted(text for text in ordered if text not in failed and text in cache
+                            and not output_matches(text, self.final_translations.get(text, cache[text]), self.translator.glossary_entries))
+        self.translator.glossary_mismatches = set(mismatches)
         self.report["glossary_mismatch_count"] = len(mismatches)
         self.report["glossary_mismatches"] = [
             {"source": text, "reason": "glossary_mismatch"} for text in mismatches

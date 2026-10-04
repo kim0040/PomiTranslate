@@ -1108,4 +1108,13 @@ export const en: Record<MessageKey, string> = {
   "settings.costProtection.capError": "Enter an amount from 0 to 1,000 USD.",
   "settings.app.notifyOnFinish": "Notify me when work finishes",
   "settings.app.notifyOnFinishHelp": "Notify when a scan or translation finishes while the app is in the background.",
+  "glossary.changedTitle": "The glossary changed",
+  "glossary.changedHelp": "Retranslate {count} affected rows before applying. Other translations and the scan stay available.",
+  "glossary.retranslate": "Retranslate affected rows ({count})",
+  "glossary.needsCheck": "Re-check terms",
+  "glossary.applyWarning": "{count} translations currently need a term check. Check that your manual edits also use the fixed terms. Continuing applies any remaining glossary mismatches too.",
+  "error.GLOSSARY_CHANGED": "The glossary changed. Retranslate the affected rows in the review before applying.",
+  "error.GLOSSARY_MISMATCH_UNCONFIRMED": "Some translations differ from the glossary. Read the apply notice in the review before trying again.",
+  "error.GLOSSARY_INVALID": "Check the glossary entries. Fix the displayed errors before saving again.",
+  "glossary.unsavedHelp": "You have unsaved glossary changes. Save them or discard them before leaving.",
 };

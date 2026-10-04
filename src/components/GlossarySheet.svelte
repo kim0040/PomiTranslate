@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, onDestroy } from 'svelte';
   import Dialog from './Dialog.svelte';
   import GlossaryEditor from './GlossaryEditor.svelte';
   import { app } from '../lib/app.svelte';
   import { getGlossary, setGlossary, type GlossaryEntry, type GlossaryScope } from '../lib/api';
   import { t } from '../lib/i18n/index.svelte';
+  import { finishClose, type CloseSource } from '../lib/native';
 
   let { open = $bindable(false), world, initialEntry = null, initialScope = 'world' as GlossaryScope }: {
     open?: boolean; world: string; initialEntry?: GlossaryEntry | null; initialScope?: GlossaryScope;
@@ -21,13 +22,38 @@
   let invalid = $state(false);
   let error = $state('');
   let confirmDiscard = $state(false);
+  let closingSource = $state<CloseSource | null>(null);
+  let pendingNavigation: (() => void) | null = null;
   let ready = $state(false);
   let lastOpened = false;
   let seedSource = '';
 
   const dirty = $derived(ready && (
-    JSON.stringify(globalEntries) !== JSON.stringify(globalSaved) || JSON.stringify(worldEntries) !== JSON.stringify(worldSaved)
+    JSON.stringify(scope === 'global' ? entries : globalEntries) !== JSON.stringify(globalSaved) ||
+    JSON.stringify(scope === 'world' ? entries : worldEntries) !== JSON.stringify(worldSaved)
   ));
+  $effect(() => {
+    app.settingsDirty = open && dirty;
+    app.glossaryGuard = open && dirty ? {
+      leave: (next) => { pendingNavigation = next; confirmDiscard = true; },
+      close: (source) => { closingSource = source; pendingNavigation = null; confirmDiscard = true; }
+    } : null;
+  });
+  onDestroy(() => { app.settingsDirty = false; app.glossaryGuard = null; });
+
+  function continueEditing(): void {
+    confirmDiscard = false;
+    closingSource = null;
+    pendingNavigation = null;
+  }
+
+  function finishPending(): void {
+    const source = closingSource;
+    const next = pendingNavigation;
+    continueEditing();
+    if (source) void finishClose(source);
+    else next?.();
+  }
 
   $effect(() => {
     const requested = open;
@@ -114,8 +140,11 @@
       }
       entries = (scope === 'global' ? globalEntries : worldEntries).map((entry) => ({ ...entry }));
       seedSource = '';
+      app.translationReview.reset();
+      if (app.scan) void app.loadEstimate();
       open = false;
       app.notify(t('glossary.saved'), 'success');
+      finishPending();
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     } finally {
@@ -131,9 +160,11 @@
     invalid = false;
     confirmDiscard = false;
     open = false;
+    finishPending();
   }
 
   function requestClose(): void {
+    if (saving) return;
     if (dirty) confirmDiscard = true;
     else open = false;
   }
@@ -167,11 +198,12 @@
 {/if}
 
 {#if confirmDiscard}
-  <Dialog title={t('settings.leave.title')} onClose={() => (confirmDiscard = false)}>
-    <p>{t('settings.leave.body')}</p>
+  <Dialog title={t(closingSource ? 'settings.close.title' : 'settings.leave.title')} hideClose onClose={continueEditing}>
+    <p>{t('glossary.unsavedHelp')}</p>
     {#snippet actions()}
-      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmDiscard = false)}>{t('settings.leave.stay')}</button>
-      <button type="button" class="btn btn-danger" onclick={discard}>{t('settings.discard')}</button>
+      <button type="button" class="btn btn-secondary" disabled={saving} data-autofocus onclick={continueEditing}>{t('settings.leave.stay')}</button>
+      <button type="button" class="btn btn-danger" disabled={saving} onclick={discard}>{t(closingSource ? 'settings.close.discard' : 'settings.discard')}</button>
+      <button type="button" class="btn btn-primary" disabled={!ready || invalid || saving} onclick={save}>{t(closingSource ? 'settings.close.save' : 'glossary.save')}</button>
     {/snippet}
   </Dialog>
 {/if}

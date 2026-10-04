@@ -39,17 +39,22 @@ RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed", "awaiting_review", "
 REASONING_OUTPUT_FACTOR = 2
 
 
-def _settings_fingerprint(data_dir: Path, world: Path | str | None = None) -> str:
-    saved = _saved(data_dir)
-    from mwt.glossary import entries_hash, merge_entries, normalize_entries
+def _effective_glossary(data_dir: Path, world: Path | str | None = None) -> list[dict]:
+    from mwt.glossary import merge_entries, normalize_entries
     from mwt.userdata import load_world_glossary
 
     try:
-        global_glossary = normalize_entries(saved.get("glossary", []), field="saved glossary")
+        global_glossary = normalize_entries(_saved(data_dir).get("glossary", []), field="saved glossary")
     except ValueError:
         global_glossary = []
     world_glossary = load_world_glossary(world, data_dir) if world is not None else []
-    glossary = merge_entries(global_glossary, world_glossary)
+    return merge_entries(global_glossary, world_glossary)
+
+
+def _settings_fingerprint(data_dir: Path, world: Path | str | None = None) -> str:
+    saved = _saved(data_dir)
+    from mwt.glossary import entries_hash
+    glossary = _effective_glossary(data_dir, world)
     relevant = {
         key: saved.get(key, "")
         for key in (
@@ -761,6 +766,7 @@ def _run_translator(
                 "glossary_entries": glossary_entries,
                 "glossary_hash": glossary_hash,
                 "adopt_checkpoint": adopt_checkpoint,
+                "glossary_refreshed": bool(retry and adopt_checkpoint and adopt_checkpoint.get("applied")),
                 "adopt_report": retry is not None,
                 "edits": edits or {},
             },
@@ -992,13 +998,36 @@ def _translate_payload(report: dict) -> dict:
     }
 
 
+def _glossary_stale_sources(plan: dict, job: dict, saved: dict, entries: list[dict], data_dir: Path) -> list[str]:
+    from mwt.desktop_review import job_rows
+    from mwt.glossary import entries_hash, matching_entries, row_hashes, source_hash
+
+    resume = job.get("resume") or {}
+    if resume.get("glossary_hash") == entries_hash(entries):
+        return []
+    rows = job_rows(plan, job, saved.get("source_overrides", {}))
+    sources = [row["source"] for row in rows if row["status"] != "failed"]
+    old_hashes = resume.get("glossary_row_hashes")
+    if not isinstance(old_hashes, dict):
+        # Older jobs cannot identify removed terms. A changed fingerprint requires a full
+        # answer refresh; an unchanged legacy job with no glossary remains compatible.
+        old_fingerprint = resume.get("translation_settings_fingerprint")
+        if old_fingerprint and old_fingerprint != _settings_fingerprint(data_dir, job.get("world_dir")):
+            return sources
+        return [text for text in sources if matching_entries([text], entries)]
+    current = row_hashes(sources, entries)
+    return [text for text in sources if old_hashes.get(source_hash(text)) != current[source_hash(text)]]
+
+
 def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_dir: Path) -> dict:
     from mwt.desktop_review import job_rows, translations_page
 
     if not job:
         raise RequestRefused("JOB_NOT_FOUND", "There is no saved translation job for this scan.")
     overrides = normalize_source_overrides(saved.get("source_overrides", {}), field="saved source_overrides")
-    page = translations_page(plan, job, overrides, body)
+    glossary = _effective_glossary(data_dir, plan.get("worldDir") or job.get("world_dir"))
+    stale = _glossary_stale_sources(plan, job, saved, glossary, data_dir)
+    page = translations_page(plan, job, overrides, body, glossary=glossary, stale_sources=set(stale))
     failed_records = [
         {"source": row["source"]} for row in job_rows(plan, job, overrides) if row["status"] == "failed"
     ]
@@ -1011,6 +1040,10 @@ def _translations_payload(plan: dict, job: dict, saved: dict, body: dict, data_d
         "failedCount": len(failed_records),
         "usage": job.get("usage_total") or {},
         "retryEstimate": _estimate(failed_records, saved, data_dir) if failed_records else None,
+        "glossaryActive": bool(glossary),
+        "glossaryStaleCount": len(stale),
+        "glossaryRefreshEstimate": _estimate([{"source": text} for text in stale], saved, data_dir) if stale else None,
+        "glossaryRefreshed": bool(job.get("glossary_refreshed")),
     }
     return page
 
@@ -1134,12 +1167,14 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         from mwt.userdata import remember_user_settings, remember_world_glossary
 
         scope = body.get("scope")
-        if scope not in {"global", "world"}:
+        if not isinstance(scope, str) or scope not in {"global", "world"}:
             raise RequestRefused("INVALID_REQUEST", "scope must be global or world")
         try:
             entries = normalize_entries(body.get("entries"), field="entries")
         except GlossaryValidationError as exc:
             raise RequestRefused("GLOSSARY_INVALID", str(exc), exc.details) from exc
+        except ValueError as exc:
+            raise RequestRefused("GLOSSARY_INVALID", str(exc), {"rows": []}) from exc
         if scope == "global":
             remember_user_settings({"glossary": entries}, data_dir)
         else:
@@ -1811,6 +1846,22 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             raise RequestRefused("NOTHING_TO_REAPPLY", "This job has no applied backup to restore first.")
         if not reapply and job_applied:
             raise RequestRefused("ALREADY_APPLIED", "This job was already written to the world.")
+        saved = _saved(data_dir)
+        glossary = _effective_glossary(data_dir, world)
+        stale = _glossary_stale_sources(stored_plan, job, saved, glossary, data_dir)
+        if stale:
+            raise RequestRefused("GLOSSARY_CHANGED", "The glossary changed. Re-check affected rows before applying.", {"count": len(stale)})
+        checked_job = {**job, "edits": {**(job.get("edits") or {})}}
+        for source, text in edits_by_source.items():
+            if text is None:
+                checked_job["edits"].pop(source, None)
+            else:
+                checked_job["edits"][source] = text
+        from mwt.desktop_review import job_rows
+        mismatches = [row for row in job_rows(stored_plan, checked_job, saved.get("source_overrides", {}), glossary=glossary)
+                      if row["status"] == "glossary_mismatch"]
+        if mismatches and body.get("acknowledgeGlossaryMismatch") is not True:
+            raise RequestRefused("GLOSSARY_MISMATCH_UNCONFIRMED", "Review the glossary mismatch warning before applying.", {"count": len(mismatches)})
         raw_excluded = body.get("excludedCandidateIds", [])
         if not isinstance(raw_excluded, list) or any(item not in source_by_id for item in raw_excluded):
             raise ValueError("An excluded candidate is not part of this scan plan")
@@ -1894,7 +1945,11 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         )
         from mwt.desktop_review import failed_sources, job_rows
 
-        sources = failed_sources(stored_plan, job, source_overrides)
+        glossary = _effective_glossary(data_dir, world)
+        stale = _glossary_stale_sources(stored_plan, job, saved, glossary, data_dir)
+        refresh = normalize_review_before_apply(body.get("refreshGlossary", False), field="refreshGlossary")
+        # Every retry must refresh stale rows too, before it stamps the current glossary hash.
+        sources = list(dict.fromkeys(stale + ([] if refresh else failed_sources(stored_plan, job, source_overrides))))
         ordered = [row["source"] for row in job_rows(stored_plan, job, source_overrides)]
         resume = job.get("resume") or {}
         report = _run_translator(

@@ -1109,6 +1109,15 @@ export const ko = {
   "settings.costProtection.capError": "0~1,000 USD 사이로 입력해 주세요.",
   "settings.app.notifyOnFinish": "작업이 끝나면 알림 받기",
   "settings.app.notifyOnFinishHelp": "앱이 뒤에 있을 때 스캔이나 번역이 끝나면 알립니다.",
+  "glossary.changedTitle": "용어집이 바뀌었습니다",
+  "glossary.changedHelp": "용어집 변경의 영향을 받는 {count}개 문장을 다시 번역한 뒤 적용하세요. 다른 번역과 스캔 결과는 유지됩니다.",
+  "glossary.retranslate": "영향받은 문장 다시 번역 ({count})",
+  "glossary.needsCheck": "용어 재확인",
+  "glossary.applyWarning": "현재 용어 확인이 필요한 번역은 {count}개입니다. 직접 수정한 번역도 고정 용어와 맞는지 확인하세요. 계속하면 남아 있는 용어 불일치도 함께 적용됩니다.",
+  "error.GLOSSARY_CHANGED": "용어집이 바뀌었습니다. 검토 화면에서 영향받은 문장을 다시 번역한 뒤 적용하세요.",
+  "error.GLOSSARY_MISMATCH_UNCONFIRMED": "용어집과 다른 번역이 있습니다. 검토 화면의 적용 안내를 확인한 뒤 다시 적용하세요.",
+  "error.GLOSSARY_INVALID": "용어집 항목을 확인하세요. 표시된 오류를 고친 뒤 다시 저장하세요.",
+  "glossary.unsavedHelp": "저장하지 않은 용어집 변경이 있습니다. 저장하거나 변경을 버린 뒤 나갈 수 있습니다.",
 } as const;
 
 export type MessageKey = keyof typeof ko;

@@ -21,6 +21,7 @@
   let table: TranslationTable | undefined = $state();
   let confirmApply = $state(false);
   let confirmBudget = $state(false);
+  let refreshingGlossary = $state(false);
   let query = $state(review.query);
   let glossaryOpen = $state(false);
   let glossaryEntry = $state<GlossaryEntry | null>(null);
@@ -108,7 +109,8 @@
   }
 
   const failedCount = $derived(review.counts.failed);
-  const estimate = $derived(review.meta?.retryEstimate ?? null);
+  const staleCount = $derived(review.meta?.glossaryStaleCount ?? 0);
+  const estimate = $derived((refreshingGlossary ? review.meta?.glossaryRefreshEstimate : review.meta?.retryEstimate) ?? null);
   const estimateText = $derived.by(() => {
     if (!estimate?.cost) return t('run.cost.unknown');
     const band = t('run.cost.band', { low: formatUsd(estimate.cost.low, app.locale), high: formatUsd(estimate.cost.high, app.locale) });
@@ -117,17 +119,24 @@
     return `${band}${reasoning}${source}`;
   });
   const retryOverBudget = $derived(exceedsCap(estimate, app.settings.max_cost_usd));
-  const actionCount = $derived(corrections ? review.dirtyCount : review.applyCount);
-  const canApply = $derived(!app.busy && (corrections ? review.dirtyCount > 0 : review.applyCount > 0 || review.dirtyCount > 0));
+  const actionCount = $derived(corrections && !review.meta?.glossaryRefreshed ? review.dirtyCount : review.applyCount);
+  const canApply = $derived(!app.busy && !review.loading && staleCount === 0 && (corrections ? review.dirtyCount > 0 || !!review.meta?.glossaryRefreshed : review.applyCount > 0 || review.dirtyCount > 0));
   const cost = $derived(review.meta?.usage?.cost_reported ? review.meta.usage.cost ?? 0 : null);
 
   function retry(): void {
+    refreshingGlossary = false;
     if (retryOverBudget) confirmBudget = true;
     else void app.retryFailed();
   }
   function retryAnyway(): void {
     confirmBudget = false;
-    void app.retryFailed({ budgetOverride: true });
+    void app.retryFailed({ budgetOverride: true, refreshGlossary: refreshingGlossary });
+  }
+
+  function refreshGlossary(): void {
+    refreshingGlossary = true;
+    if (exceedsCap(review.meta?.glossaryRefreshEstimate ?? null, app.settings.max_cost_usd)) confirmBudget = true;
+    else void app.retryFailed({ refreshGlossary: true });
   }
 
   async function jumpToProblem(): Promise<void> {
@@ -161,6 +170,17 @@
       {#if review.dirtyCount > 0}<span class="pill pill-warning num">{t('translationReview.count.unsaved', { count: formatNumber(review.dirtyCount, app.locale) })}</span>{/if}
     </div>
   </header>
+
+  {#if staleCount > 0}
+    <Callout tone="warning" title={t('glossary.changedTitle')} role="alert">
+      {t('glossary.changedHelp', { count: formatNumber(staleCount, app.locale) })}
+      {#snippet actions()}
+        <button type="button" class="btn btn-secondary btn-sm" disabled={!!app.busy || !app.canRun} onclick={refreshGlossary}>
+          <Icon name="refresh" size={15} /> {t('glossary.retranslate', { count: formatNumber(staleCount, app.locale) })}
+        </button>
+      {/snippet}
+    </Callout>
+  {/if}
 
   {#if app.reviewResumed && !corrections}
     <Callout tone="info" title={t('translationReview.resumed')}>{t('translationReview.resumedHelp')}</Callout>

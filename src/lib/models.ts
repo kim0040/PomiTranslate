@@ -10,8 +10,8 @@ export function isSuitable(model: ModelInfo): boolean {
 }
 
 /** Dollars per million tokens from a per-token price string, or null when the catalog has none. */
-export function perMillion(price: string | undefined): number | null {
-  if (price === undefined || price.trim() === '') return null;
+export function perMillion(price: string | number | null | undefined): number | null {
+  if (price == null || (typeof price === 'string' && price.trim() === '')) return null;
   const value = Number(price);
   return Number.isFinite(value) && value >= 0 ? value * 1_000_000 : null;
 }
