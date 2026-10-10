@@ -7,7 +7,7 @@
   import { motion } from '../lib/motion';
 </script>
 
-<div class="toasts" role="region" aria-label={t('error.title')}>
+<div class="toasts" role="region" aria-label={t('toast.region')}>
   {#each app.toasts as toast (toast.id)}
     <div class="toast {toast.tone}" role={toast.tone === 'error' ? 'alert' : 'status'}
       in:fly={{ y: -8, duration: motion(160) }} out:fade={{ duration: motion(120) }} animate:flip={{ duration: motion(160) }}>

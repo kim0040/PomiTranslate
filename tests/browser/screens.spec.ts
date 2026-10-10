@@ -12,7 +12,7 @@ async function step(page: Page, name: string) {
   await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: new RegExp(`^${name}`) }).click();
 }
 async function run(page: Page) {
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const start = page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ });
   await start.click();
 }
@@ -37,7 +37,7 @@ test('manual browser preview uses synthetic candidates without provider requests
     if (/^https?:/.test(request.url()) && new URL(request.url()).hostname !== '127.0.0.1') externalRequests.push(request.url());
   });
   await page.goto('/tests/frontend/preview.html?scenario=review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await expect(page.locator('tr[data-index="0"]')).toContainText('Welcome to Roguefire');
   await page.locator('tr[data-index="0"]').click();
   await expect(page.locator('#manual-translation')).toBeVisible();
@@ -46,7 +46,7 @@ test('manual browser preview uses synthetic candidates without provider requests
 
 test('review overview and selected detail have full usable editor width', async ({ page }) => {
   await boot(page, 'review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await expect(page.locator('tr[data-index="0"]')).toBeVisible();
   await page.screenshot({ path: 'output/playwright/05-review.png', fullPage: true });
   await page.locator('tr[data-index="0"]').click();
@@ -82,7 +82,7 @@ test('result to backup restore returns to a valid scan step', async ({ page }) =
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.screenshot({ path: 'output/playwright/restore-rescan-notice.png' });
   await notice.getByRole('button', { name: '월드 스캔으로' }).click();
-  await expect(page.getByRole('heading', { name: '월드 스캔', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '번역할 문장 찾기', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: '번역 결과', exact: true })).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: '이전 스캔·검토 결과를 지웠습니다' })).toBeVisible();
   await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
@@ -148,11 +148,11 @@ for (const pageName of ['백업 관리', '환경 설정', '정보']) {
 for (const scenario of ['empty', 'selected', 'scan-running', 'scanned', 'run', 'run-progress', 'dark-review']) {
   test(`representative ${scenario} screen`, async ({ page }) => {
     await boot(page, scenario);
-    if (scenario === 'selected') await step(page, '월드 선택');
+    if (scenario === 'selected') await step(page, '월드 고르기');
     if (scenario === 'scan-running') await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-    if (scenario === 'run') await step(page, '번역 진행');
+    if (scenario === 'run') await step(page, '번역 준비');
     if (scenario === 'run-progress') await run(page);
-    if (scenario === 'dark-review') await step(page, '후보 검토');
+    if (scenario === 'dark-review') await step(page, '번역할 문장 고르기');
     if (scenario === 'scan-running' || scenario === 'run-progress') {
       await expect(page.getByRole('progressbar')).toBeVisible();
       expect(await page.locator('main').innerText()).not.toMatch(/translation_batch_start|phase_start|file_start/);

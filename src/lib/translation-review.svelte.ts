@@ -1,4 +1,5 @@
 import { callBackend, type TranslationCounts, type TranslationPage, type TranslationPageMeta, type TranslationRow, type TranslationState } from './api';
+import { describeError } from './errors';
 import { pagesFor } from './virtual';
 import type { EditReason } from './workflow';
 
@@ -176,7 +177,7 @@ export class TranslationReview {
       this.apply(response);
       this.version += 1;
     } catch (cause) {
-      if (token === this.token) this.error = cause instanceof Error ? cause.message : String(cause);
+      if (token === this.token) this.error = describeError(cause);
     }
   }
 

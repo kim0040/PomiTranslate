@@ -21,7 +21,7 @@ async function dirtySettings(page: Page, draft = 'native-close-draft') {
 
 async function dirtyReview(page: Page) {
   await boot(page, 'run');
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('heading', { level: 1, name: '번역 결과 검토', exact: true })).toBeVisible();
   await page.locator('tr[data-index="0"]').click();
@@ -86,15 +86,15 @@ test('window close and quit protect unsaved translation-review edits', async ({ 
 
 test('a new scan asks before replacing a job with unsaved review edits', async ({ page }) => {
   await dirtyReview(page);
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^월드 스캔/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 찾기/ }).click();
   await page.getByRole('button', { name: '다시 스캔', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '저장하지 않은 번역 수정이 있습니다' });
   await expect(dialog).toBeVisible();
   expect(await page.evaluate(() => (window as any).__pomiRequests.filter((request: any) => request.type === 'scan.start').length)).toBe(0);
   await dialog.getByRole('button', { name: '초안 버리고 계속' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__pomiRequests.filter((request: any) => request.type === 'scan.start').length)).toBe(1);
-  await expect(page.getByRole('heading', { level: 1, name: '월드 스캔', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '번역 후보 검토하기', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1, name: '번역할 문장 찾기', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '번역할 문장 고르기', exact: true })).toBeVisible();
 });
 
 test('opening a different world asks before discarding unsaved review edits', async ({ page }) => {
@@ -120,14 +120,14 @@ test('stepper shows the current label and step count at 840px while keeping acce
   const stepper = page.getByRole('navigation', { name: '작업 단계' });
   await expect(stepper.locator('.step-count')).toHaveText('2/5');
   await expect(stepper.locator('.name')).toHaveCount(1);
-  await expect(stepper.locator('.name')).toHaveText('월드 스캔');
-  await expect(stepper.getByRole('button', { name: /월드 선택/ })).toHaveCount(1);
+  await expect(stepper.locator('.name')).toHaveText('번역할 문장 찾기');
+  await expect(stepper.getByRole('button', { name: /월드 고르기/ })).toHaveCount(1);
 });
 
 test('stepper keeps all five step names at the default window and only compacts when they cannot fit', async ({ page }) => {
   await boot(page, 'selected', 1180, 800);
   const stepper = page.getByRole('navigation', { name: '작업 단계' });
-  await expect(stepper.locator('.name')).toHaveText(['월드 선택', '월드 스캔', '후보 검토', '번역 진행', '완료 결과']);
+  await expect(stepper.locator('.name')).toHaveText(['월드 고르기', '번역할 문장 찾기', '번역할 문장 고르기', '번역 준비', '결과 확인·적용']);
   await expect(stepper.locator('.step-count')).toHaveCount(0);
   expect(await page.locator('.toolbar').evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
   // Any window above the minimum band keeps the names.
@@ -189,7 +189,7 @@ test('scan home explains scanning and shows the latest saved job and resume acti
   await expect(summary).toContainText('6');
   await expect(page.getByRole('heading', { name: '중단한 작업을 이어서 진행할 수 있습니다' })).toBeVisible();
   await page.getByRole('button', { name: '이어서 작업' }).click();
-  await expect(page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ })).toHaveAttribute('aria-current', 'step');
+  await expect(page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ })).toHaveAttribute('aria-current', 'step');
 });
 
 test('backup rows are compact, restore needs confirmation, the dialog has no X and passes axe', async ({ page }) => {
@@ -229,7 +229,7 @@ test('About links to the readable support guide and Help opens the CometAPI key 
 
 test('candidate locations are friendly, teleport copies the command, and row menus work by mouse and keyboard', async ({ page }) => {
   await boot(page, 'review');
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   const row = page.locator('tr[data-index="1"]');
   await expect(row.locator('.c-where')).toContainText('오버월드');
   await expect(row.locator('.c-where')).toContainText('텍스트 디스플레이');
@@ -273,7 +273,7 @@ test('candidate locations are friendly, teleport copies the command, and row men
 
 test('candidate menu supports roving keyboard focus, activation, Tab close, and excluded-row editing', async ({ page }) => {
   await boot(page, 'review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   const row = page.locator('tr[data-index="0"]');
   await row.focus();
   await page.keyboard.press('Shift+F10');
@@ -314,7 +314,7 @@ test('candidate menu supports roving keyboard focus, activation, Tab close, and 
 
 test('bulk and single include changes can be undone and review passes axe', async ({ page }) => {
   await boot(page, 'review');
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await page.getByRole('button', { name: '현재 표시된 항목 모두 제외' }).click();
   await expect(page.locator('.toast').getByRole('button', { name: '되돌리기' })).toBeVisible();
   await page.locator('.toast').getByRole('button', { name: '되돌리기' }).click();
@@ -329,7 +329,7 @@ test('bulk and single include changes can be undone and review passes axe', asyn
 
 test('an empty narrow review area collapses its unused side panel', async ({ page }) => {
   await boot(page, 'review', 840, 620);
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await expect(page.locator('.detailwrap')).toHaveCount(0);
   // The panel is the 40px hint at once: no frame may show the old 340px column (reduced-motion transitions used to).
   const hint = page.locator('.detail-hint');
@@ -350,8 +350,8 @@ test('long jobs request notification permission lazily and notify once while unf
   });
   await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__pomiNotifications.length)).toBe(1);
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^후보 검토/ }).click();
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await page.getByRole('button', { name: /번역 시작/ }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__pomiNotifications.length)).toBe(2);
   await page.getByRole('button', { name: '백업 관리', exact: true }).click();
@@ -374,7 +374,7 @@ test('a budget-stopped translation notification describes the cap outcome, not a
     Date.now = () => realNow() + calls++ * 11_000;
     Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
   });
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('status').filter({ hasText: '비용 한도에 닿아 번역을 멈췄습니다' })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).__pomiNotifications.length)).toBe(1);
@@ -413,7 +413,7 @@ for (const theme of ['light', 'dark']) {
   for (const viewport of [{ width: 1180, height: 800 }, { width: 840, height: 620 }]) {
     test(`${theme} review and backups fit ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await boot(page, `review&theme=${theme}`, viewport.width, viewport.height);
-      await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^후보 검토/ }).click();
+      await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
       await expect(page.locator('tr[data-index="0"]')).toBeVisible();
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);

@@ -25,7 +25,7 @@ test('the first run opens the wizard with the legal notice, which must be accept
   await expect(wizard(page)).toHaveAccessibleName('환영합니다');
   // The notice text is the same as before the wizard existed.
   await expect(wizard(page)).toContainText('월드 파일을 직접 수정하는 도구입니다. 실행 시 자동 백업을 생성하지만');
-  await expect(wizard(page)).toContainText('번역할 텍스트는 선택하신 AI 제공사로 전송되며');
+  await expect(wizard(page)).toContainText('번역할 텍스트는 선택하신 AI 서비스로 전송되며');
   await expect(wizard(page)).toContainText('Mojang Studios 및 Microsoft와 관련 없는 비공식 오픈소스 프로젝트입니다.');
   await expect(wizard(page)).toContainText('NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.');
   await axe(page);
@@ -38,7 +38,7 @@ test('the first run opens the wizard with the legal notice, which must be accept
   await wizard(page).getByRole('button', { name: '확인하고 시작하기' }).click();
   // Accepting records the same pref as the old notice did, and nothing else yet.
   expect(await prefs(page)).toEqual({ notice_accepted: true });
-  await expect(wizard(page)).toHaveAccessibleName('AI 제공사 선택');
+  await expect(wizard(page)).toHaveAccessibleName('AI 서비스 선택');
   await page.screenshot({ path: 'output/playwright/setup-wizard-1-provider.png' });
 });
 
@@ -138,9 +138,9 @@ test('a wrong key is explained and blocks the next step; other failures can be p
   const cases: { key: string; message: string; blocks: boolean }[] = [
     { key: 'bad-key-value', message: 'API 키가 올바르지 않거나 권한이 없습니다. 키를 다시 확인해 주세요.', blocks: true },
     { key: 'offline-key-value', message: '네트워크에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.', blocks: false },
-    { key: 'timeout-key-value', message: '제공사가 제한 시간 안에 응답하지 않았습니다. 다시 시도해 주세요.', blocks: false },
-    { key: 'down-key-value', message: '제공사 서버에서 오류가 발생했습니다. 잠시 뒤에 다시 시도해 주세요.', blocks: false },
-    { key: 'nocredit-key-value', message: '크레딧이나 결제 한도가 부족합니다. 제공사 계정을 확인해 주세요.', blocks: false },
+    { key: 'timeout-key-value', message: 'AI 서비스가 제한 시간 안에 응답하지 않았습니다. 다시 시도해 주세요.', blocks: false },
+    { key: 'down-key-value', message: 'AI 서비스 서버에서 오류가 발생했습니다. 잠시 뒤에 다시 시도해 주세요.', blocks: false },
+    { key: 'nocredit-key-value', message: '크레딧이나 결제 한도가 부족합니다. AI 서비스 계정을 확인해 주세요.', blocks: false },
     { key: 'rate-key-value', message: '요청이 너무 많습니다. 잠시 뒤에 다시 시도해 주세요.', blocks: false }
   ];
   for (const { key, message, blocks } of cases) {
@@ -221,7 +221,7 @@ test('Escape is "later" once the notice is accepted, and back keeps what was cho
   await wizard(page).getByRole('button', { name: /뒤로/ }).click();
   await expect(wizard(page).getByRole('radio', { name: /Google Gemini/ })).toBeChecked();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: 'AI 제공사 선택' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'AI 서비스 선택' })).toHaveCount(0);
   expect(await prefs(page)).toMatchObject({ notice_accepted: true, setup_dismissed: true });
 });
 
@@ -272,7 +272,7 @@ test('the wizard can be opened again from Help, and shows the notice as already 
   await wizard(page).getByRole('button', { name: /^다음/ }).click();
   await expect(wizard(page).getByRole('radio', { name: /OpenRouter/ })).toBeChecked();
   await wizard(page).getByRole('button', { name: /^다음/ }).click();
-  await expect(wizard(page)).toContainText('이 제공사의 API 키가 이미 저장되어 있습니다');
+  await expect(wizard(page)).toContainText('이 AI 서비스의 API 키가 이미 저장되어 있습니다');
   await expect(wizard(page).getByRole('button', { name: /^다음/ })).toBeEnabled();
   await wizard(page).getByRole('button', { name: /^다음/ }).click();
   await expect(page.locator('#setup-model')).toHaveValue('xiaomi/mimo-v2.6-flash');

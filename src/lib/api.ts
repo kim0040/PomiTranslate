@@ -190,6 +190,8 @@ export type TranslationResult = {
   glossaryMismatchCount?: number;
   glossaryMismatches?: { source: string; reason: 'glossary_mismatch' }[];
   priceSource?: 'catalog' | 'user' | null;
+  /** False when the run had a spending limit that could not be enforced (the model had no price and the person agreed). */
+  costCapEnforced?: boolean;
   backupSetId?: string;
   recoverySetId?: string;
   errors?: { scope?: string; code?: string; message?: string; file?: string }[];
@@ -297,6 +299,8 @@ export type AppPrefs = {
   update_last_check: number;
   update_skipped_version: string;
   notify_on_finish: boolean;
+  /** Text size in percent: 100, 115 or 130. */
+  font_scale?: number;
 };
 
 export type BootstrapPayload = {
@@ -354,14 +358,21 @@ export type ProgressEvent = {
   translated?: string;
 };
 
+/**
+ * A failed call. `code` says what went wrong and is what the screens turn into catalog text; the
+ * message is only the code too, so no English or Korean sentence from the shell or core reaches a
+ * screen. The text they sent stays in `diagnostic` for the log and the diagnostics export.
+ */
 export class BackendError extends Error {
   code: string;
   details?: unknown;
-  constructor(message: string, code = '', details?: unknown) {
+  diagnostic?: string;
+  constructor(message: string, code = '', details?: unknown, diagnostic?: string) {
     super(message);
     this.name = 'BackendError';
     this.code = code;
     this.details = details;
+    this.diagnostic = diagnostic;
   }
 }
 
@@ -392,14 +403,15 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
       const text = cause instanceof Error ? cause.message : String(cause);
       const code = /^[A-Z][A-Z0-9_]+$/.test(text)
         ? text : /still running/i.test(text) ? 'BUSY' : 'TRANSPORT';
-      throw new BackendError(text, code);
+      throw new BackendError(code, code, undefined, text);
     }
-    if (response.id !== id) throw new BackendError('The translation core answered a different request.', 'TRANSPORT');
+    if (response.id !== id) throw new BackendError('TRANSPORT', 'TRANSPORT', undefined, 'answered a different request');
     if (response.type === 'response.error') {
-      throw new BackendError(response.error?.message || response.error?.code || 'Translation core error', response.error?.code || '', response.error?.details);
+      const code = response.error?.code || 'UNKNOWN';
+      throw new BackendError(code, response.error?.code || '', response.error?.details, response.error?.message);
     }
     if (response.type !== 'response.ok' || !response.payload) {
-      throw new BackendError('The translation core response was incomplete.', 'TRANSPORT');
+      throw new BackendError('TRANSPORT', 'TRANSPORT', undefined, 'incomplete response');
     }
     return response.payload;
   };

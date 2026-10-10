@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { app } from '../lib/app.svelte';
   import type { TranslationRow } from '../lib/api';
   import type { TranslationReview } from '../lib/translation-review.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
@@ -9,7 +10,8 @@
   // `open` is true when the user asked to see the row (click, Enter), not when the selection just moved.
   let { review, selectedId, onSelect }: { review: TranslationReview; selectedId: string; onSelect: (row: TranslationRow, open: boolean) => void } = $props();
 
-  const ROW = 64;
+  // The row grows with the user's text size, so larger text is never clipped.
+  const ROW = $derived(Math.round(64 * app.fontScale / 100));
   let viewport: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
   let height = $state(420);

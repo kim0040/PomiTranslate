@@ -3,7 +3,7 @@
   import type { TranslationRow } from '../lib/api';
   import type { TranslationReview } from '../lib/translation-review.svelte';
   import { editReasonKey, failureKey } from '../lib/failures';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
   import Icon from './Icon.svelte';
 
@@ -101,7 +101,7 @@
     <section class="block">
       <h3>{t('review.detail.places')}</h3>
       <ul class="kinds">
-        <li><span class="pill">{t(`kind.${row.kind}` as MessageKey)}</span><span class="num muted">{t('common.places', { count: formatNumber(row.occurrences, app.locale) })}</span></li>
+        <li><span class="pill">{labelFor('kind', row.kind)}</span><span class="num muted">{t('common.places', { count: formatNumber(row.occurrences, app.locale) })}</span></li>
       </ul>
     </section>
   {/if}

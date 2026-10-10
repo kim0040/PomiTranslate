@@ -95,6 +95,10 @@
   const fresh = new URLSearchParams(location.search).get('fresh') === '1';
   if (fresh) Object.assign(settings, { provider: 'openai', model: '' });
   let freshKeySaved = false;
+  // `unpriced=1`: the model has no price, so a spending limit cannot be enforced (the core answers `cost_cap_unpriced`).
+  const unpriced = new URLSearchParams(location.search).get('unpriced') === '1';
+  const capUnenforceable = (body) => unpriced && settings.max_cost_usd > 0 && !body.unpricedCapAck && !settings.custom_prices?.[`${settings.provider}/${settings.model}`];
+  const capRefusal = (request) => ({ v: 1, id: request.id, type: 'response.error', error: { code: 'cost_cap_unpriced', message: 'A spending limit needs a known price.', recoverable: true } });
   const estimate = {
     candidateCount: candidates.length, requests: 1, sourceChars: 180, inputTokens: 720,
     outputTokens: 240, requestRange: { low: 1, high: 1 }, glossaryRetryRequests: 0, glossaryPromptChars: 0,
@@ -370,7 +374,8 @@
       translationFailures: failed.slice(0, 20).map((row) => ({ source: row.source, reason: row.reason, detail: row.detail })),
       translationSamples: job.rows.filter((row) => row.status !== 'failed').slice(0, 12).map((row) => ({ source: row.source, translated: row.edit ?? row.ai })), keptOriginalSamples: [],
       // The job's own totals, like the usage: this call's providerRequests is in `extra`.
-      jobProviderRequests: job.requests, usage: { ...job.usage, requests: job.requests }, ...extra
+      jobProviderRequests: job.requests, usage: { ...job.usage, requests: job.requests },
+      ...(job.costCapUnenforced ? { costCapEnforced: false } : {}), ...extra
     };
   }
   function progressEvents(request, type, names) {
@@ -605,8 +610,8 @@
       const cost = userPrice ? {
         low: calculated.inputTokens * inputRate + calculated.outputTokens * outputRate,
         high: (calculated.inputTokensHigh * inputRate + calculated.outputTokensHigh * outputRate) * 2
-      } : calculated.cost;
-      return ok(request, { ...calculated, priceSource: userPrice ? 'user' : calculated.priceSource, candidateCount: count, cost });
+      } : unpriced ? null : calculated.cost;
+      return ok(request, { ...calculated, ...(unpriced && !userPrice ? { price: null } : {}), priceSource: userPrice ? 'user' : calculated.priceSource, candidateCount: count, cost });
     }
     if (type === 'candidates.page') return ok(request, filteredPage(body));
     if (type === 'provider.usage') return ok(request, { provider: 'openrouter', checkedAt: '2026-10-01T00:00:00Z', usage: 0.123456, byokUsage: 0, limit: null, limitRemaining: null });
@@ -670,8 +675,10 @@
         return ok(request, staged);
       }
       const resuming = type === 'translate.resume';
+      if (capUnenforceable(body)) return capRefusal(request);
       const budgetStop = (query.get('budget') === '1' || query.get('overCap') === '1') && !body.budgetDisabled;
       if (!resuming || !job) makeJob('review', body.excludedCandidateIds);
+      if (unpriced && settings.max_cost_usd > 0 && body.unpricedCapAck) job.costCapUnenforced = true;
       if (budgetStop) {
         makeJob('budget_stopped', body.excludedCandidateIds).requests = 1;
         return ok(request, jobResult('budget_stopped', { providerRequests: 1 }));
@@ -699,7 +706,9 @@
       return ok(request, pagePayload(body));
     }
     if (type === 'translate.retry_failed') {
+      if (capUnenforceable(body)) return capRefusal(request);
       ensureJob(['tellraw']);
+      if (unpriced && settings.max_cost_usd > 0 && body.unpricedCapAck) job.costCapUnenforced = true;
       const stale = glossaryRefreshRows();
       const sendRows = body.refreshGlossary ? stale : retryRows();
       window.__pomiRetrySent = sendRows.map((row) => row.id);

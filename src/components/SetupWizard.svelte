@@ -5,7 +5,8 @@
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { connectionErrorKey, defaultModel, isSuitable } from '../lib/models';
   import { setupConnectionIdentity } from '../lib/setup-connection';
-  import { PROVIDER_CARDS, PROVIDER_DEFAULTS, type ProviderId } from '../lib/providers';
+  import { PROVIDER_CARDS, PROVIDER_DEFAULTS, RECOMMENDED_PROVIDER, providerLabel, type ProviderId } from '../lib/providers';
+  import { SUGGESTED_CAP_USD } from '../lib/cost-safety';
   import { copySettings } from '../lib/settings';
   import { isValidCustomEndpoint } from '../lib/settings-import';
   import Dialog from './Dialog.svelte';
@@ -28,7 +29,7 @@
   const known = (id: string): id is ProviderId => PROVIDER_CARDS.some((card) => card.id === id);
   const configured = app.hasModel || app.apiKeyStored;
   let step = $state<StepName>('welcome');
-  const initialProvider: ProviderId = configured && known(app.settings.provider) ? app.settings.provider : 'openrouter';
+  const initialProvider: ProviderId = configured && known(app.settings.provider) ? app.settings.provider : RECOMMENDED_PROVIDER;
   let provider = $state<ProviderId>(initialProvider);
   let baseUrl = $state(app.settings.provider === 'custom' ? app.settings.base_url : '');
   let wireFormat = $state(app.settings.wire_format || 'openai');
@@ -36,10 +37,16 @@
   let model = $state(app.settings.provider === initialProvider ? app.settings.model : '');
   let language = $state(app.settings.target_language || '한국어');
   let style = $state(app.settings.style_preset && app.settings.style_preset !== 'custom' ? app.settings.style_preset : 'neutral');
+  // A first run starts with a small limit; someone who set up before and chose none keeps that choice.
+  const savedCap = app.settings.max_cost_usd ?? 0;
+  let noLimit = $state(configured && savedCap <= 0);
+  let costText = $state(String(savedCap > 0 ? savedCap : SUGGESTED_CAP_USD));
+  const costValue = $derived(Number(costText.replace(',', '.')));
+  const costValid = $derived(noLimit || (costText.trim() !== '' && Number.isFinite(costValue) && costValue > 0 && costValue <= 1000));
 
   function wizardDraftSignature(): string {
     // Keep the dirty-state snapshot free of credential text. SetupKey reports key edits directly.
-    return JSON.stringify([provider, baseUrl, wireFormat, model, language, style]);
+    return JSON.stringify([provider, baseUrl, wireFormat, model, language, style, noLimit, costText]);
   }
   let initialDraftSignature = wizardDraftSignature();
   let keyDraftDirty = $state(false);
@@ -55,7 +62,7 @@
   const storedKey = $derived(app.apiKeyStored && provider === app.settings.provider);
   const customUrlValid = $derived(provider !== 'custom' || isValidCustomEndpoint(baseUrl));
   const typed = $derived(apiKey.trim());
-  const providerName = $derived(provider === 'custom' ? t('settings.provider.custom') : PROVIDER_CARDS.find((card) => card.id === provider)?.label ?? provider);
+  const providerName = $derived(providerLabel(provider));
   const selection = $derived<Settings>(copySettings({
     ...app.settings, provider, model,
     base_url: provider === 'custom' ? baseUrl.trim() : PROVIDER_DEFAULTS[provider]?.baseUrl ?? '',
@@ -70,13 +77,13 @@
   const dismissible = $derived(!accepting);
   const canSaveSetup = $derived(customUrlValid && (provider !== 'custom' || !!baseUrl.trim()) &&
     (!!typed || storedKey) && !(status === 'error' && ['AUTH_FAILED', 'KEY_MISSING'].includes(errorCode)) &&
-    status !== 'checking' && !!model.trim() && !!language.trim());
+    status !== 'checking' && !!model.trim() && !!language.trim() && costValid);
 
   const canAdvance = $derived.by(() => {
     if (step === 'provider') return customUrlValid && (provider !== 'custom' || !!baseUrl.trim());
     if (step === 'key') return (!!typed || storedKey) && !(status === 'error' && ['AUTH_FAILED', 'KEY_MISSING'].includes(errorCode));
     if (step === 'model') return !!model.trim();
-    if (step === 'language') return !!language.trim();
+    if (step === 'language') return !!language.trim() && costValid;
     return true;
   });
 
@@ -194,6 +201,7 @@
     saveError = '';
     const changes: Partial<Settings> = {
       provider, model: model.trim(), target_language: language.trim(), style_preset: style,
+      max_cost_usd: noLimit ? 0 : Math.round(costValue * 10000) / 10000,
       base_url: provider === 'custom' ? baseUrl.trim() : PROVIDER_DEFAULTS[provider]?.baseUrl ?? '',
       wire_format: provider === 'custom' ? wireFormat : PROVIDER_DEFAULTS[provider]?.wireFormat ?? 'openai'
     };
@@ -208,8 +216,8 @@
       return true;
     } else {
       // The settings screen's banner sits behind this dialog, so the reason is shown here instead.
-      saveError = app.banner?.message ?? t('settings.saveError');
-      app.banner = null;
+      saveError = app.settingsSaveError || t('settings.saveError');
+      app.clearSettingsSaveError();
       return false;
     }
   }
@@ -248,7 +256,7 @@
   }
 </script>
 
-<Dialog title={t(TITLES[step])} size="wide" dismissible={dismissible || step === 'done'} onClose={later}>
+<Dialog title={t(TITLES[step])} size="fit" dismissible={dismissible || step === 'done'} onClose={later}>
   <div class="wizard" bind:this={body}>
     {#if step !== 'done'}
       <ol class="dots" aria-label={t('setup.progress', { index: index + 1, total: STEPS.length })}>
@@ -266,7 +274,7 @@
       <SetupModel bind:model {models} onReload={retry} reloading={status === 'checking'} />
       {#if status === 'error'}<p class="field-error" role="alert">{t(connectionErrorKey(errorCode))}</p>{/if}
     {:else if step === 'language'}
-      <SetupLanguage bind:language bind:style {providerName} {model} />
+      <SetupLanguage bind:language bind:style bind:costText bind:noLimit costInvalid={!costValid} {providerName} {model} />
       {#if saveError}<p class="field-error" role="alert">{saveError}</p>{/if}
     {:else}
       <div class="done" role="status">

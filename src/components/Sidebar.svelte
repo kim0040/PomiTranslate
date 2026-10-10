@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app, type Page } from '../lib/app.svelte';
-  import { t } from '../lib/i18n/index.svelte';
+  import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatDuration } from '../lib/format';
   import Icon, { type IconName } from './Icon.svelte';
 
@@ -27,6 +27,12 @@
       : app.startupFailed ? t('startup.failed')
       : t('status.ready')
   );
+  // What a screen reader hears: the state and the phase only. The percent and the clock change many
+  // times a second and stay visual, so the live region speaks when the work moves on, not on every tick.
+  const phaseText = $derived(
+    app.isBusy && !app.cancelling && app.progress.phase !== 'idle' ? t(`run.phase.${app.progress.phase}` as MessageKey) : ''
+  );
+  const announcement = $derived(phaseText ? `${status} · ${phaseText}` : status);
   const taskPage = $derived<Page>(app.busy === 'restore' ? 'backups' : 'workspace');
   const percent = $derived(
     app.busy === 'translate' && app.progress.phase === 'translate' && app.progress.total > 0
@@ -64,9 +70,10 @@
     {#if app.updateAvailable && !app.railCollapsed}
       <button type="button" class="update" onclick={showUpdate}><Icon name="download" size={14} /> {t('update.sidebar', { version: app.update?.version ?? '' })}</button>
     {/if}
-    <div class="state" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy} role="status" aria-live="polite">
+    <div class="state" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy}>
+      <span class="sr-only" role="status" aria-live="polite">{announcement}</span>
       <img class="pomi" src="/images/pomi.png" alt="" width="32" height="32" />
-      <div class="text">
+      <div class="text" aria-hidden="true">
         <span class="dot" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy} aria-hidden="true"></span>
         <span class="status-text">{status}{percent !== null ? ` ${percent}%` : ''}</span>
         {#if app.isBusy && app.progress.startedAt}

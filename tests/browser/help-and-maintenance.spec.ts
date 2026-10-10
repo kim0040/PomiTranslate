@@ -28,7 +28,7 @@ test('a first launch shows the notice in the setup wizard, then a short tour, an
   await notice.getByRole('button', { name: /확인/ }).click();
   await expect.poll(() => prefs(page)).toMatchObject({ notice_accepted: true });
   // Putting the wizard off ("later") leads on to the tour that a first launch shows.
-  await page.getByRole('dialog', { name: 'AI 제공사 선택' }).getByRole('button', { name: '나중에' }).click();
+  await page.getByRole('dialog', { name: 'AI 서비스 선택' }).getByRole('button', { name: '나중에' }).click();
   const tour = page.getByRole('dialog', { name: '시작 안내' });
   await expect(tour).toContainText('PomiTranslate에 오신 것을 환영합니다');
   for (let i = 0; i < 4; i++) await tour.getByRole('button', { name: /^다음/ }).click();

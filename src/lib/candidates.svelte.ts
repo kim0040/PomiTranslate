@@ -1,4 +1,5 @@
 import { BackendError, callBackend, type Candidate, type CandidatePage } from './api';
+import { describeError } from './errors';
 import { pagesFor } from './virtual';
 
 export const PAGE_SIZE = 200;
@@ -122,7 +123,7 @@ export class CandidateSource {
       this.kinds = response.kinds;
       this.version += 1;
     } catch (cause) {
-      if (token === this.token) this.error = cause instanceof Error ? cause.message : String(cause);
+      if (token === this.token) this.error = describeError(cause);
     }
   }
 

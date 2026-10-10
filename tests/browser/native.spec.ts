@@ -17,7 +17,7 @@ const emit = (page: Page, name: string, payload: unknown) => page.evaluate(([n, 
 test('review keeps the source column readable at the default window size with a row selected', async ({ page }) => {
   await page.setViewportSize({ width: 1180, height: 800 });
   await boot(page, 'review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await page.locator('tr[data-index="1"]').click();
   await expect(page.locator('#manual-translation')).toBeVisible();
   for (const width of [1180, 1100, 1024]) {
@@ -32,7 +32,7 @@ test('review keeps the source column readable at the default window size with a 
 test('each screen opens at its top instead of keeping the previous scroll position', async ({ page }) => {
   await page.setViewportSize({ width: 1180, height: 620 });
   await boot(page, 'result-success');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.locator('#main-content').evaluate((pane) => pane.scrollTo({ top: pane.scrollHeight }));
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   const heading = page.getByRole('heading', { name: '번역 결과', exact: true });
@@ -47,7 +47,7 @@ test('menu commands open settings, open a world and focus search on review', asy
   await page.evaluate(() => { (window as any).__pomiDialogFiles = null; });
   await emit(page, 'pomi-menu', 'open-world');
   await expect(page.getByRole('navigation', { name: '작업 단계' })).toBeVisible();
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await emit(page, 'pomi-menu', 'find');
   await expect(page.locator('#review-search')).toBeFocused();
   const labels = await page.evaluate(() => ((window as any).__pomiChrome ?? []).filter((c: any) => c.command === 'set_menu_labels').at(-1)?.args.labels);
@@ -72,7 +72,7 @@ test('a folder dropped on the window opens as the selected world', async ({ page
 
 test('launcher worlds are listed with their icons and open on click', async ({ page }) => {
   await boot(page, 'selected');
-  await step(page, '월드 선택');
+  await step(page, '월드 고르기');
   await expect(page.getByRole('heading', { name: 'Minecraft 월드', exact: true })).toBeVisible();
   const tile = page.getByRole('button', { name: /Skyblock Classic/ });
   await expect(tile).toBeVisible();
@@ -84,7 +84,7 @@ test('launcher worlds are listed with their icons and open on click', async ({ p
 
 test('window title and task progress follow the job', async ({ page }) => {
   await boot(page, 'run-progress');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.locator('.sidebar')).toContainText('번역 중');
   await expect.poll(() => page.evaluate(() => ((window as any).__pomiChrome ?? [])
@@ -95,7 +95,7 @@ test('window title and task progress follow the job', async ({ page }) => {
 
 test('labels are not selectable text but source text is', async ({ page }) => {
   await boot(page, 'review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   const nav = await page.getByRole('button', { name: '환경 설정', exact: true }).evaluate((el) => getComputedStyle(el).userSelect);
   const source = await page.locator('td.c-source').first().evaluate((el) => getComputedStyle(el).userSelect);
   expect(nav).toBe('none');

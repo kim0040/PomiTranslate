@@ -55,7 +55,7 @@
           type="button"
           class="step"
           disabled={!reachable && !current}
-          aria-label={`${label(step)}${isDone(step) ? ` (${t('step.done')})` : current ? ` (${t('step.current')})` : ''}`}
+          aria-label={`${label(step)}${step === 'review' ? ` (${t('step.optional')})` : ''}${isDone(step) ? ` (${t('step.done')})` : current ? ` (${t('step.current')})` : ''}`}
           title={label(step)}
           aria-current={current ? 'step' : undefined}
           onclick={() => app.goStep(step)}
@@ -64,6 +64,7 @@
             {#if isDone(step)}<Icon name="check" size={14} />{:else}{index + 1}{/if}
           </span>
           {#if !compact || current}<span class="name">{label(step)}</span>{/if}
+          {#if step === 'review' && (!compact || current)}<span class="opt" aria-hidden="true">{t('step.optional')}</span>{/if}
           {#if isDone(step)}<span class="sr-only"> ({t('step.done')})</span>{/if}
           {#if current}<span class="sr-only"> ({t('step.current')})</span>{/if}
         </button>
@@ -88,4 +89,6 @@
   @media (hover: hover) { .step:not(:disabled):hover { background: var(--bg-hover); color: var(--text); } }
   .stepper.compact li:not(.current) .step { padding-inline: var(--space-1); }
   .step-count { flex: none; color: var(--text-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+  /* The first review is not required: a small tag says so beside its name. */
+  .opt { padding: 0 6px; border-radius: var(--radius-full); border: 1px solid var(--border-strong); color: var(--text-secondary); font-size: var(--text-xs); font-weight: 500; white-space: nowrap; }
 </style>

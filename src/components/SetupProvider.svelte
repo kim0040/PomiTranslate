@@ -1,7 +1,7 @@
 <script lang="ts">
   import { isValidCustomEndpoint } from '../lib/settings-import';
   import { t } from '../lib/i18n/index.svelte';
-  import { PROVIDER_CARDS, keyPageFor, type ProviderId } from '../lib/providers';
+  import { PROVIDER_CARDS, keyPageFor, providerLabel, type ProviderId } from '../lib/providers';
   import { openExternal } from '../lib/native';
   import { app } from '../lib/app.svelte';
   import Disclosure from './Disclosure.svelte';
@@ -47,7 +47,7 @@
       <label class="pick">
         <input type="radio" name="setup-provider" value="custom" checked={provider === 'custom'} onchange={() => (provider = 'custom')} />
         <span class="text">
-          <span class="name"><strong>{t('settings.provider.custom')}</strong></span>
+          <span class="name"><strong>{providerLabel('custom')}</strong></span>
           <span class="desc">{t(custom.description)}</span>
         </span>
       </label>

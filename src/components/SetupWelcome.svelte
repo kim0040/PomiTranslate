@@ -16,6 +16,7 @@
       <li><Icon name="info" size={19} /> <span>{t('notice.item3')}</span></li>
     </ul>
     <p class="required" lang="en">NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
+    <p class="required-local">{t('notice.officialLocal')}</p>
   </section>
 </div>
 
@@ -29,5 +30,6 @@
   .notice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
   .notice-list li { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: var(--space-3); }
   .notice-list :global(.icon) { color: var(--accent-text); margin-top: 2px; }
+  .required-local { margin: calc(-1 * var(--space-2)) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .required { margin: 0; font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); letter-spacing: 0.01em; }
 </style>

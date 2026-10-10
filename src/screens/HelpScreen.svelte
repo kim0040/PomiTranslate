@@ -4,6 +4,7 @@
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { appVersion, isMac, openExternal } from '../lib/native';
   import { APP_VERSION } from '../lib/version';
+  import { PROVIDER_CARDS, keyPageFor } from '../lib/providers';
   import Icon, { type IconName } from '../components/Icon.svelte';
 
   const steps: { icon: IconName; title: MessageKey; body: MessageKey }[] = [
@@ -34,13 +35,9 @@
     { keys: [mod, '+ / − / 0'], label: 'help.shortcut.zoom' },
     { keys: ['Esc'], label: 'help.shortcut.close' }
   ];
-  const keyPages = [
-    { name: 'OpenRouter', url: 'https://openrouter.ai/settings/keys' },
-    { name: 'Google Gemini', url: 'https://aistudio.google.com/app/apikey' },
-    { name: 'OpenAI', url: 'https://platform.openai.com/api-keys' },
-    { name: 'Anthropic', url: 'https://console.anthropic.com/settings/keys' },
-    { name: 'CometAPI', url: 'https://www.cometapi.com/console/token' }
-  ];
+  // The same table as the setup wizard and settings: one list of providers and where their keys come from.
+  const keyPages = PROVIDER_CARDS.filter((card) => card.id !== 'custom')
+    .map((card) => ({ name: card.label, url: keyPageFor(card.id) ?? '' }));
 
   let version = $state(APP_VERSION);
   onMount(() => { void appVersion(APP_VERSION).then((value) => (version = value)); });

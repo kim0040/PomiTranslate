@@ -7,11 +7,14 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import SetupNotice from '../components/SetupNotice.svelte';
   import Dialog from '../components/Dialog.svelte';
+  import Disclosure from '../components/Disclosure.svelte';
+  import UnpricedNotice from '../components/UnpricedNotice.svelte';
   import TranslationReview from '../components/TranslationReview.svelte';
   import { remainingSeconds } from '../lib/workflow';
+  import { estimateMinutes, SUGGESTED_CAP_USD } from '../lib/cost-safety';
+  import { providerLabel } from '../lib/providers';
   import { REASONING_PROVIDERS, reasoningSummary, supportsReasoning } from '../lib/reasoning';
 
-  const providerLabels: Record<string, string> = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', openrouter: 'OpenRouter', comet: 'Comet API', custom: 'Custom' };
   const running = $derived(app.busy === 'translate');
   const reasoningModel = $derived(app.modelsFor(app.settings).find((model) => model.id === app.settings.model.trim()));
   const reasoning = $derived(reasoningSummary(app.settings.openrouter_reasoning ?? 'default', reasoningModel));
@@ -27,13 +30,13 @@
     if (app.settings.provider !== 'openrouter' || app.manualOnly || app.busy || attemptedMetadata) return;
     const timer = setTimeout(() => {
       attemptedMetadata = true;
-      void app.loadModels().catch(() => {}); // The summary explicitly keeps unknown metadata unknown.
+      void app.loadModels().catch(() => app.notify(t('quiet.modelsFailed'), 'info', 8000)); // The summary keeps unknown metadata unknown.
     }, 0);
     return () => clearTimeout(timer);
   });
   const estimate = $derived(app.estimate);
   const modelText = $derived(
-    app.manualOnly ? t('run.manualOnly') : app.hasModel ? `${providerLabels[app.settings.provider] ?? app.settings.provider} · ${app.settings.model}` : t('run.noModel')
+    app.manualOnly ? t('run.manualOnly') : app.hasModel ? `${providerLabel(app.settings.provider)} · ${app.settings.model}` : t('run.noModel')
   );
 
   // The same clock the sidebar reads, so the two timers always show the same second.
@@ -104,6 +107,8 @@
       : ''
   );
   const cap = $derived(app.settings.max_cost_usd ?? 0);
+  const safety = $derived(app.costSafety);
+  const minutes = $derived(app.manualOnly ? null : estimateMinutes(estimate?.requestRange?.high ?? estimate?.requests, app.settings.concurrency));
   const showReasoningNote = $derived(estimate?.reasoningIncluded ?? (REASONING_PROVIDERS.includes(app.settings.provider) && app.settings.openrouter_reasoning !== 'disabled'));
 </script>
 
@@ -192,12 +197,37 @@
 
     {#if !app.manualOnly}<SetupNotice blocking />{/if}
 
+    <!-- The few numbers that decide whether to press Start, in one line, before anything else. -->
+    <section class="glance" aria-labelledby="glance-title" data-testid="run-glance">
+      <h2 id="glance-title" class="group-title">{t('run.glance.title')}</h2>
+      <p class="glance-line num">
+        <span class="glance-item" class:warn={safety === 'unpriced'}>{t('run.glance.cost', { cost: costText })}</span>
+        {#if minutes !== null}<span class="glance-item">{t('run.glance.time', { minutes: formatNumber(minutes, app.locale) })}</span>{/if}
+        {#if !app.manualOnly}<span class="glance-item" class:warn={cap <= 0}>{cap > 0 ? t('run.glance.limit', { limit: formatUsd(cap, app.locale) }) : t('run.glance.limitNone')}</span>{/if}
+      </p>
+      {#if minutes !== null}<p class="sub">{t('run.glance.timeNote')}</p>{/if}
+    </section>
+
+    {#if safety === 'unlimited' && !app.noLimitAcknowledged && !app.manualOnly}
+      <!-- Not a blocker: someone who chose no limit can go on. It is only a reminder with a one-click fix. -->
+      <Callout tone="warning" title={t('run.nolimit.title')} role="status">
+        {t('run.nolimit.body')}
+        {#snippet actions()}
+          <button type="button" class="btn btn-primary btn-sm" disabled={!!app.busy} onclick={() => void app.setRunOption({ max_cost_usd: SUGGESTED_CAP_USD })}>{t('run.nolimit.set', { cap: formatUsd(SUGGESTED_CAP_USD, app.locale) })}</button>
+          <button type="button" class="btn btn-quiet btn-sm" onclick={() => (app.noLimitAcknowledged = true)}>{t('run.nolimit.keep')}</button>
+        {/snippet}
+      </Callout>
+    {/if}
+
+    <UnpricedNotice />
+
     <section aria-labelledby="summary-title">
       <h2 id="summary-title" class="group-title">{t('run.summaryTitle')}</h2>
       <dl class="group">
         <div class="row-item"><dt class="k">{t('run.summary.world')}</dt><dd class="v" title={app.worldDir}>{baseName(app.worldDir)}<span class="sub mono">{middleEllipsis(app.worldDir, 56)}</span></dd></div>
         <div class="row-item"><dt class="k">{t('run.summary.language')}</dt><dd class="v">{app.settings.target_language}</dd></div>
         <div class="row-item"><dt class="k">{t('run.summary.model')}</dt><dd class="v" class:warn={!app.hasModel && !app.manualOnly}>{modelText}</dd></div>
+        <div class="row-item"><dt class="k">{t('run.summary.backup')}</dt><dd class="v backup"><Icon name="shield" size={14} /> {t('run.summary.backupValue')}</dd></div>
         <div class="row-item">
           <dt class="k"><label for="review-before-apply">{t('run.review.label')}</label></dt>
           <dd class="v">
@@ -209,9 +239,6 @@
             <span id="review-before-apply-help" class="sub">{app.settings.review_before_apply !== false ? t('run.review.helpOn') : t('run.review.helpOff')}</span>
           </dd>
         </div>
-        {#if REASONING_PROVIDERS.includes(app.settings.provider) && !app.manualOnly}
-          <div class="row-item"><dt class="k">{t('settings.reasoning.label')}</dt><dd class="v inline"><span class="text">{reasoning}</span>{#if reasoningEditable}<button type="button" class="btn btn-quiet btn-sm edit-settings" disabled={!!app.busy} onclick={() => app.openSettingsFor('run')}>{t('run.reasoning.edit')}</button>{/if}</dd></div>
-        {/if}
       </dl>
     </section>
 
@@ -224,13 +251,7 @@
         <div class="row-item">
           <dt class="k">{t('run.summary.cost')}</dt>
           <dd class="v num">{costText}
-            <!-- While a new estimate is on its way its lines keep their place, so nothing below jumps. -->
-            {#if (estimate && estimate.requests > 0) || (!estimate && app.estimateLoading && !app.manualOnly)}
-              <span class="sub">{estimate ? t('run.summary.tokens', { input: formatCompact(estimate.inputTokens, app.locale), output: formatCompact(estimate.outputTokens, app.locale) }) : '\u00a0'}</span>
-              <span class="sub">{estimate ? (estimate.cost ? t('run.cost.note') : t('run.cost.unknownWhy')) : '\u00a0'}</span>
-              {#if estimate?.priceSource === 'user'}<span class="sub">{t('settings.price.userBasis')}</span>{/if}
-              {#if showReasoningNote}<span class="sub">{estimate?.reasoningIncluded ? t('run.estimate.reasoning') : t('run.reasoning.cost')}</span>{/if}
-            {/if}
+            {#if estimate && estimate.requests > 0 && !estimate.cost}<span class="sub">{t('run.cost.unknownWhy')}</span>{/if}
           </dd>
         </div>
         {#if !app.manualOnly}
@@ -247,12 +268,30 @@
             </dd>
           </div>
         {/if}
-        <div class="row-item"><dt class="k">{t('run.summary.backup')}</dt><dd class="v backup"><Icon name="shield" size={14} /> {t('run.summary.backupValue')}</dd></div>
+        <div class="row-item"><dt class="k">{t('run.summary.redistribute')}</dt><dd class="v">{t('run.summary.redistributeValue')}</dd></div>
         {#if app.settings.resource_pack_enabled && app.settings.external_resource_pack_paths?.length}
           <div class="row-item"><dt class="k">{t('settings.pack.externalTitle')}</dt><dd class="v"><ul class="external-paths">{#each app.settings.external_resource_pack_paths as path}<li class="mono">{path}</li>{/each}</ul><span class="sub">{t('settings.pack.externalHelp')}</span></dd></div>
         {/if}
       </dl>
     </section>
+
+    {#if !app.manualOnly && (estimate?.requests ?? 1) > 0}
+      <!-- Kept closed: the numbers behind the estimate are for the curious, not needed to decide. -->
+      <Disclosure id="run-details" variant="inline" level={2} title={t('run.details.title')} subtitle={t('run.details.subtitle')}>
+        <dl class="group">
+          {#if estimate && estimate.requests > 0}
+            <div class="row-item"><dt class="k">{t('run.details.tokens')}</dt><dd class="v num">{t('run.summary.tokens', { input: formatCompact(estimate.inputTokens, app.locale), output: formatCompact(estimate.outputTokens, app.locale) })}
+              <span class="sub">{estimate.cost ? t('run.cost.note') : t('run.cost.unknownWhy')}</span>
+              {#if estimate.priceSource === 'user'}<span class="sub">{t('settings.price.userBasis')}</span>{/if}
+              {#if showReasoningNote}<span class="sub">{estimate.reasoningIncluded ? t('run.estimate.reasoning') : t('run.reasoning.cost')}</span>{/if}
+            </dd></div>
+          {/if}
+          {#if REASONING_PROVIDERS.includes(app.settings.provider)}
+            <div class="row-item"><dt class="k">{t('settings.reasoning.label')}</dt><dd class="v inline"><span class="text">{reasoning}</span>{#if reasoningEditable}<button type="button" class="btn btn-quiet btn-sm edit-settings" disabled={!!app.busy} onclick={() => app.openSettingsFor('run', 'translate', 'reasoning-settings')}>{t('run.reasoning.edit')}</button>{/if}</dd></div>
+          {/if}
+        </dl>
+      </Disclosure>
+    {/if}
 
     {#if app.settings.review_before_apply === false}
     <fieldset class="group policy">
@@ -287,7 +326,7 @@
             <Icon name="list" size={16} /> {t('run.openReview')}
           </button>
         {:else}
-          <button type="button" class="btn btn-primary btn-lg" disabled={!app.canRun || app.overBudget} onclick={() => app.startTranslate({ resume: resumeStart })}>
+          <button type="button" class="btn btn-primary btn-lg" disabled={!app.canRun || app.overBudget || app.unpriced} onclick={() => app.startTranslate({ resume: resumeStart })}>
             <Icon name="play" size={16} /> {app.resume ? t('run.resume') : t('run.start')}
           </button>
         {/if}
@@ -309,6 +348,12 @@
 {/if}
 
 <style>
+  .glance { display: grid; gap: var(--space-2); padding: var(--space-4) var(--space-5); border-radius: var(--radius-xl); border: 1px solid var(--border); background: var(--bg-surface); }
+  .glance .group-title { margin: 0; }
+  .glance-line { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin: 0; font-size: var(--text-xl); font-weight: 700; }
+  .glance-item + .glance-item::before { content: '·'; margin-inline-end: var(--space-5); color: var(--text-secondary); font-weight: 400; }
+  .glance-item.warn { color: var(--warning-text); }
+  .glance .sub { margin: 0; }
   .external-paths { padding-inline-start: 1em; margin: 0; overflow-wrap: anywhere; }
   /* The edit button keeps its line when the summary text changes length, so the rows below stay put. */
   .inline { display: flex; align-items: center; gap: var(--space-2); }

@@ -11,7 +11,7 @@
     onClose,
     children,
     actions
-  }: { title: string; dismissible?: boolean; hideClose?: boolean; size?: 'normal' | 'wide'; tone?: 'normal' | 'danger'; onClose: () => void; children?: Snippet; actions?: Snippet } = $props();
+  }: { title: string; dismissible?: boolean; hideClose?: boolean; size?: 'normal' | 'wide' | 'fit'; tone?: 'normal' | 'danger'; onClose: () => void; children?: Snippet; actions?: Snippet } = $props();
 
   let dialog: HTMLDialogElement | undefined = $state();
   const titleId = `dialog-${Math.random().toString(36).slice(2, 8)}`;
@@ -36,7 +36,7 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="dialog" class:wide={size === 'wide'} class:danger={tone === 'danger'} aria-labelledby={titleId} oncancel={handleCancel}>
+<dialog bind:this={dialog} class="dialog" class:wide={size === 'wide'} class:fit={size === 'fit'} class:danger={tone === 'danger'} aria-labelledby={titleId} oncancel={handleCancel}>
   <div class="head">
     <h2 id={titleId}>{title}</h2>
     {#if dismissible && !hideClose}
@@ -61,6 +61,10 @@
   .dialog.wide { width: min(760px, calc(100% - 32px)); height: min(720px, calc(100dvh - 32px)); }
   .dialog.wide[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
   .dialog.wide .body { min-height: 0; overflow: auto; }
+  /* As wide, but only as tall as its content (up to the window), so a short step has no empty lower half. */
+  .dialog.fit { width: min(680px, calc(100% - 32px)); }
+  .dialog.fit[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+  .dialog.fit .body { min-height: 0; overflow: auto; }
   .dialog.danger h2 { color: var(--danger-text); }
   .dialog::backdrop { background: var(--scrim); animation: pomi-fade var(--dur-base) var(--ease-out); }
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }

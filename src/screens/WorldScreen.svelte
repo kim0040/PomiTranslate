@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { baseName, formatDate, middleEllipsis } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
@@ -20,8 +20,7 @@
   const dataVersion = $derived(app.inspection?.dataVersions?.find((item) => item.dataVersion)?.dataVersion ?? null);
   const blockers = $derived(app.inspection?.writeBlockers ?? []);
   const blockerText = (code: string) => {
-    const key = `world.blocked.${code}` as MessageKey;
-    try { return t(key); } catch { return t('world.blocked.unknown'); }
+    return knownBlockers.includes(code) ? labelFor('world.blocked', code) : t('world.blocked.unknown');
   };
   const knownBlockers = ['bedrock', 'mcr', 'linear', 'world_in_use', 'not_writable', 'not_readable', 'missing', 'unsafe_path'];
   const name = $derived(app.worldDir ? baseName(app.worldDir) : '');
@@ -52,8 +51,8 @@
       </div>
 
       <ul class="facts">
-        <li><span class="pill pill-accent">{t(`world.kind.${kind}` as MessageKey)}</span></li>
-        {#each dimensions as dim (dim)}<li><span class="pill">{t(`world.dim.${dim}` as MessageKey)}</span></li>{/each}
+        <li><span class="pill pill-accent">{labelFor('world.kind', kind)}</span></li>
+        {#each dimensions as dim (dim)}<li><span class="pill">{labelFor('world.dim', dim)}</span></li>{/each}
         {#if app.inspection?.resourcePacks?.length}<li><span class="pill">{t('world.resourcePack')}</span></li>{/if}
         <li><span class="pill">{t('world.backupsCount', { count: app.backups.length })}</span></li>
         {#if dataVersion}<li><span class="pill num">{t('world.gameData', { version: dataVersion })}</span></li>{/if}
