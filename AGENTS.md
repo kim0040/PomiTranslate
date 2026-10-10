@@ -22,6 +22,8 @@
 
 ## 현재 재개 상태
 
+**2026-10-11 최신:** 리뷰 수정 WIP가 로컬 브랜치 `wip/2026-10-11-{core-safety,native-security,ui-ux}`에 있고 main 미통합이다. 작업 시작 전 [리뷰 수정 인계](docs/history/review-fixes-pause-2026-10-11.md)를 읽고 그 통합 순서를 먼저 따른다. 원격 push되지 않았으므로 브랜치를 지우거나 reset하지 않는다.
+
 2026-10-02 main 통합: Phase2 개발 환경 gate 완료 / Phase3 진행 중(COMP-01 완료) / release-ready 아님. 원격 `claude/review-and-plan-2026-10-01`의 7개 commit을 `c26fcd7`→`e97261c`로 fast-forward했다. SNBT·Gemini·native UX·도움말/Tour·license 뷰어·업데이트 연결·초기화·설정 내구성·화면 모드가 구현됐다. [통합·잔여 대조](docs/history/main-integration-2026-10-02.md), [후속 구현](docs/history/native-ux-and-compat-2026-10-01.md), [업데이트·데이터](docs/updates-and-data.md)를 읽는다.
 
 Linux Python23/Rust30/frontend62/browser114 PASS는 브랜치의 기존 기록이며 이번 통합에서 새로 실행한 결과가 아니다. 후속 변경의 macOS native, clean-machine/각 OS keychain·permission, 게임 버전 표본/로드, signed updater/release·SBOM/최종 license gate는 남아 있다. 빈 updater 공개키·latest.json 게시와 공개 릴리스는 RELEASE-01 승인 경계다. 다음 순서는 [추후 작업](docs/follow-up-work.md)의 UX-NATIVE-01 → PROVIDER-01 → COMP-02/03/04 → QUALITY-01이다.
