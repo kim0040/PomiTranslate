@@ -917,9 +917,152 @@ def _run_translator(
     return report
 
 
+# JSONL process boundary. In --jsonl mode every request comes from the desktop shell, which owns
+# credentials, so this process never reads the OS keyring there. A stop request (SIGTERM from the
+# shell, or the shell/bootloader going away) is turned into the same cooperative cancel the Cancel
+# button uses: the running job stops at its next safe point, never in the middle of a write.
+_RUST_OWNS_CREDENTIALS = False
+_STDOUT_LOST = False
+_BUSY = False
+_STOP_EVENT = None  # threading.Event, created by serve()
+_CANCEL_FILE: Path | None = None
+
+
+def _keyring_allowed(body: dict) -> bool:
+    """CLI and legacy callers may fall back to the keyring; the JSONL desktop protocol never does."""
+    return not _RUST_OWNS_CREDENTIALS and body.get("credentialOwner") != "rust"
+
+
+def _stop_requested() -> bool:
+    return _STOP_EVENT is not None and _STOP_EVENT.is_set()
+
+
+def _request_stop() -> None:
+    if _STOP_EVENT is not None:
+        _STOP_EVENT.set()
+    if _CANCEL_FILE is not None:
+        try:
+            Path(str(_CANCEL_FILE)).write_bytes(b"cancel")
+        except OSError:
+            pass
+
+
+class _CancelSignal(type(Path())):
+    """The cancel file path, also reporting a stop request made inside this process."""
+
+    def is_file(self, *args, **kwargs) -> bool:  # type: ignore[override]
+        return _stop_requested() or super().is_file(*args, **kwargs)
+
+
 def emit(message: dict) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    global _STDOUT_LOST
+    if _STDOUT_LOST:
+        return
+    line = json.dumps(message, ensure_ascii=False) + "\n"
+    try:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except (BrokenPipeError, ConnectionError, OSError):
+        # Nobody reads the answers any more: the shell is gone. Stop the job cooperatively and
+        # keep later output from raising inside a write.
+        _STDOUT_LOST = True
+        _request_stop()
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except Exception:  # noqa: BLE001 - a replaced stdout may have no file descriptor
+            pass
+
+
+def _utf8_stdio() -> None:
+    """Speak UTF-8 on the pipes whatever the locale code page (cp949, cp1252, ...) is."""
+    for stream, options in (
+        (sys.stdin, {"errors": "strict"}),
+        (sys.stdout, {"errors": "strict", "newline": "\n"}),
+        (sys.stderr, {"errors": "backslashreplace"}),
+    ):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", **options)
+            except (ValueError, OSError):
+                pass
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _watch_parents_posix(parent_pid: int, interval: float) -> None:
+    original = os.getppid()
+    while not _stop_requested():
+        # A changed parent means the one-file bootloader is gone (this process was re-parented);
+        # a vanished shell process means the app is gone.
+        if os.getppid() != original or (parent_pid > 0 and not _process_alive(parent_pid)):
+            _request_stop()
+            return
+        time.sleep(interval)
+
+
+def _watch_parents_windows(parent_pid: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForMultipleObjects.restype = wintypes.DWORD
+    kernel32.WaitForMultipleObjects.argtypes = (wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL, wintypes.DWORD)
+    synchronize = 0x00100000
+    # Handles opened now pin the processes' identity, so a reused process id cannot fool the wait.
+    handles = []
+    for pid in {os.getppid(), parent_pid}:
+        if pid > 0:
+            handle = kernel32.OpenProcess(synchronize, False, pid)
+            if handle:
+                handles.append(handle)
+    if not handles:
+        return
+    array = (wintypes.HANDLE * len(handles))(*handles)
+    infinite = 0xFFFFFFFF
+    result = kernel32.WaitForMultipleObjects(len(handles), array, False, infinite)
+    if result < len(handles):  # WAIT_OBJECT_0 + index: one of the parents ended
+        _request_stop()
+
+
+def _start_parent_watchdog(parent_pid: int, interval: float = 0.5) -> None:
+    import threading
+
+    if os.name == "nt":
+        target, args = _watch_parents_windows, (parent_pid,)
+    else:
+        target, args = _watch_parents_posix, (parent_pid, interval)
+    threading.Thread(target=target, args=args, name="pomi-parent-watchdog", daemon=True).start()
+
+
+def _install_stop_handlers() -> None:
+    import signal
+
+    def on_terminate(signum, _frame):  # noqa: ANN001
+        _request_stop()
+        if not _BUSY:
+            # Nothing is running: leave now, before reading another request.
+            raise SystemExit(128 + signum)
+
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, on_terminate)
+        except (ValueError, OSError):
+            pass
 
 
 def hello() -> None:
@@ -1270,7 +1413,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 "payload": _bootstrap_payload(
                     data_dir,
                     str(body.get("worldDir") or ""),
-                    check_keyring=body.get("credentialOwner") != "rust",
+                    check_keyring=_keyring_allowed(body),
                 ),
             }
         )
@@ -1356,7 +1499,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 "id": request_id,
                 "type": "response.ok",
                 "payload": _settings_payload(
-                    data_dir, check_keyring=body.get("credentialOwner") != "rust"
+                    data_dir, check_keyring=_keyring_allowed(body)
                 ),
             }
         )
@@ -1625,7 +1768,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "provider": provider,
                     "api_key": "" if public_catalog else str(body.get("apiKey") or "")
                     or os.environ.get("POMI_API_KEY")
-                    or (load_api_key(provider) if body.get("credentialOwner") != "rust" else "")
+                    or (load_api_key(provider) if _keyring_allowed(body) else "")
                     or "",
                     "model": str(body.get("model") or saved.get("model") or ""),
                     "base_url": str(body.get("baseUrl") or os.environ.get("POMI_API_BASE") or saved.get("base_url") or ""),
@@ -1963,7 +2106,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             ),
             cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
             api_key_override=str(body.get("apiKey") or ""),
-            allow_keyring_fallback=body.get("credentialOwner") != "rust",
+            allow_keyring_fallback=_keyring_allowed(body),
             manual_overrides=overrides_by_source,
             skip_provider_validation=manual_only,
             scan_plan_id=scan_plan_id,
@@ -2190,7 +2333,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             ),
             cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
             api_key_override=str(body.get("apiKey") or ""),
-            allow_keyring_fallback=body.get("credentialOwner") != "rust",
+            allow_keyring_fallback=_keyring_allowed(body),
             manual_overrides={k: v for k, v in (resume.get("manual_overrides") or {}).items() if isinstance(v, str)},
             scan_plan_id=scan_plan_id,
             external_pack_fingerprints=stored_plan.get("externalPackFingerprints", {}),
@@ -2260,12 +2403,35 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
     )
 
 
-def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
+def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None, parent_pid: int = 0) -> None:
+    global _RUST_OWNS_CREDENTIALS, _BUSY, _STOP_EVENT, _CANCEL_FILE
+    import threading
+
+    import llm_backends
+
+    _utf8_stdio()
+    # Every JSONL request comes from the desktop shell, which owns the credentials.
+    _RUST_OWNS_CREDENTIALS = True
+    llm_backends.disable_implicit_api_keys()
+    _STOP_EVENT = threading.Event()
+    if cancel_path is not None:
+        cancel_path = _CancelSignal(cancel_path)
+        _CANCEL_FILE = cancel_path
+    _install_stop_handlers()
+    _start_parent_watchdog(parent_pid)
     hello()
     for line in sys.stdin:
+        if _stop_requested():
+            break  # never start new work after a stop request
         if not line.strip():
             continue
-        dispatch(line, report_dir, data_dir, cancel_path)
+        _BUSY = True
+        try:
+            dispatch(line, report_dir, data_dir, cancel_path)
+        finally:
+            _BUSY = False
+        if _stop_requested():
+            break
 
 
 def dispatch(line: str, report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
@@ -2322,6 +2488,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--report-dir", default="")
     parser.add_argument("--data-dir", default="")
     parser.add_argument("--cancel-file", default="")
+    parser.add_argument("--parent-pid", type=int, default=0)
     args = parser.parse_args(argv)
     from mwt.userdata import user_data_dir
 
@@ -2336,7 +2503,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.jsonl:
         cancel_path = Path(args.cancel_file) if args.cancel_file else None
-        serve(report_dir, data_dir, cancel_path)
+        serve(report_dir, data_dir, cancel_path, parent_pid=args.parent_pid)
         return
     if args.scan:
         report = _run_translator(

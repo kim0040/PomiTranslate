@@ -133,33 +133,61 @@ def infer_provider(provider: str | None, base_url: str) -> str:
     return "comet"
 
 
-def resolve_api_key(provider: str, current: str) -> str:
+# Implicit keys (environment variables and the OS keyring) are a CLI convenience. The desktop
+# JSONL entry turns them off: there the shell supplies the key, or there is none.
+_IMPLICIT_KEYS_ENABLED = True
+# normalize_config() resolves the endpoint and then the key without passing the endpoint along;
+# remember the endpoint resolved last on this thread so the key resolver can check it.
+_LAST_ENDPOINT = threading.local()
+
+
+def disable_implicit_api_keys() -> None:
+    global _IMPLICIT_KEYS_ENABLED
+    _IMPLICIT_KEYS_ENABLED = False
+
+
+def _same_endpoint(left: str, right: str) -> bool:
+    return bool(left) and bool(right) and left.strip().rstrip("/").lower() == right.strip().rstrip("/").lower()
+
+
+def resolve_api_key(provider: str, current: str, base_url: str | None = None) -> str:
+    """Return the explicit key, or a key implied for this provider and endpoint.
+
+    An implied key never crosses providers and never leaves the endpoint it belongs to:
+    - the provider's own environment variable is used for its default endpoint, or for the endpoint
+      set in the same provider's base-URL environment variable (both come from the user's shell);
+    - a stored OS-keyring key is used only for the provider's default (public) endpoint.
+    A Custom or other non-default endpoint therefore gets no implied key from env or keyring.
+    """
     if current:
         return current
+    if not _IMPLICIT_KEYS_ENABLED:
+        return ""
+    spec = provider_spec(provider)
+    if base_url is None:
+        remembered = getattr(_LAST_ENDPOINT, "value", None)
+        # Without a known endpoint, assume the worst: nothing implied is sent.
+        if not remembered or remembered[0] != provider:
+            return ""
+        base_url = remembered[1]
+    default_endpoint = spec["base_url"]
+    env_endpoint = os.getenv(spec["base_url_env_var"], "")
+    on_default = _same_endpoint(base_url, default_endpoint)
+    on_env_endpoint = _same_endpoint(base_url, env_endpoint)
 
-    env_name = provider_spec(provider)["env_var"]
-    if os.getenv(env_name):
-        return os.getenv(env_name, "")
+    if on_default or on_env_endpoint:
+        env_key = os.getenv(spec["env_var"], "")
+        if env_key:
+            return env_key
+    if on_default:
+        try:
+            from mwt.secrets import load_api_key
 
-    try:
-        from mwt.secrets import load_api_key
-
-        stored = load_api_key(provider)
-        if stored:
-            return stored
-    except Exception:
-        pass
-
-    fallback_order = [
-        "OPENAI_API_KEY",
-        "COMET_API_KEY",
-        "GEMINI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENROUTER_API_KEY",
-    ]
-    for env_name in fallback_order:
-        if os.getenv(env_name):
-            return os.getenv(env_name, "")
+            stored = load_api_key(provider)
+            if stored:
+                return stored
+        except Exception:
+            pass
     return ""
 
 
@@ -169,9 +197,12 @@ def default_base_url(provider: str) -> str:
 
 def resolve_base_url(provider: str, current: str) -> str:
     if current:
-        return current
-    spec = provider_spec(provider)
-    return os.getenv(spec["base_url_env_var"], spec["base_url"])
+        resolved = current
+    else:
+        spec = provider_spec(provider)
+        resolved = os.getenv(spec["base_url_env_var"], spec["base_url"])
+    _LAST_ENDPOINT.value = (provider, resolved)
+    return resolved
 
 
 def resolve_model(provider: str, current: str) -> str:

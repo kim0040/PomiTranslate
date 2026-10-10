@@ -1,6 +1,16 @@
 const STORAGE_KEY = "mc-world-translator-ui-v2";
 const ACTIVE_JOB_KEY = "mc-world-translator-active-job";
 
+// The server puts a per-launch token in the page. Every API call must carry it, so another web page
+// (or a DNS-rebinding host) cannot drive this local server from the browser.
+const API_TOKEN = document.querySelector('meta[name="pomi-webui-token"]')?.content || "";
+
+function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Pomi-WebUI-Token", API_TOKEN);
+  return fetch(url, { ...options, headers, credentials: "same-origin" });
+}
+
 const FALLBACK_META = {
   providers: [
     { id: "openai", label: "OpenAI", default_base_url: "https://api.openai.com/v1", env_var: "OPENAI_API_KEY" },
@@ -905,7 +915,7 @@ async function init() {
   applyTheme();
 
   try {
-    const response = await fetch("/api/meta");
+    const response = await apiFetch("/api/meta");
     if (!response.ok) {
       throw new Error(await response.text());
     }
@@ -1533,7 +1543,7 @@ async function loadModels() {
   dom.modelCatalogStatus.textContent = t("modelCatalogLoading");
   dom.loadModelsButton.disabled = true;
   try {
-    const response = await fetch("/api/models", {
+    const response = await apiFetch("/api/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: buildPayload(true) }),
@@ -1598,7 +1608,7 @@ async function improveStylePrompt() {
   dom.improveStyleButton.disabled = true;
   dom.styleAssistStatus.textContent = t("assistLoading");
   try {
-    const response = await fetch("/api/prompt-assist", {
+    const response = await apiFetch("/api/prompt-assist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: buildPayload(true), brief }),
@@ -1699,7 +1709,7 @@ async function resumeJob() {
 async function startJob({ forceDryRun, resumeFromCheckpoint, localEventKey }) {
   setRunButtonsDisabled(true);
   try {
-    const response = await fetch("/api/jobs", {
+    const response = await apiFetch("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: buildPayload(forceDryRun, resumeFromCheckpoint) }),
@@ -1729,7 +1739,7 @@ async function cancelJob() {
 
   dom.cancelButton.disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${state.activeJobId}/cancel`, {
+    const response = await apiFetch(`/api/jobs/${state.activeJobId}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -1766,7 +1776,7 @@ async function pollJob() {
   }
   state.pollInFlight = true;
   try {
-    const response = await fetch(`/api/jobs/${state.activeJobId}`);
+    const response = await apiFetch(`/api/jobs/${state.activeJobId}`);
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.error || "Polling failed");
@@ -1793,7 +1803,7 @@ async function recoverActiveJob() {
   if (!jobId) return;
 
   try {
-    const response = await fetch(`/api/jobs/${jobId}`);
+    const response = await apiFetch(`/api/jobs/${jobId}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Job recovery failed");
 

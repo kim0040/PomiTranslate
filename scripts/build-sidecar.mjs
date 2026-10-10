@@ -25,6 +25,8 @@ const built = spawnSync(python, [
   '-m', 'PyInstaller', '--noconfirm', '--onefile',
   ...(process.argv.includes('--clean') ? ['--clean'] : []),
   '--name', 'pomi-sidecar', '--paths', root,
+  // UTF-8 mode: pipes, files and paths use UTF-8 whatever the Windows code page is (cp949, cp1252).
+  '--python-option', 'X utf8',
   '--hidden-import', 'lz4.block',
   '--hidden-import', 'keyring', '--hidden-import', 'mwt.desktop_entry',
   '--hidden-import', 'mc_world_translator', '--hidden-import', 'llm_backends',
