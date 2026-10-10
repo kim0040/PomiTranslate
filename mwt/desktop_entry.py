@@ -742,6 +742,8 @@ def _run_translator(
     retry: tuple[list[str], list[str]] | None = None,
     budget_override: bool = False,
     budget_disabled: bool = False,
+    unpriced_cap_ack: bool = False,
+    recovery_set_id: str = "",
 ) -> dict:
     import os
 
@@ -804,13 +806,29 @@ def _run_translator(
         inspection = _world_inspection(world)
         selected_packs = selected_pack_files(saved)
         resource_pack_paths = list(dict.fromkeys([*(inspection.get("resourcePacks") or []), *(str(path) for path in selected_packs)]))
+    from mwt.desktop_review import normalize_max_cost_usd
+    from mc_world_translator import cost_cap_state
+
+    max_cost_usd = normalize_max_cost_usd(saved.get("max_cost_usd", 0), field="saved max_cost_usd")
+    price = _model_price({**saved, "provider": provider, "model": model}, data_dir)
+    # A cap that cannot measure spending would let the run spend without limit while the screen
+    # shows a cap. Refuse before any provider request (and before the saved job is touched)
+    # unless this one run was explicitly allowed to go on without it.
+    cap_state = "off" if budget_disabled else cost_cap_state(provider, max_cost_usd, price)
+    # Apply/reapply and a start whose every string has a manual translation send no request.
+    sends_requests = not dry_run and not apply_only and not skip_provider_validation
+    if sends_requests and cap_state == "unpriced" and not unpriced_cap_ack:
+        raise RequestRefused(
+            "cost_cap_unpriced",
+            "A cost cap is set, but the cost of this model cannot be measured: there is no published "
+            "or saved price for it, and the provider does not report what each request cost. Add a "
+            "price for this model in Settings, or confirm that this run goes on without the cap.",
+            {"maxCostUsd": max_cost_usd, "provider": provider, "model": model, "ackField": "unpricedCapAck"},
+        )
     checkpoint_path = _checkpoint_path(data_dir, scan_plan_id) if scan_plan_id else report_path.with_suffix(".checkpoint.json")
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     if scan_plan_id and not dry_run and not resume_from_checkpoint and adopt_checkpoint is None:
         checkpoint_path.unlink(missing_ok=True)
-    from mwt.desktop_review import normalize_max_cost_usd
-
-    max_cost_usd = normalize_max_cost_usd(saved.get("max_cost_usd", 0), field="saved max_cost_usd")
     from mwt.glossary import entries_hash, merge_entries, normalize_entries
     from mwt.userdata import load_world_glossary
 
@@ -820,7 +838,6 @@ def _run_translator(
         global_glossary = []
     glossary_entries = merge_entries(global_glossary, load_world_glossary(world, data_dir))
     glossary_hash = entries_hash(glossary_entries)
-    price = _model_price({**saved, "provider": provider, "model": model}, data_dir)
     config = merge_nested(
         DEFAULT_CONFIG,
         {
@@ -856,6 +873,9 @@ def _run_translator(
                 # explicit, one-run authorization and never changes the saved preference.
                 "max_cost_usd": 0.0 if budget_disabled else max_cost_usd,
                 "price": {"input": price["input"], "output": price["output"], "source": price.get("source", "catalog")} if price else None,
+                "unpriced_cost_cap_ack": bool(unpriced_cap_ack),
+                # Reapply keeps what it overwrites in this recovery set, file by file, before writing.
+                "recovery_backup_set_id": recovery_set_id,
                 "glossary_entries": glossary_entries,
                 "glossary_hash": glossary_hash,
                 "adopt_checkpoint": adopt_checkpoint,
@@ -1085,7 +1105,7 @@ def _job_requests(report: dict) -> int:
 
 
 def _translate_payload(report: dict) -> dict:
-    return {
+    payload = {
         "status": report.get("status"),
         "candidateCount": report.get("candidate_text_count", 0),
         "changedFileCount": report.get("changed_file_count", 0),
@@ -1107,6 +1127,10 @@ def _translate_payload(report: dict) -> dict:
         # Everything this job has cost so far, not only the request that just ran.
         "usage": report.get("job_usage") or report.get("usage") or {},
     }
+    if "cost_cap_enforced" in report:
+        # Present when a cost cap applied to this run: false when it went on without one by request.
+        payload["costCapEnforced"] = bool(report["cost_cap_enforced"])
+    return payload
 
 
 def _glossary_stale_sources(plan: dict, job: dict, saved: dict, entries: list[dict], data_dir: Path) -> list[str]:
@@ -1170,10 +1194,14 @@ def _restore_backup(world: Path, backup_id: str, data_dir: Path, *,
     """Put a backup set back (keeping what it replaces as a recovery set) and say which set that is."""
     stores = _backup_stores(world, data_dir)
     if backup_id == "latest":
-        listed = list_backup_sets(world, stores)
-        if not listed:
-            raise ValueError("There is no backup to restore")
-        backup_id = listed[0]["backupSetId"]
+        # The newest translation backup. A recovery set is only restored by its id: as the default
+        # it would let a second restore put the translated world back.
+        from mwt.safety import BackupError, default_restore_backup_id
+
+        try:
+            backup_id = default_restore_backup_id(world, stores)
+        except BackupError as exc:
+            raise ValueError(str(exc)) from exc
     selected = BackupSet.find(world, backup_id, stores)
     required = set(selected.external_targets())
     # An unrelated offline pack must not prevent restoring a world-only backup.
@@ -1199,34 +1227,16 @@ def _restore_backup(world: Path, backup_id: str, data_dir: Path, *,
             verified = BackupSet.open_existing(world, selected.backup_id, selected.store, external_files=allowed)
             recovery = BackupSet.new(world, kind="recovery", store=stores[0], external_files=allowed)
             targets = [verified._target(entry) for entry in verified.entries]
-            for target in targets:
-                if target.is_file():
-                    recovery.add(target)
-            # Reapply can move an internal chunk to .mcc or restore a previously removed .mcc.
-            # Preserve absence as well as bytes so recovery does not leave newly created files.
-            from mwt.region import RegionFile, external_chunk_path
-            absent = {target for target in targets if not target.exists() and target.suffix == ".mcc"}
-            for target in targets:
-                if target.suffix == ".mca" and target.is_file():
-                    absent.update(external_chunk_path(target, chunk.index)
-                                  for chunk in RegionFile.read(target).chunks if not chunk.empty
-                                  and not external_chunk_path(target, chunk.index).exists())
-            for target in sorted(absent):
-                recovery.record_new_external_chunk(target)
-            recovery.publish_latest()
-            # copy2/manifest atomic replacement alone do not guarantee crash durability.
-            for path in recovery.root.rglob("*"):
-                if path.is_file():
-                    with path.open("rb") as stream:
-                        os.fsync(stream.fileno())
-            if os.name != "nt":
-                directories = [path for path in recovery.root.rglob("*") if path.is_dir()]
-                for path in [*sorted(directories, key=lambda p: len(p.parts), reverse=True), recovery.root, recovery.store]:
-                    descriptor = os.open(path, os.O_RDONLY)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
+            # One batch: copies and manifest are flushed to disk (with their folders) before the
+            # restore below replaces a byte.
+            recovery.add_many([target for target in targets if target.is_file()])
+            # The restore below recreates .mcc files the applied world does not have; keep that
+            # absence. Files the reapply itself creates are recorded by the write, file by file,
+            # just before it creates them (runtime recovery_backup_set_id).
+            recovery.record_new_external_chunks(
+                sorted(target for target in targets if not target.exists() and target.suffix == ".mcc")
+            )
+            recovery.verify()
             before_restore(selected, recovery.backup_id)
             selected.restore(recovery_store=stores[0])
             return selected, recovery.backup_id
@@ -1951,6 +1961,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         review = saved.get("review_before_apply", True) is not False
         normalize_review_before_apply(body.get("budgetOverride", False), field="budgetOverride")
         normalize_review_before_apply(body.get("budgetDisabled", False), field="budgetDisabled")
+        unpriced_cap_ack = normalize_review_before_apply(body.get("unpricedCapAck", False), field="unpricedCapAck")
         report = _run_translator(
             world,
             dry_run=False,
@@ -1974,6 +1985,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             review_before_apply=review,
             budget_override=body.get("budgetOverride", False),
             budget_disabled=body.get("budgetDisabled", False),
+            unpriced_cap_ack=unpriced_cap_ack,
         )
         try:
             from mwt.userdata import remember_last_job
@@ -2108,6 +2120,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 apply_only=True,
                 edits=edits_by_source,
                 adopt_checkpoint={**checked_job, "applied": None} if reapply else job,
+                recovery_set_id=recovery_id if reapply else "",
             )
             if reapply:
                 # A cancelled/failed/invalidated run or a skipped write is an interrupted
@@ -2199,6 +2212,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             retry=(ordered, sources),
             budget_override=normalize_review_before_apply(body.get("budgetOverride", False), field="budgetOverride"),
             budget_disabled=normalize_review_before_apply(body.get("budgetDisabled", False), field="budgetDisabled"),
+            unpriced_cap_ack=normalize_review_before_apply(body.get("unpricedCapAck", False), field="unpricedCapAck"),
         )
         try:
             from mwt.userdata import remember_last_job
@@ -2358,13 +2372,17 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps({"localhostServer": False, "preTranslate": PRE_TRANSLATE, **report}, ensure_ascii=False))
         return
     if args.restore:
-        world = Path(args.restore)
-        stores = _backup_stores(world, data_dir)
-        listed = list_backup_sets(world, stores)
-        if not listed:
-            raise SystemExit("There is no backup to restore")
-        BackupSet.find(world, listed[0]["backupSetId"], stores).restore(recovery_store=stores[0])
-        print(json.dumps({"status": "restored", "localhostServer": False}))
+        # The same path as restore.start: world write lock and Minecraft session locks held, and
+        # the newest translation backup (never a recovery set) unless an id is given.
+        from mwt.locking import MinecraftWorldInUse, WorldWriteLocked
+        from mwt.safety import BackupError
+
+        try:
+            selected, recovery_id = _restore_backup(Path(args.restore), "latest", data_dir)
+        except (ValueError, BackupError, WorldWriteLocked, MinecraftWorldInUse) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(json.dumps({"status": "restored", "localhostServer": False,
+                          "backupSetId": selected.backup_id, "recoverySetId": recovery_id}))
         return
     hello()
 

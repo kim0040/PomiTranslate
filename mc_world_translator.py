@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -36,7 +37,7 @@ from llm_backends import (
 )
 
 from mwt import nbtio as nbt
-from mwt.extract import TextExtractionMixin, TextRef
+from mwt.extract import TextExtractionMixin, TextRef, match_wrapping_quotes
 from mwt.safety import PlanInvalidated, file_sha256
 
 
@@ -295,6 +296,10 @@ def write_text_atomic(path: Path, content: str) -> None:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
         raise
+    # The rename itself must reach the disk too, or a power loss can bring the old file back.
+    from mwt.safety import fsync_directory
+
+    fsync_directory(path.parent)
 
 
 def write_bytes_atomic(path: Path, content: bytes) -> None:
@@ -313,6 +318,10 @@ def write_bytes_atomic(path: Path, content: bytes) -> None:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
         raise
+    # The rename itself must reach the disk too, or a power loss can bring the old file back.
+    from mwt.safety import fsync_directory
+
+    fsync_directory(path.parent)
 
 
 def load_json_file(path: Path) -> dict[str, Any]:
@@ -384,7 +393,12 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
     if args.dry_run:
         result["dry_run"] = True
     if args.no_backup:
-        result["backup"] = False
+        # Kept so existing scripts still run. Every write is backed up first; this flag no longer
+        # turns that off (it only ever did for resources.zip, never for region files).
+        print(
+            "Warning: --no-backup is ignored. PomiTranslate always backs up and verifies files before writing them.",
+            file=sys.stderr,
+        )
     if args.resource_pack_zip:
         result["resource_pack"]["zip_paths"] = args.resource_pack_zip
         result["runtime"]["authorized_external_pack_paths"] = args.resource_pack_zip
@@ -529,6 +543,36 @@ def normalize_config(config: dict[str, Any], config_path: Path | None) -> dict[s
 
 
 MAX_CONSECUTIVE_REQUEST_FAILURES = 6
+# Failure codes for a reply that arrived but could not be used. The first such reply for a batch
+# counts toward the circuit breaker; retries of the same batch do not.
+_MALFORMED_FAILURES = {"invalid_response", "content_filter"}
+
+# Providers whose replies carry what each request cost, so a cost cap holds without a price list.
+COST_REPORTING_PROVIDERS = frozenset({"openrouter"})
+COST_CAP_UNPRICED = "cost_cap_unpriced"
+COST_CAP_UNPRICED_MESSAGE = (
+    "A cost cap is set, but the cost of this model cannot be measured: there is no published or "
+    "saved price for it, and the provider does not report what each request cost."
+)
+
+
+def cost_cap_state(provider: Any, max_cost_usd: Any, price: Any) -> str:
+    """"off" without a cap, "enforced" when spending can be measured, "unpriced" when it cannot."""
+    try:
+        cap = float(max_cost_usd or 0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if not math.isfinite(cap) or cap <= 0:
+        return "off"
+    if isinstance(price, dict):
+        try:
+            if all(math.isfinite(float(price[key])) and float(price[key]) >= 0 for key in ("input", "output")):
+                return "enforced"
+        except (KeyError, TypeError, ValueError):
+            pass
+    if str(provider or "").strip().lower() in COST_REPORTING_PROVIDERS:
+        return "enforced"
+    return "unpriced"
 
 
 class ProviderUnavailable(RuntimeError):
@@ -673,6 +717,8 @@ class BatchTranslator:
                 # unresolved glossary mismatch, while the ordinary run status handles its cost.
                 self.glossary_mismatches.add(text)
                 continue
+            if isinstance(retried, str):
+                retried = match_wrapping_quotes(text, retried)
             if (isinstance(retried, str) and output_matches(text, retried, matched)
                     and tokens_preserved(text, _without_trailing_reset(text, retried))):
                 answers[text] = retried
@@ -785,11 +831,17 @@ class BatchTranslator:
         """Record one failed request and return how long to wait before the next try."""
         status = getattr(exc, "status", None)
         code = getattr(exc, "code", "REQUEST_FAILED")
-        # Only outages count toward the circuit breaker. A rejected or malformed answer for one
-        # batch says nothing about the next one.
+        # Outages count toward the circuit breaker on every try. A reply that arrived unusable
+        # counts once per batch (its first try): a model that answers nothing usefully trips the
+        # breaker, while one string it cannot handle, retried, does not. A rejected request (HTTP
+        # 4xx) says nothing about the next batch and is bounded by the batch request limit instead.
         with self._lock:
             provider_outage = isinstance(exc, ProviderError) and (status is None or status == 429 or status >= 500)
-            if provider_outage:
+            malformed = (
+                not provider_outage and attempt == 1 and not isinstance(status, int)
+                and classify_failure(exc) in _MALFORMED_FAILURES
+            )
+            if provider_outage or malformed:
                 self.consecutive_failures += 1
             streak = self.consecutive_failures
             abort: ProviderUnavailable | None = None
@@ -826,18 +878,28 @@ class BatchTranslator:
         return min(1.5 * attempt, 4.0)
 
     def _translate_batch(self, texts: list[str], batch_size: int) -> dict[str, str]:
-        payload = {str(i): text for i, text in enumerate(texts)}
         max_retries = max(1, int(self.config["runtime"]["max_batch_retries"]))
-        last_error = ""
-        last_exc: BaseException | None = None
-        for attempt in range(1, max_retries + 1):
+        # Every request this batch may send, its smaller retries included. Splitting a failing
+        # batch used to retry every part in full: one 40-string batch could send ~140 requests.
+        budget = [max_retries + len(texts)]
+        return self._translate_part(texts, max_retries, budget, None)
+
+    def _translate_part(self, texts: list[str], attempts: int, budget: list[int],
+                        inherited: BaseException | None) -> dict[str, str]:
+        payload = {str(i): text for i, text in enumerate(texts)}
+        last_error = str(inherited) if inherited is not None else ""
+        last_exc: BaseException | None = inherited
+        for attempt in range(1, attempts + 1):
+            if budget[0] <= 0:
+                break
             self.ensure_not_cancelled()
             try:
                 self.throttle(len(texts))
                 # The breaker may have tripped while this worker waited for the shared throttle.
                 self.ensure_not_cancelled()
                 self._check_budget()
-                self.emit("translation_batch_start", batch_size=len(texts), attempt=attempt, max_attempts=max_retries)
+                budget[0] -= 1
+                self.emit("translation_batch_start", batch_size=len(texts), attempt=attempt, max_attempts=attempts)
                 from mwt.glossary import matching_entries
 
                 relevant_glossary = matching_entries(texts, self.glossary_entries)
@@ -853,7 +915,7 @@ class BatchTranslator:
                         self.failed.pop(text, None)
                         self.failed_codes.pop(text, None)
                 answers = {
-                    text: parsed.get(str(i), text)
+                    text: match_wrapping_quotes(text, parsed.get(str(i), text))
                     for i, text in enumerate(texts)
                 }
                 return self._apply_glossary_check(texts, answers)
@@ -863,7 +925,7 @@ class BatchTranslator:
                 last_error = str(exc)
                 last_exc = exc
                 try:
-                    delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts))
+                    delay = self._note_failure(exc, attempt=attempt, max_retries=attempts, batch_size=len(texts))
                 except ProviderUnavailable:
                     # A fatal/breaker stop still needs row-level reasons for this attempted batch.
                     with self._lock:
@@ -872,20 +934,26 @@ class BatchTranslator:
                             self.failed_codes[text] = classify_failure(exc)
                     raise
                 self._check_budget()
-                if attempt < max_retries:
+                if attempt < attempts and budget[0] > 0:
                     self.wait(delay)
 
-        if len(texts) > 1:
+        if len(texts) > 1 and budget[0] > 0:
+            # Smaller parts find the string the provider cannot handle. They get fewer tries each.
             next_size = max(1, len(texts) // 5)
             merged: dict[str, str] = {}
             for i in range(0, len(texts), next_size):
                 self.ensure_not_cancelled()
-                merged.update(self._translate_batch(texts[i : i + next_size], next_size))
+                merged.update(self._translate_part(texts[i : i + next_size], min(attempts, 2), budget, last_exc))
             return merged
-        # A single string that never translated is recorded, not passed off as translated.
+        # Strings that never translated are recorded, not passed off as translated.
+        if not last_error:
+            last_error = "The provider did not return a translation."
+        if budget[0] <= 0:
+            last_error = f"{last_error} (stopped after the request limit for this batch)"[:400]
         with self._lock:
-            self.failed[texts[0]] = last_error or "The provider did not return a translation."
-            self.failed_codes[texts[0]] = classify_failure(last_exc) if last_exc is not None else "unknown"
+            for text in texts:
+                self.failed[text] = last_error
+                self.failed_codes[text] = classify_failure(last_exc) if last_exc is not None else "unknown"
         return {}
 
 
@@ -945,6 +1013,12 @@ class WorldTranslator(TextExtractionMixin):
         self._run_backup = None
         self._write_lock = None
         self._session_locks = None
+        # During the write phase: SHA-256 of every fingerprinted world file, kept current with each
+        # write, so a checkpoint or a pre-write check never has to read the whole world again.
+        self._file_digests: dict[str, str] | None = None
+        self._fingerprint_roots: list[Path] | None = None
+        # Reapply: the recovery set that keeps the applied world, extended before each write.
+        self._recovery = None
         self.report: dict[str, Any] = {
             "world_dir": config["world_dir"],
             "dry_run": config["dry_run"],
@@ -1030,10 +1104,17 @@ class WorldTranslator(TextExtractionMixin):
         return hashlib.sha256(encoded).hexdigest()
 
     def checkpoint_payload(self) -> dict[str, Any]:
-        from mwt.safety import world_fingerprint
+        from mwt.safety import fingerprint_from_digests, world_fingerprint
         from mwt.glossary import row_hashes
 
         self.refresh_report_counts()
+        if self._file_digests is not None:
+            # Saved between two region writes: the per-file digests already follow every write, so
+            # the whole world is not read again for each file. Only a resume of this exact state
+            # (load_checkpoint) accepts this fingerprint; anything else sees no match.
+            world_state = {"world_fingerprint": "", "world_files_fingerprint": fingerprint_from_digests(self._file_digests)}
+        else:
+            world_state = {"world_fingerprint": world_fingerprint(Path(self.config["world_dir"]))}
         return {
             "version": 2,
             "world_dir": self.config["world_dir"],
@@ -1041,7 +1122,7 @@ class WorldTranslator(TextExtractionMixin):
             "model": self.config["api"]["model"],
             "dry_run": self.config["dry_run"],
             "config_fingerprint": self.checkpoint_config_fingerprint(),
-            "world_fingerprint": world_fingerprint(Path(self.config["world_dir"])),
+            **world_state,
             "resume": {
                 "scan_plan_id": str(self.runtime_config.get("scan_plan_id") or ""),
                 "translation_settings_fingerprint": str(self.runtime_config.get("translation_settings_fingerprint") or ""),
@@ -1123,10 +1204,15 @@ class WorldTranslator(TextExtractionMixin):
         if checkpoint.get("config_fingerprint") != self.checkpoint_config_fingerprint():
             self.emit("checkpoint_ignored", reason="settings")
             return
-        from mwt.safety import world_fingerprint
+        from mwt.safety import fingerprint_from_digests, world_fingerprint_and_digests
 
-        current_fingerprint = world_fingerprint(Path(self.config["world_dir"]))
-        if checkpoint.get("world_fingerprint") != current_fingerprint:
+        current_fingerprint, digests = world_fingerprint_and_digests(Path(self.config["world_dir"]))
+        saved_files = checkpoint.get("world_files_fingerprint")
+        matches = checkpoint.get("world_fingerprint") == current_fingerprint or (
+            not checkpoint.get("world_fingerprint") and isinstance(saved_files, str) and saved_files
+            and saved_files == fingerprint_from_digests(digests)
+        )
+        if not matches:
             self.emit("checkpoint_ignored", reason="world_fingerprint")
             return
         self.completed_region_files = set(checkpoint.get("completed_region_files", []))
@@ -1213,7 +1299,12 @@ class WorldTranslator(TextExtractionMixin):
         try:
             from mwt.layout import detect_write_blockers
             from mwt.locking import MinecraftSessionLocks, MinecraftWorldInUse, WorldWriteLock, WorldWriteLocked
-            from mwt.safety import world_fingerprint
+            from mwt.safety import world_fingerprint, world_fingerprint_and_digests
+
+            if self._refuse_unpriced_cost_cap():
+                return self.report
+            if not self.config["dry_run"] and not self.config.get("backup", True):
+                self._warn("backup_always_on", message="Backups cannot be turned off. Every file is backed up and verified before it is written.")
 
             blockers = detect_write_blockers(world_dir)
             self.report["write_blockers"] = blockers
@@ -1257,11 +1348,7 @@ class WorldTranslator(TextExtractionMixin):
                 self.write_report()
                 self.release_write_lock()
                 return self.report
-            if (
-                not self.config["dry_run"]
-                and self.config["backup"]
-                and self.config["resource_pack"]["enabled"]
-            ):
+            if not self.config["dry_run"] and self.config["resource_pack"]["enabled"]:
                 self._preflight_resource_pack_backup_paths(world_dir)
             if (
                 not self.config["dry_run"]
@@ -1362,34 +1449,45 @@ class WorldTranslator(TextExtractionMixin):
             self._verify_external_pack_inputs()
             self.emit("phase_start", phase="write", total=len(pending_files))
             # Recheck after collection/translation and its callbacks, before the first backup/write.
-            if world_fingerprint(world_dir) != fingerprint:
+            # The same read records every file's digest; each write keeps the map current, and each
+            # file is compared with it again just before it is overwritten.
+            current_fingerprint, digests = world_fingerprint_and_digests(world_dir)
+            if current_fingerprint != fingerprint:
                 raise PlanInvalidated("World changed during translation. Rescan before writing.")
-            if self.config["resource_pack"]["enabled"]:
-                self.write_resource_packs()
-            for index, file_path in enumerate(pending_files, start=1):
-                self.ensure_not_cancelled()
-                self.emit("file_start", phase="write", index=index, total=total_files, file=str(file_path))
-                scanned = self.file_scan.get(str(file_path), {})
-                if scanned.get("skipped") or not scanned.get("candidates", 0):
-                    result = scanned
-                else:
-                    result = self._run_file_step(self.apply_region_file, file_path)
-                if result.get("skipped") not in {"file_error", "parse_error"}:
-                    self.completed_region_files.add(str(file_path))
-                if result["changed_chunks"] > 0 or result.get("candidates", 0) > 0 or result.get("skipped"):
-                    self.report["changed_files"].append(result)
-                self.save_checkpoint()
-                self.emit(
-                    "file_done",
-                    phase="write",
-                    index=index,
-                    total=total_files,
-                    file=str(file_path),
-                    changed_chunks=result["changed_chunks"],
-                    candidates=result.get("candidates", 0),
-                    candidate_text_count=len(self.candidate_texts),
-                    skipped=result.get("skipped", ""),
-                )
+            from mwt.layout import world_data_roots
+
+            self._fingerprint_roots = world_data_roots(world_dir)
+            self._file_digests = digests
+            try:
+                if self.config["resource_pack"]["enabled"]:
+                    self.write_resource_packs()
+                for index, file_path in enumerate(pending_files, start=1):
+                    self.ensure_not_cancelled()
+                    self.emit("file_start", phase="write", index=index, total=total_files, file=str(file_path))
+                    scanned = self.file_scan.get(str(file_path), {})
+                    if scanned.get("skipped") or not scanned.get("candidates", 0):
+                        result = scanned
+                    else:
+                        result = self._run_file_step(self.apply_region_file, file_path)
+                    if result.get("skipped") not in {"file_error", "parse_error"}:
+                        self.completed_region_files.add(str(file_path))
+                    if result["changed_chunks"] > 0 or result.get("candidates", 0) > 0 or result.get("skipped"):
+                        self.report["changed_files"].append(result)
+                    self.save_checkpoint()
+                    self.emit(
+                        "file_done",
+                        phase="write",
+                        index=index,
+                        total=total_files,
+                        file=str(file_path),
+                        changed_chunks=result["changed_chunks"],
+                        candidates=result.get("candidates", 0),
+                        candidate_text_count=len(self.candidate_texts),
+                        skipped=result.get("skipped", ""),
+                    )
+            finally:
+                # Every later checkpoint (finished, cancelled, failed) carries the full fingerprint.
+                self._file_digests = None
 
             return self._finish("partial" if self._left_untranslated() else "completed")
         except PlanInvalidated as exc:
@@ -1504,8 +1602,7 @@ class WorldTranslator(TextExtractionMixin):
         raise ValueError(f"Unsupported compression type: {compression}")
 
     def backup_once(self, path: Path) -> None:
-        if not self.config["backup"]:
-            return
+        # Always, whatever ``backup`` says: no file is written without a verified backup first.
         from mwt.safety import BackupSet
 
         world_dir = Path(self.config["world_dir"]).resolve()
@@ -1519,6 +1616,7 @@ class WorldTranslator(TextExtractionMixin):
         self._run_backup.verify()
         self._run_backup.publish_latest()
         self.report["backup_set_id"] = self._run_backup.backup_id
+        self._keep_for_recovery([resolved])
 
     def _preflight_resource_pack_backup_paths(self, world_dir: Path) -> None:
         """Only explicitly selected external ZIP targets may extend the world write scope."""
@@ -1615,6 +1713,95 @@ class WorldTranslator(TextExtractionMixin):
                 time.sleep(min(0.5 * attempt, 2.0))
         if last_error is not None:
             raise last_error
+        self._note_written(path, hashlib.sha256(content).hexdigest())
+
+    def _digest_key(self, path: Path) -> str | None:
+        from mwt.safety import fingerprint_key
+
+        return fingerprint_key(Path(self.config["world_dir"]), path, self._fingerprint_roots)
+
+    def _note_written(self, path: Path, digest: str) -> None:
+        """Keep the write phase's digest map equal to what is now on disk."""
+        if self._file_digests is None:
+            return
+        key = self._digest_key(path)
+        if key is not None:
+            self._file_digests[key] = digest
+
+    def _check_unchanged(self, path: Path, content: bytes | None = None) -> None:
+        """Refuse to overwrite a world file that changed after the pre-write check."""
+        if self._file_digests is None:
+            return
+        key = self._digest_key(path)
+        if key is None:
+            return
+        if content is None:
+            if not path.exists():
+                if key in self._file_digests:
+                    raise PlanInvalidated(f"{self._relative(path)} disappeared during the write. Rescan before writing.")
+                return
+            digest = file_sha256(path)
+        else:
+            digest = hashlib.sha256(content).hexdigest()
+        if self._file_digests.get(key) != digest:
+            raise PlanInvalidated(f"{self._relative(path)} changed during the write. Rescan before writing.")
+
+    def _reapply_recovery(self) -> Any:
+        set_id = str(self.runtime_config.get("recovery_backup_set_id") or "")
+        if not set_id:
+            return None
+        if self._recovery is None:
+            from mwt.safety import BackupSet
+
+            self._recovery = BackupSet.open_existing(
+                Path(self.config["world_dir"]).resolve(), set_id, self._backup_store(),
+                external_files=self._external_backup_files(),
+            )
+        return self._recovery
+
+    def _keep_for_recovery(self, existing: list[Path], created: list[Path] | None = None) -> None:
+        """Reapply: before a file is written, its applied bytes (or its absence) join the recovery set.
+
+        The recovery set already holds every file the earlier apply wrote. A file it does not hold
+        was not changed by that apply, so its current bytes are the applied state.
+        """
+        recovery = self._reapply_recovery()
+        if recovery is None:
+            return
+        recovery.add_many(existing)
+        recovery.record_new_external_chunks([path for path in created or [] if not path.exists()])
+        recovery.verify()
+
+    def _recovery_written(self, paths: list[Path]) -> None:
+        if self._recovery is not None:
+            self._recovery.mark_written(paths)
+
+    def _stamp_cost_cap(self) -> str:
+        """Record in the report whether a cost cap holds for this run's provider requests."""
+        # Apply-only runs and manual-only starts (skip_provider_validation) send no request.
+        sends = (
+            not self.config["dry_run"] and self.translator is not None
+            and not self.runtime_config.get("apply_only") and not self.runtime_config.get("skip_provider_validation")
+        )
+        state = cost_cap_state(
+            self.config["api"]["provider"], self.runtime_config.get("max_cost_usd"), self.runtime_config.get("price"),
+        ) if sends else "off"
+        if state == "off":
+            self.report.pop("cost_cap_enforced", None)
+        else:
+            self.report["cost_cap_enforced"] = state == "enforced"
+        return state
+
+    def _refuse_unpriced_cost_cap(self) -> bool:
+        """Stop before any provider request when a cap is set that cannot be measured, unless allowed."""
+        if self._stamp_cost_cap() != "unpriced" or self.runtime_config.get("unpriced_cost_cap_ack"):
+            return False
+        self.report["status"] = "failed"
+        self.report["error"] = COST_CAP_UNPRICED_MESSAGE
+        self.report["errors"].append({"scope": "budget", "code": COST_CAP_UNPRICED, "message": COST_CAP_UNPRICED_MESSAGE})
+        self.refresh_report_counts()
+        self.write_report()
+        return True
 
     def _backup_store(self) -> Path | None:
         """The configured backup folder, or ``None`` for the legacy folder inside the world."""
@@ -1638,7 +1825,7 @@ class WorldTranslator(TextExtractionMixin):
     def _run_file_step(self, step: Any, file_path: Path) -> dict[str, Any]:
         try:
             return step(file_path)
-        except (TranslationCancelled, ProviderUnavailable):
+        except (TranslationCancelled, ProviderUnavailable, PlanInvalidated):
             raise
         except Exception as exc:
             result = {
@@ -1719,10 +1906,14 @@ class WorldTranslator(TextExtractionMixin):
 
     def collect_region_file(self, path: Path) -> dict[str, Any]:
         """Find translatable text in one region file. Never calls the provider or writes."""
+        from mwt.region import is_standard_region_name
+
         region, early = self._open_region(path)
         if early is not None:
             return early
-        locked = bool(region.unsupported_ids)
+        # A copy such as r.0.0.old.mca does not say where it sits or where its .mcc files are.
+        nonstandard = not is_standard_region_name(path)
+        locked = bool(region.unsupported_ids) or nonstandard
         stats: dict[str, Any] = {"unreadable_chunks": 0}
         unique_texts: dict[str, None] = {}
         candidate_count = 0
@@ -1751,7 +1942,11 @@ class WorldTranslator(TextExtractionMixin):
         if unparsed:
             # Command text in a form this reader cannot parse stays as written, and the scan says so.
             self._warn("command_unparsed", file=self._relative(path), count=unparsed)
-        if locked:
+        if nonstandard:
+            # Not written: its chunk positions, and so its .mcc files, would be guessed.
+            result.update(skipped="nonstandard_region_name", wrote=False)
+            self._warn("file_unwritable", file=self._relative(path), reason="nonstandard_region_name")
+        elif locked:
             # The file cannot be written, so its text is not a translation candidate.
             result.update(
                 skipped="unsupported_compression",
@@ -1765,9 +1960,11 @@ class WorldTranslator(TextExtractionMixin):
 
     def apply_region_file(self, path: Path) -> dict[str, Any]:
         """Write cached translations into one region file, backing it up first."""
-        from mwt.region import external_chunk_path
+        from mwt.region import external_chunk_path, is_standard_region_name
         from mwt.safety import BackupSet
 
+        if not is_standard_region_name(path):
+            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "nonstandard_region_name"}
         region, early = self._open_region(path)
         if early is not None:
             return early
@@ -1794,26 +1991,36 @@ class WorldTranslator(TextExtractionMixin):
             if self._run_backup is None:
                 self._run_backup = BackupSet.new(world_dir, store=self._backup_store(), external_files=self._external_backup_files())
             backup = self._run_backup
-            backup.add(path)
+            existing_mcc: list[Path] = []
+            new_mcc: list[Path] = []
             for chunk in region.chunks:
                 if not chunk.external:
                     continue
                 mcc_path = external_chunk_path(path, chunk.index)
                 if mcc_path.is_file():
-                    backup.add(mcc_path)
+                    existing_mcc.append(mcc_path)
                 elif chunk.index in mcc_files:
-                    backup.record_new_external_chunk(mcc_path)
+                    new_mcc.append(mcc_path)
+            # Nothing this write replaces may have changed since the pre-write check.
+            self._check_unchanged(path, region.original_bytes)
+            for index in mcc_files:
+                self._check_unchanged(external_chunk_path(path, index))
+            backup.add_many([path, *existing_mcc])
+            backup.record_new_external_chunks(new_mcc)
             backup.verify()
             backup.publish_latest()
             self.report["backup_set_id"] = backup.backup_id
+            self._keep_for_recovery([path, *existing_mcc], [external_chunk_path(path, index) for index in mcc_files])
             # Publish payloads before the region points at a newly created .mcc.
             for index, payload in mcc_files.items():
                 mcc_path = external_chunk_path(path, index)
                 self._write_world_bytes(mcc_path, payload)
                 backup.mark_written([mcc_path])
+                self._recovery_written([mcc_path])
                 written_files.append(str(mcc_path))
             self._write_world_bytes(path, data)
             backup.mark_written([path])
+            self._recovery_written([path])
             written_files.append(str(path))
 
         return {
@@ -1827,6 +2034,8 @@ class WorldTranslator(TextExtractionMixin):
     def retry_failed(self, ordered: list[str], sources: list[str]) -> dict[str, Any]:
         """Send only ``sources`` to the provider again. Reads and writes no world file."""
         LLMProviderClient.reset_counters()
+        if self._refuse_unpriced_cost_cap():
+            return self.report
         translator = self.translator
         for text in sources:
             translator.cache.pop(text, None)
@@ -1965,7 +2174,7 @@ class WorldTranslator(TextExtractionMixin):
         if self.file_errors:
             return True
         return any(
-            item.get("skipped") == "unsupported_compression" and item.get("candidates", 0) > 0
+            item.get("skipped") in {"unsupported_compression", "nonstandard_region_name"} and item.get("candidates", 0) > 0
             for item in self.file_scan.values()
         )
 
@@ -2232,11 +2441,17 @@ class WorldTranslator(TextExtractionMixin):
                     os.fsync(tmp_file.fileno())
                 new_digest = file_sha256(tmp_path)
                 self._verify_external_pack_inputs()
+                self._check_unchanged(zip_path)
                 os.replace(tmp_path, zip_path)
+                from mwt.safety import fsync_directory
+
+                fsync_directory(zip_path.parent)
+                self._note_written(zip_path, new_digest)
                 if str(zip_path.resolve()) in self.external_pack_inputs:
                     self.external_pack_inputs[str(zip_path.resolve())] = new_digest
                 if self._run_backup is not None:
                     self._run_backup.mark_written([zip_path])
+                self._recovery_written([zip_path])
             except Exception:
                 if tmp_path is not None:
                     tmp_path.unlink(missing_ok=True)
@@ -2310,10 +2525,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Refuse to write if the world data fingerprint differs from this scan fingerprint",
     )
-    parser.add_argument("--restore-backup", action="store_true", help="Restore the verified latest backup")
+    parser.add_argument("--restore-backup", action="store_true", help="Restore the newest verified translation backup")
+    parser.add_argument(
+        "--backup-set-id",
+        default="",
+        help="With --restore-backup: restore this backup set instead, for example the recovery set an earlier restore printed",
+    )
+    parser.add_argument(
+        "--allow-unpriced-cost-cap",
+        action="store_true",
+        help="Run even though runtime.max_cost_usd is set and this model's cost cannot be measured (the cap is then not enforced)",
+    )
     parser.add_argument("--print-notices", action="store_true", help="Print the first-launch safety notice")
     parser.add_argument("--resume", action="store_true", help="Resume from the last saved checkpoint if it exists")
-    parser.add_argument("--no-backup", action="store_true", help="Do not create backup files")
+    parser.add_argument("--no-backup", action="store_true", help="Ignored: files are always backed up before they are written")
     parser.add_argument(
         "--resource-pack-zip",
         action="append",
@@ -2340,6 +2565,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expand a short style brief into a more detailed prompt using the configured provider/model",
     )
     return parser
+
+
+def restore_backup_cli(config: dict[str, Any], data_dir: Path, backup_set_id: str = "") -> dict[str, Any]:
+    """Restore with the same locks as a translation write, and keep what it replaces.
+
+    Without an id this is the newest verified translation backup. The recovery set a restore
+    makes is never the default, so running the command twice does not bring the translation back;
+    it is restored by passing its id.
+    """
+    from mwt.locking import MinecraftSessionLocks, MinecraftWorldInUse, WorldWriteLock, WorldWriteLocked
+    from mwt.safety import BackupError, BackupSet, backup_store, default_restore_backup_id, legacy_backup_store
+
+    world = Path(config["world_dir"]).expanduser().resolve()
+    store = backup_store(world, data_dir)
+    stores = [store, legacy_backup_store(world)]
+    external_files = [Path(path) for path in config["runtime"].get("authorized_external_pack_paths", [])]
+    guard, session = WorldWriteLock(world), MinecraftSessionLocks(world)
+    try:
+        guard.acquire()
+        session.acquire()
+        backup_id = backup_set_id or default_restore_backup_id(world, stores)
+        source = BackupSet.find(world, backup_id, stores, external_files=external_files)
+        recovery_id = source.restore(recovery_store=store)
+    except (WorldWriteLocked, MinecraftWorldInUse, BackupError) as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        session.release()
+        guard.release()
+    return {"status": "restored", "world_dir": config["world_dir"], "backupSetId": backup_id, "recoverySetId": recovery_id}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -2394,14 +2648,7 @@ def main(argv: list[str] | None = None) -> None:
     if not config["world_dir"]:
         raise SystemExit("`world_dir` is required. Set it in config or pass --world-dir.")
     if args.restore_backup:
-        from mwt.safety import BackupSet, backup_store
-
-        world = Path(config["world_dir"])
-        store = backup_store(world, data_dir)
-        external_files = [Path(path) for path in config["runtime"].get("authorized_external_pack_paths", [])]
-        source = BackupSet(world, "latest", store, external_files=external_files) if (store / "latest.json").is_file() else BackupSet(world, "latest", external_files=external_files)
-        source.restore(recovery_store=store)
-        print(json.dumps({"status": "restored", "world_dir": config["world_dir"]}, ensure_ascii=False))
+        print(json.dumps(restore_backup_cli(config, data_dir, args.backup_set_id), ensure_ascii=False))
         return
     if args.expect_fingerprint:
         config["runtime"]["expected_world_fingerprint"] = args.expect_fingerprint
@@ -2410,6 +2657,13 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("API key is missing. Set it in config, environment, or translate.py defaults.")
         if not config["api"]["model"]:
             raise SystemExit("Model is missing. Set it in config or translate.py defaults.")
+        cap = cost_cap_state(config["api"]["provider"], config["runtime"].get("max_cost_usd"), config["runtime"].get("price"))
+        if cap == "unpriced" and not args.allow_unpriced_cost_cap:
+            raise SystemExit(
+                f"{COST_CAP_UNPRICED}: {COST_CAP_UNPRICED_MESSAGE} Set runtime.price in the config "
+                "(USD per token, input and output), or pass --allow-unpriced-cost-cap to run without the cap."
+            )
+        config["runtime"]["unpriced_cost_cap_ack"] = bool(args.allow_unpriced_cost_cap)
 
     translator = WorldTranslator(config)
     report = translator.run()
