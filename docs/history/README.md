@@ -4,7 +4,7 @@
 
 | 기록 | 읽는 이유 |
 | --- | --- |
-| [2026-10-11 리뷰 수정 WIP 중단·인계](review-fixes-pause-2026-10-11.md) | 전체 코드 리뷰(R1–R13, U1–U6)와 로컬 WIP 브랜치 3개의 구현·테스트 상태, 비용 한도 계약, 통합 순서. `6e46710` 기준 check0/0·frontend108·Python26 suites·Rust63 PASS |
+| [2026-10-11 리뷰 수정 WIP 중단·인계](review-fixes-pause-2026-10-11.md) | 전체 코드 리뷰(R1–R13, U1–U6)와 WIP 브랜치 3개(원격 백업, main 미통합)의 구현·테스트 상태, 비용 한도 계약, 통합 순서. `6e46710` 기준 check0/0·frontend108·Python26 suites·Rust63 PASS |
 | [2026-10-04 상용 수준 UX 개편](ux-overhaul-2026-10-04.md) | 적용 전 번역 검토·수정 재적용·실패만 재시도·비용 한도·용어집·설정 도우미·설정 탭·닫기 보호·완료 알림·창 복원·중국어 UI, 독립 검토 R1/R2 수정, 최종 gate check/frontend108/Python/Rust63/browser260 |
 | [2026-10-02 문서·에셋 현지화](localization-2026-10-02.md) | 사용자 문서4언어·문자 에셋20개·UI 언어별 합성 소개 화면9장, 재생성·hash·검증 경계 |
 | [2026-10-02 main 통합·잔여 대조](main-integration-2026-10-02.md) | 작업 브랜치 7개 commit 통합, 구현 완료/검증 대기 구분과 최신 backlog |

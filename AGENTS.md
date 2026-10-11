@@ -22,7 +22,7 @@
 
 ## 현재 재개 상태
 
-**2026-10-11 최신:** 리뷰 수정 WIP가 로컬 브랜치 `wip/2026-10-11-{core-safety,native-security,ui-ux}`에 있고 main 미통합이다. 작업 시작 전 [리뷰 수정 인계](docs/history/review-fixes-pause-2026-10-11.md)를 읽고 그 통합 순서를 먼저 따른다. 원격 push되지 않았으므로 브랜치를 지우거나 reset하지 않는다.
+**2026-10-11 최신:** 리뷰 수정 WIP가 브랜치 `wip/2026-10-11-{core-safety,native-security,ui-ux}`에 있다(로컬과 `origin` 모두). main에는 통합하지 않았다. 검증과 리뷰가 끝나지 않아 그대로 merge하거나 PR을 열 수 없다. 작업 시작 전 [리뷰 수정 인계](docs/history/review-fixes-pause-2026-10-11.md)를 읽고 그 통합 순서를 먼저 따른다. 통합 내용이 main에 들어가기 전까지는 WIP 브랜치를 지우거나, rebase하거나, force-push하지 않는다.
 
 2026-10-02 main 통합: Phase2 개발 환경 gate 완료 / Phase3 진행 중(COMP-01 완료) / release-ready 아님. 원격 `claude/review-and-plan-2026-10-01`의 7개 commit을 `c26fcd7`→`e97261c`로 fast-forward했다. SNBT·Gemini·native UX·도움말/Tour·license 뷰어·업데이트 연결·초기화·설정 내구성·화면 모드가 구현됐다. [통합·잔여 대조](docs/history/main-integration-2026-10-02.md), [후속 구현](docs/history/native-ux-and-compat-2026-10-01.md), [업데이트·데이터](docs/updates-and-data.md)를 읽는다.
 

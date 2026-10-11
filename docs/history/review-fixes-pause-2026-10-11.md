@@ -1,6 +1,12 @@
 # 코드 리뷰 수정 WIP 중단·인계 — 2026-10-11
 
-> **판정:** 리뷰에서 나온 수정은 로컬 WIP 브랜치 3개에 있다. **main에는 통합하지 않았다.** 이 커밋은 문서 인계만 담고 있으며, 제품 동작과 Phase 상태(Phase2 개발 환경 gate 완료 / Phase3 진행 중 / release-ready 아님)는 바뀌지 않았다.
+> **판정:** 리뷰에서 나온 수정은 WIP 브랜치 3개에 있다. 세 브랜치는 원격 `origin`에도 백업했다(2026-10-11 사용자 승인). **main에는 통합하지 않았다.** 브랜치는 검증과 리뷰가 끝나지 않아 그대로 merge할 수 없다. main 커밋은 문서 인계만 담고 있으며, 제품 동작과 Phase 상태(Phase2 개발 환경 gate 완료 / Phase3 진행 중 / release-ready 아님)는 바뀌지 않았다.
+>
+> **다음 에이전트가 먼저 알아야 할 것:**
+> - `origin/wip/2026-10-11-*`는 미완성 WIP 백업이다.
+> - main에 바로 merge하거나 PR을 열지 않는다. 아래 "다음 에이전트가 할 순서"를 따른다.
+> - 세 브랜치는 서로 합쳐 본 적이 없고, 독립 리뷰도 받지 않았다.
+> - core-safety는 테스트를 한 번도 실행하지 않았다.
 
 ## 무엇을 했나
 
@@ -67,11 +73,31 @@
 | U5 | 중간 | `AppState` 1573줄 / `SettingsScreen` 1092줄 | ui-ux | 분리 완료 (unit PASS 시점 기준) |
 | U6 | 낮음 | aria-live가 진행률마다 읽힘, 글자 크기 옵션 없음 | ui-ux | 구현, axe 미확인 |
 
-## WIP 브랜치 (로컬 전용, 원격 push 안 됨)
+## WIP 브랜치 (원격 백업됨, main 미통합)
 
-원격으로 브랜치를 push하는 명령은 이번 세션의 권한 분류기에 거부됐다. 세 브랜치는 **이 Mac의 로컬 저장소에만** 있다. 다음 세션에서 사용자 승인을 받아 push하거나, main에 통합한 뒤 지운다.
+세 브랜치를 `origin`에 push했다. 처음 push 시도는 권한 분류기에 거부됐고, 그 뒤 사용자가 "병합 못 하는 것들도 같이 푸시"를 승인했다.
+- 원격 브랜치: `origin/wip/2026-10-11-core-safety`, `origin/wip/2026-10-11-native-security`, `origin/wip/2026-10-11-ui-ux`
+- 로컬 브랜치는 각 원격 브랜치를 upstream으로 추적한다.
+- push 뒤 원격 SHA가 아래 표와 같은지 확인했다.
 
-Worktree는 `.claude/worktrees/agent-*`에 남아 있다(`.git/info/exclude`로 무시됨). 그 안에는 gitignored 상태로 `node_modules` symlink, 복사한 `dist/`, `src-tauri/binaries/`가 있다.
+**CI:** `ci.yml`과 `rust.yml`은 main으로 가는 push·PR에만 실행된다. `desktop-build.yml`과 `release.yml`은 `v*` 태그에만 실행된다. 그래서 `wip/*` push는 CI를 실행하지 않는다(세 브랜치의 workflow 파일에서 확인). 통합해서 main에 push하면 그때 `ci.yml`이 실행되고, native-security가 추가한 `rust.yml`(macOS·Windows runner, 비용이 더 큼)도 실행된다. `rust.yml`을 main에 들일지는 통합 전에 사용자에게 확인한다.
+
+**이 Mac:** worktree가 `.claude/worktrees/agent-*`에 남아 있다(`.git/info/exclude`로 무시됨). 그 안에는 gitignored 상태로 `node_modules` symlink, 복사한 `dist/`, `src-tauri/binaries/`가 있다. 커밋하지 않은 소스 변경은 없다(ui-ux의 `node_modules` symlink만 untracked).
+
+**다른 기기나 새 clone에서 이어갈 때:**
+
+```sh
+git fetch origin
+git worktree add ../mwt-core   -b wip/2026-10-11-core-safety     origin/wip/2026-10-11-core-safety
+git worktree add ../mwt-native -b wip/2026-10-11-native-security origin/wip/2026-10-11-native-security
+git worktree add ../mwt-ui     -b wip/2026-10-11-ui-ux           origin/wip/2026-10-11-ui-ux
+```
+
+- ui-ux 작업 폴더에서는 `pnpm install`을 실행한다.
+- native-security를 앱으로 확인하려면 sidecar를 다시 빌드해야 한다.
+  - `src-tauri/binaries/*`는 gitignored라 clone에 없다.
+  - 이 Mac의 worktree에 있는 복사본은 변경 전 빌드다.
+- Python은 `.venv`(3.12)를 새로 만든다.
 
 | 브랜치 | SHA (기준 `6e46710`) | worktree | 규모 |
 | --- | --- | --- | --- |
@@ -218,7 +244,10 @@ Playwright는 `settings-tabs`와 `settings-ux`만 돌렸고 12개가 실패했�
 
 ## 다음 에이전트가 할 순서
 
-1. **브랜치 보존 확인:** `git branch -v | grep wip/`. 원격 push는 사용자 승인을 받은 뒤에 한다.
+1. **브랜치 확인:** `git fetch origin && git branch -vv | grep wip/`를 실행한다.
+   - 로컬 SHA와 원격 SHA가 위 표와 같아야 한다.
+   - 다르면 누가 이어서 커밋했는지 `git log`로 먼저 확인한다.
+   - 통합은 main에서 새로 딴 `integrate/review-fixes-2026-10-11` 같은 브랜치에서 한다. WIP 브랜치를 rebase하거나 force-push하지 않는다.
 2. **core-safety 마무리**
    - `test_review_apply` budget 테스트를 고치고, R8·R10 테스트를 쓴다.
    - 데스크톱 `--translate`가 `RequestRefused`를 처리하게 한다.
@@ -246,6 +275,9 @@ Playwright는 `settings-tabs`와 `settings-ux`만 돌렸고 12개가 실패했�
    - webui 문서: 서버를 다시 시작하면 새로고침, 경로 제한
    - `support-matrix.md`: 1.20.3–1.21.4 JSON 문자열 컴포넌트
    - screenshot과 manifest
-8. 통합 커밋을 main에 push한 뒤 WIP 브랜치와 worktree를 정리한다(`git worktree remove`).
+8. 통합 커밋을 main에 push한 뒤 WIP 브랜치와 worktree를 정리한다.
+   - 로컬: `git worktree remove`, `git branch -d`
+   - 원격: `git push origin --delete wip/2026-10-11-core-safety wip/2026-10-11-native-security wip/2026-10-11-ui-ux`
+   - 원격 브랜치는 통합 내용이 main에 있는지 확인한 뒤에만 지운다.
 
 이번 중단 범위 밖의 기존 backlog(UX-NATIVE-01 → PROVIDER-01 → COMP-02~04 → QUALITY-01/TM)는 [추후 작업](../follow-up-work.md) 순서를 따른다. 위 통합이 그보다 먼저다.

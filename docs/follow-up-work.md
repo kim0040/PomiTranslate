@@ -6,7 +6,7 @@
 
 ## 지금 할 순서 (2026-10-02 main 통합 기준)
 
-0. **REVIEW-2026-10-11 — 리뷰 수정 WIP 통합(최우선).** 2026-10-11 전체 리뷰에서 나온 데이터 손실·보안·비용·UX 수정이 로컬 WIP 브랜치 3개에 있다(core-safety 테스트 미실행, native-security 테스트 PASS 보고, ui-ux browser spec 미갱신). [인계 문서](history/review-fixes-pause-2026-10-11.md)의 순서(테스트 보강 → merge → 독립 리뷰 → sidecar 재빌드·native 확인 → 문서)로 main에 통합한 뒤 아래 1번부터 진행한다.
+0. **REVIEW-2026-10-11 — 리뷰 수정 WIP 통합(최우선).** 2026-10-11 전체 리뷰에서 나온 데이터 손실·보안·비용·UX 수정이 WIP 브랜치 3개(`origin/wip/2026-10-11-*`에 백업, main 미통합)에 있다(core-safety 테스트 미실행, native-security 테스트 PASS 보고, ui-ux browser spec 미갱신). [인계 문서](history/review-fixes-pause-2026-10-11.md)의 순서(테스트 보강 → merge → 독립 리뷰 → sidecar 재빌드·native 확인 → 문서)로 main에 통합한 뒤 아래 1번부터 진행한다.
 
 [main 통합·잔여 작업 대조](history/main-integration-2026-10-02.md)에서 `e97261c`의 코드와 문서를 대조했다. 도움말·초기화·화면 모드·업데이트 연결까지 구현됐으며, 이전 Linux 검증 기록과 이번 코드 확인을 구분한다. 아래는 실제로 남은 작업의 권장 순서다. 아래 표의 ID와 완료 조건이 기준이다.
 
