@@ -395,6 +395,43 @@ def test_counter_survives_deleted_backups_and_other_stores() -> None:
         RESULTS.append("counter_retention")
 
 
+def test_a_counter_that_cannot_be_read_never_lowers_the_generation() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        world, _pack = build_world(root)
+        store = root / "a"
+        key = journal.world_key(world)
+        journal._write_world_state(store, key, 50, "retained", strict=True)
+        counter = store / f"world-state.{key}.json"
+        real_read_text = Path.read_text
+
+        def failing_read(path: Path, *args, **kwargs):
+            if path == counter:
+                raise OSError(errno.EIO, "unreadable counter")
+            return real_read_text(path, *args, **kwargs)
+
+        # An I/O error: the number is unknown, so no record is accepted and the counter stays.
+        with patch.object(Path, "read_text", failing_read):
+            try:
+                new_record(store, "first", world)
+                raise AssertionError("a record must not be accepted over an unreadable counter")
+            except JournalWriteFailed as exc:
+                assert exc.code == "JOURNAL_WRITE_FAILED", exc.code
+        assert journal_files(root) == []
+        assert journal.read_world_state(store, key)["generation"] == 50
+        # Damaged content: the lost number is passed by a time-based floor, never restarted at 1.
+        counter.write_text("{not json", encoding="utf-8")
+        record = new_record(store, "second", world)
+        assert record.generation > 50, record.generation
+        record.save()
+        # Settling with a damaged counter in place writes nothing smaller over it.
+        counter.write_text("{not json", encoding="utf-8")
+        record.set_state("kept")
+        assert counter.read_text(encoding="utf-8") == "{not json"
+        assert new_record(store, "third", world).generation > record.generation
+        RESULTS.append("counter_unreadable")
+
+
 def test_worlds_sharing_one_store_have_their_own_counter() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)

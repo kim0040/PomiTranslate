@@ -283,25 +283,51 @@ def _state_file(store: Path, key: str) -> Path:
     return Path(store) / f"world-state.{key}.json"
 
 
-def _read_counter(path: Path, key: str) -> dict:
+class _UnreadableCounter(Exception):
+    """A counter file exists but could not be read (an I/O error, not a missing file)."""
+
+    def __init__(self, cause: OSError) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _read_counter(path: Path, key: str, *, own: bool = True) -> dict:
+    """The counter in ``path``. A missing file is ``{}``. A file that exists but cannot be read
+    raises ``_UnreadableCounter``. ``own``: the file is this world's own, so damaged content is
+    reported as ``{"damaged": True}`` instead of being taken for an absent counter; the shared file
+    of an earlier release also holds other worlds, so there anything not about this world is ``{}``."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
-    if not isinstance(data, dict) or data.get("worldKey") != key:
-        return {}
+    except OSError as exc:
+        raise _UnreadableCounter(exc) from exc
+    damaged = {"damaged": True} if own else {}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return damaged
+    if not isinstance(data, dict):
+        return damaged
+    if data.get("worldKey") != key:
+        return damaged if own else {}
     generation = data.get("generation")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
-        return {}
+        return damaged
     return data
 
 
 def read_world_state(store: Path, key: str) -> dict:
     """``{generation, lastSettledJobId}`` of this world from ``<store>/world-state.<key>.json``, or
-    from the single shared ``world-state.json`` an earlier release wrote there (the larger wins)."""
+    from the single shared ``world-state.json`` an earlier release wrote there (the larger wins).
+    ``damaged`` is set when this world's counter exists but its content is unusable.
+    Raises ``_UnreadableCounter`` when a counter file exists but cannot be read."""
     current = _read_counter(_state_file(store, key), key)
-    legacy = _read_counter(Path(store) / WORLD_STATE_NAME, key)
-    return legacy if int(legacy.get("generation", -1)) > int(current.get("generation", -1)) else current
+    legacy = _read_counter(Path(store) / WORLD_STATE_NAME, key, own=False)
+    best = legacy if int(legacy.get("generation", -1)) > int(current.get("generation", -1)) else dict(current)
+    if current.get("damaged") or legacy.get("damaged"):
+        best["damaged"] = True
+    return best
 
 
 def _write_world_state(store: Path, key: str, generation: int, last_settled: str, *, strict: bool = False) -> None:
@@ -328,14 +354,25 @@ def allocate_generation(world_dir: Path, store: Path, stores: Iterable[Path] = (
     key = world_key(world_dir)
     known = [Path(item) for item in [*stores, store]]
     highest = 0
-    for where in known:
-        highest = max(highest, int(read_world_state(where, key).get("generation", 0)))
+    damaged = False
+    try:
+        for where in known:
+            state = read_world_state(where, key)
+            highest = max(highest, int(state.get("generation", 0)))
+            damaged = damaged or bool(state.get("damaged"))
+        previous = read_world_state(store, key)
+    except _UnreadableCounter as exc:
+        # The number it holds is unknown, so any number chosen now could go back. Retry later.
+        raise JournalWriteFailed(exc.cause) from exc
     for _where, path in iter_journal_files(known):
         head = peek_header(path)
         if head is not None and head["worldKey"] == key:
             highest = max(highest, head["generation"])
+    if damaged:
+        # A counter exists but its number is lost. The current time in seconds is larger than any
+        # count of jobs, so the new generation cannot fall below the lost one.
+        highest = max(highest, int(time.time()))
     generation = highest + 1
-    previous = read_world_state(store, key)
     _write_world_state(store, key, generation, str(previous.get("lastSettledJobId", "")), strict=True)
     return generation
 
@@ -343,7 +380,12 @@ def allocate_generation(world_dir: Path, store: Path, stores: Iterable[Path] = (
 def _note_settled(journal: "Journal") -> None:
     store = journal.path.parent.parent
     key = journal.doc.get("worldKey") or world_key(journal.world_dir)
-    state = read_world_state(store, key)
+    try:
+        state = read_world_state(store, key)
+    except _UnreadableCounter:
+        return  # best effort; writing now could replace a larger number we cannot see
+    if state.get("damaged"):
+        return  # the next record allocation handles a damaged counter
     generation = max(int(state.get("generation", 0)), int(journal.doc.get("generation", 0)))
     _write_world_state(store, key, generation, journal.job_id)
 
