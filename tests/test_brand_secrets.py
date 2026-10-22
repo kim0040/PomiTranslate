@@ -91,7 +91,11 @@ def test_secrets_stay_out_of_settings_and_logs() -> None:
         settings_json.write_text(json.dumps({"provider": "openai", "model": "fixture"}), encoding="utf-8")
         log_path.write_text(redact_log(f"using key {secret} for openai", secret), encoding="utf-8")
         dumped = database.read_bytes() + settings_json.read_bytes() + log_path.read_bytes()
-        rows = sqlite3.connect(database).execute("SELECT provider, model FROM settings").fetchall()
+        connection = sqlite3.connect(database)
+        try:
+            rows = connection.execute("SELECT provider, model FROM settings").fetchall()
+        finally:
+            connection.close()  # an open handle blocks removing the temp dir on Windows
         assert rows == [("openai", "fixture")]
         assert secret.encode("utf-8") not in dumped
         assert b"[redacted]" in log_path.read_bytes()
