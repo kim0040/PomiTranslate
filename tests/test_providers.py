@@ -204,7 +204,7 @@ def test_openai_gemini_anthropic_openrouter_custom(base: str, tmp: Path) -> None
     # The key travels in a header, never in a URL that proxies or logs could record.
     assert "gemini-key" not in full and headers["x-goog-api-key"] == "gemini-key"
     assert all("gemini-key" not in item[2] for item in Recorder.seen)
-    assert body["systemInstruction"]["parts"][0]["text"] == "sys"
+    assert body["systemInstruction"]["parts"][0]["text"].startswith("sys\n\n[Untrusted world data]")
     assert "thinkingConfig" not in body["generationConfig"]
     assert body["generationConfig"]["maxOutputTokens"] >= 32768
     # Thought tokens are billed as output: counted, but thought text never becomes the answer.
@@ -258,7 +258,7 @@ def test_openai_gemini_anthropic_openrouter_custom(base: str, tmp: Path) -> None
     assert path == "/v1/messages"
     assert headers["x-api-key"] == "anthropic-key"
     assert headers["anthropic-version"] == "2023-06-01"
-    assert body["system"] == "sys"
+    assert body["system"].startswith("sys\n\n[Untrusted world data]")
     assert body["model"] == "text-model"
 
     custom = client(f"{root}/v1", "custom", "json-model", wire="openai")
