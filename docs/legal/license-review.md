@@ -29,6 +29,10 @@ PyInstaller6.16.0의 공식 [license 설명](https://pyinstaller.org/en/v6.16.0/
 
 Python을 sidecar에 넣으면 [Python3.12 license](https://docs.python.org/3.12/license.html)와 포함된 코드별 고지를 확인한다. SQLite 원본의 [public-domain 안내](https://www.sqlite.org/copyright.html)가 wrapper 전체의 MIT 조건을 없애는 것은 아니다. Windows/Linux source cache가 없는 package, OS credential backend, GTK/WebKit/WebView 등은 해당 OS의 실제 bundle·system dependency 기준으로 검토한다.
 
+### 번들 글꼴
+
+화면 글꼴로 [Pretendard Variable](https://github.com/orioncactus/pretendard) 1.3.9(`public/fonts/PretendardVariable.woff2`)를 번들한다. 라이선스는 SIL Open Font License 1.1(Copyright (c) 2021 Kil Hyung-jin, Reserved Font Name "Pretendard")이며 원문은 `public/fonts/Pretendard-OFL.txt`다. OFL의 번들 조건(글꼴 단독 판매 금지, 각 사본에 저작권 고지와 라이선스 동봉, 파생 글꼴이 예약 이름을 쓰지 않을 것)에 따라 원문을 앱의 `public/licenses/THIRD_PARTY_LICENSES.txt`(앱 안 **오픈소스 라이선스** 화면)와 [제3자 고지](../../THIRD_PARTY_NOTICES.md)에 포함한다. 브랜드 로고 글자(`src/components/Brand.svelte`)는 Pretendard 글리프 윤곽선에서 만든 벡터 경로이며, 글꼴 파일이나 이름을 배포하지 않으므로 OFL이 허용하는 파생으로 본다. 이 판단은 법률 자문이 아니며 정식 배포 전 최종 확인 대상이다.
+
 ### API·모델·비용
 
 앱 자체의 결제·구독은 없다. 외부 API의 호출·추론·재시도·credit 구매 등은 제공사 약관과 요금에 따르며 무료 앱의 MIT와 별개다. 모델의 이용·출력 조건도 확인해야 한다. [OpenRouter Terms](https://openrouter.ai/terms)와 [Pricing](https://openrouter.ai/pricing)을 확인했으며 특정 모델의 영구 무료 이용이나 재배포 권리를 보장하지 않는다. 사용자가 선택하는 다른 제공사·Custom 서비스는 그 해당 약관을 확인해야 한다. 이번 문서/화면 작업에서 유료 호출은 하지 않았다.
@@ -43,7 +47,7 @@ Python을 sidecar에 넣으면 [Python3.12 license](https://docs.python.org/3.12
 2. 미확인192개 및 모든 OS의 optional/backend/system 구성 license를 확인한다. GPL/LGPL 등 별도 조건이 발견되면 link·source/재링크·고지 의무를 개별 검토한다.
 3. 정확한 버전의 LICENSE/COPYING/NOTICE·copyright를 package에 넣고 MPL source 안내·수정본 소스 제공을 확인한다.
 4. Python interpreter 및 포함된 OpenSSL/zlib/LZ4 등 실제 포함 구성의 고지를 확인한다.
-5. Pomi/이미지의 생성·편집 출처, 글꼴 사용·상표/제3자 자산 문제를 최종 확인한다. 글꼴 binary는 repository에 없다. AI 생성 이미지의 독점적 권리가 보장된다고 주장하지 않는다.
+5. Pomi/이미지의 생성·편집 출처, 글꼴 사용·상표/제3자 자산 문제를 최종 확인한다. 번들 글꼴 Pretendard Variable 1.3.9의 binary와 OFL 원문은 `public/fonts/`에 있고([아래](#번들-글꼴)) 그 외 제3자 글꼴 binary는 repository에 없다. AI 생성 이미지의 독점적 권리가 보장된다고 주장하지 않는다.
 6. 고지 파일이 실제 installer에 포함되는지 검사한 후에만 해당 artifact의 license gate를 완료한다. 해결되지 않은 충돌이 있으면 해당 배포를 보류한다.
 
 추적: [추후 작업 LEGAL-01](../follow-up-work.md). 면책 안내는 [별도 문서](../disclaimer.md)이며 법적으로 배제할 수 없는 책임까지 없앤다고 주장하지 않는다.

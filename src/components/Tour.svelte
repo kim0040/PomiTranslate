@@ -28,11 +28,17 @@
       {#if step.icon}<span class="ico"><Icon name={step.icon} size={30} /></span>
       {:else}<img src="/images/pomi.png" alt="" width="80" height="80" />{/if}
     </div>
-    <h3>{t(step.title)}</h3>
-    <p>{t(step.body)}</p>
-    <ol class="dots" aria-label={t('tour.step', { index: index + 1, total: steps.length })}>
-      {#each steps as _, i (i)}<li class:on={i === index} aria-current={i === index ? 'step' : undefined}></li>{/each}
-    </ol>
+    <div class="copy">
+      <h3>{t(step.title)}</h3>
+      <p>{t(step.body)}</p>
+    </div>
+    <!-- The words carry the position ("2 / 5"); the dots are only a picture of it. Not a live region. -->
+    <div class="progress">
+      <ol class="dots" aria-hidden="true">
+        {#each steps as _, i (i)}<li class:on={i === index} class:done={i < index}></li>{/each}
+      </ol>
+      <span class="count">{t('tour.step', { index: index + 1, total: steps.length })}</span>
+    </div>
   </div>
   {#snippet actions()}
     {#if !last}<button type="button" class="btn btn-quiet skip" onclick={() => finish()}>{t('tour.skip')}</button>{/if}
@@ -47,14 +53,19 @@
 </Dialog>
 
 <style>
-  .tour { display: grid; justify-items: center; text-align: center; gap: var(--space-3); padding-block: var(--space-2); min-height: 236px; align-content: start; }
+  /* The art and the progress keep their place while the copy changes length, so the buttons do not jump. */
+  .tour { display: grid; justify-items: center; text-align: center; gap: var(--space-4); padding-block: var(--space-2) 0; min-height: 256px; grid-template-rows: auto minmax(0, 1fr) auto; }
   .art { height: 80px; display: grid; place-items: center; }
   .art img { width: 80px; height: 80px; object-fit: contain; }
   .ico { display: grid; place-items: center; width: 64px; height: 64px; border-radius: var(--radius-xl); background: var(--accent-soft); color: var(--accent-soft-text); }
+  .copy { display: grid; gap: var(--space-2); align-content: start; justify-items: center; }
   h3 { font-size: var(--text-xl); color: var(--text); }
   p { max-width: 46ch; }
-  .dots { display: flex; gap: 6px; list-style: none; margin: var(--space-2) 0 0; padding: 0; }
+  .progress { display: flex; align-items: center; justify-content: center; gap: var(--space-3); }
+  .count { color: var(--text-secondary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+  .dots { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; }
   .dots li { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong); transition: background-color var(--dur-fast) var(--ease), width var(--dur-base) var(--ease-out); }
+  .dots li.done { background: var(--accent); opacity: 0.5; }
   .dots li.on { width: 18px; border-radius: 3px; background: var(--accent); }
   .skip { margin-inline-end: auto; }
 </style>
