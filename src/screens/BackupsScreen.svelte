@@ -153,14 +153,17 @@
       </StatusScreen>
     {:else}
       <section aria-labelledby="backup-list-title">
-        <!-- The name is already on the card above; this line is the count and the disk use. -->
+        <!-- The world card above names the world and counts its backups; this heading is for screen readers. -->
         <h2 id="backup-list-title" class="sr-only">{t('backups.world', { name: worldName })}</h2>
+        {#if app.backupUsage || (admin && appSets.length > 1)}
         <div class="list-heading">
-          <p class="muted num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}{#if app.backupUsage}
-            · {t('backups.usage', {
+          <!-- The count is on the world card above; this line is only the disk use. -->
+          {#if app.backupUsage}
+            <p class="muted num">{t('backups.usage', {
               world: formatBytes(app.backupUsage.worldBytes, app.locale),
               all: formatBytes(app.backupUsage.appBytes, app.locale)
-            })}{app.backupUsage.appBytesApproximate ? ` ${t('backups.usageApprox')}` : ''}{/if}</p>
+            })}{app.backupUsage.appBytesApproximate ? ` ${t('backups.usageApprox')}` : ''}</p>
+          {/if}
           {#if admin && appSets.length > 1}
             <div class="prune">
               <label for="keep-latest">{t('backups.keepLatest')}</label>
@@ -171,6 +174,7 @@
             </div>
           {/if}
         </div>
+        {/if}
         <ul class="list backup-list">
           {#each backups as backup (backup.backupSetId)}
             <ListRow>
