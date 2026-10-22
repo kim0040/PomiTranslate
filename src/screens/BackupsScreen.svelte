@@ -38,6 +38,13 @@
     return t('common.unknown');
   }
 
+  function factsText(backup: BackupSummary): string {
+    const parts = [t('backups.files', { count: formatNumber(backup.fileCount, app.locale) })];
+    if (backup.sizeBytes !== undefined) parts.push(formatBytes(backup.sizeBytes, app.locale));
+    parts.push(locationLabel(backup));
+    return parts.join(' · ');
+  }
+
   function locationLabel(backup: BackupSummary): string {
     return backup.inWorldFolder ? t('backups.location.world') : t('backups.location.app');
   }
@@ -168,11 +175,10 @@
           {#each backups as backup (backup.backupSetId)}
             <ListRow>
               {#snippet leading()}<Icon name={backup.kind === 'recovery' ? 'undo' : 'archive'} size={16} />{/snippet}
-              <strong class="kind">{kindLabel(backup.kind)}</strong>
-              <span class="date num">{dateLabel(backup.createdAt)}</span>
-              <span class="row-facts num">
-                {t('backups.files', { count: formatNumber(backup.fileCount, app.locale) })}{#if backup.sizeBytes !== undefined} · {formatBytes(backup.sizeBytes, app.locale)}{/if} · {locationLabel(backup)}
-              </span>
+              <div class="stack">
+                <span class="title"><strong class="kind">{kindLabel(backup.kind)}</strong> <span class="date num">{dateLabel(backup.createdAt)}</span></span>
+                <span class="row-facts num">{factsText(backup)}</span>
+              </div>
               {#snippet trailing()}
                 <span class="row-pills">
                   {#if backup.legacy}
@@ -289,6 +295,8 @@
 
   .list-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-3); }
   .list-heading > p { margin: 0; font-size: var(--text-sm); }
+  .stack { display: grid; gap: 1px; min-width: 0; }
+  .title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-3); }
   .kind { font-weight: 600; }
   .date { color: var(--text-secondary); font-size: var(--text-sm); }
   .row-facts { color: var(--text-secondary); font-size: var(--text-sm); }

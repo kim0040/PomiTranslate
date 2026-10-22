@@ -320,7 +320,7 @@
   .strong { font-weight: 600; }
   .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--border); }
   .facts dt { font-size: var(--text-sm); color: var(--text-secondary); font-weight: 500; }
-  .facts dd { margin: 0; font-size: var(--text-xl); font-weight: 600; }
+  .facts dd { margin: 0; font-size: var(--text-lg); font-weight: 600; }
   .bad { color: var(--danger-text); }
   dd.warn { color: var(--warning-text); }
   .feed { padding: var(--space-4); display: grid; gap: var(--space-3); align-content: start; }
