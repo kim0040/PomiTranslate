@@ -723,10 +723,13 @@ def test_cancelled_job_resumes_same_backup_set(tmp: Path) -> None:
     resumed_config = merge_nested(base, {"runtime": {"resume_from_checkpoint": True}})
     resumed = WorldTranslator(resumed_config, cancel_check=lambda: False).run()
     assert resumed["status"] == "completed"
-    assert resumed["backup_set_id"] == backup_id
+    # A resume is a new job with its own backup set; the job it continued is closed (superseded) once
+    # the new record holds the intent, so the two never compete for the same files.
+    assert resumed["backup_set_id"] != backup_id
     assert resumed["changed_file_count"] == 2
     assert not checkpoint.exists()
-    assert next(item for item in list_backup_sets(world) if item["backupSetId"] == backup_id)["fileCount"] == 2
+    old = next(item for item in list_backup_sets(world) if item["backupSetId"] == backup_id)
+    assert old["fileCount"] == 2 and old["journalState"] == "superseded"
     BackupSet(world, backup_id).restore()
     restored = {path.relative_to(world).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in (first_path, second_path)}
     assert restored == original

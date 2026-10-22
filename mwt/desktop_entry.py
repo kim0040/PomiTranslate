@@ -1690,6 +1690,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "backupSetId": report.get("backup_set_id", ""),
                     "jobId": report.get("job_id", ""),
                     "writeState": report.get("write_state", ""),
+                    "unknownOutcomes": report.get("unknown_outcomes", []),
                     "preTranslate": PRE_TRANSLATE,
                     "localhostServer": False,
                     "errors": [_public_error(item) for item in report.get("errors", [])],
@@ -1730,7 +1731,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         selected = BackupSet.find(world, backup_id, stores, external_files=allowed)
         try:
             # Holds the write lock, the game's session locks and every external pack's lock.
-            recovery_id = selected.restore(recovery_store=stores[0], lock_dir=target_lock_dir(data_dir))
+            recovery_id = selected.restore(recovery_store=stores[0], lock_dir=target_lock_dir(data_dir),
+                                           stores=_all_backup_stores(data_dir, world))
         except WorldWriteLocked:
             emit({"v": 1, "id": request_id, "type": "response.error",
                   "error": {"code": "WORLD_LOCKED", "recoverable": True,
@@ -1778,7 +1780,9 @@ def _handle_recovery_start(message: dict, report_dir: Path, data_dir: Path, canc
     """``recovery.start {jobId, mode}``: roll an interrupted job back, or keep its result and settle it.
 
     Takes the same guards as a restore (world write lock, the game's session locks, external pack
-    locks) and refuses with WORLD_LOCKED / WORLD_IN_USE / TARGET_LOCKED when one is busy.
+    locks) and refuses with WORLD_LOCKED / WORLD_IN_USE / TARGET_LOCKED when one is busy. Also refused:
+    RECOVERY_REQUIRED (another job of the world is unsettled) and JOURNAL_SUPERSEDED (a newer job wrote
+    since). ``acceptConflicts: true`` with ``keep`` settles even when conflicts remain, recording them.
     """
     request_id = message.get("id", "")
     body = message.get("payload") or {}
@@ -1788,10 +1792,12 @@ def _handle_recovery_start(message: dict, report_dir: Path, data_dir: Path, canc
     world_text = str(body.get("worldDir") or "")
     world = Path(world_text).expanduser() if world_text else None
     try:
-        path = find_journal(str(body.get("jobId") or ""), _all_backup_stores(data_dir, world))
+        stores = _all_backup_stores(data_dir, world)
+        path = find_journal(str(body.get("jobId") or ""), stores)
         allowed = normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
         result = recover_job(
             path, mode, authorized_external=[Path(item) for item in allowed], lock_dir=target_lock_dir(data_dir),
+            accept_conflicts=body.get("acceptConflicts") is True, stores=stores,
             progress=lambda done, total: emit({"v": 1, "id": request_id, "type": "recovery.progress",
                                                "payload": {"phase": "recovery", "done": done, "total": total}}),
         )
@@ -1805,7 +1811,7 @@ def _handle_recovery_start(message: dict, report_dir: Path, data_dir: Path, canc
         _reply_error(request_id, "TARGET_LOCKED", "A resource pack of this job is in use by another job. Nothing was changed.")
         return
     except JournalError as exc:
-        _reply_error(request_id, exc.code, str(exc))
+        _reply_error(request_id, exc.code, str(exc), **({"jobIds": exc.job_ids} if exc.job_ids else {}))
         return
     emit({"v": 1, "id": request_id, "type": "response.ok", "payload": {**result, "localhostServer": False}})
 
@@ -1864,7 +1870,7 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
             _REQUEST_SECRETS[:] = _secrets_in(message)
             handle(message, report_dir, data_dir, cancel_path)
         except JournalError as exc:
-            _reply_error(request_id, exc.code, str(exc))
+            _reply_error(request_id, exc.code, str(exc), **({"jobIds": exc.job_ids} if exc.job_ids else {}))
         except (ExternalPackUnavailable, ExternalTargetError):
             _reply_error(request_id, "EXTERNAL_PACK_UNAVAILABLE",
                          "Selected external ZIP is unavailable or its parent directory changed. Select the original ZIP in Settings before scanning or restoring.")
@@ -1945,8 +1951,9 @@ def main(argv: list[str] | None = None) -> None:
         if not listed:
             raise SystemExit("There is no backup to restore")
         try:
-            BackupSet.find(world, listed[0]["backupSetId"], stores).restore(recovery_store=stores[0], lock_dir=target_lock_dir(data_dir))
-        except (WorldWriteLocked, MinecraftWorldInUse, TargetLocked) as exc:
+            BackupSet.find(world, listed[0]["backupSetId"], stores).restore(
+                recovery_store=stores[0], lock_dir=target_lock_dir(data_dir), stores=_all_backup_stores(data_dir, world))
+        except (WorldWriteLocked, MinecraftWorldInUse, TargetLocked, JournalError) as exc:
             raise SystemExit(f"Nothing was restored: {exc}") from exc
         print(json.dumps({"status": "restored", "localhostServer": False}))
         return
