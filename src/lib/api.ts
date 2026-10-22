@@ -255,6 +255,8 @@ export type AppPrefs = {
   update_auto_check: boolean;
   update_last_check: number;
   update_skipped_version: string;
+  /** Absent from an older core: treated as on. */
+  notify_on_finish?: boolean;
 };
 
 export type BootstrapPayload = {

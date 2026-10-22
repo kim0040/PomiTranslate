@@ -37,7 +37,7 @@ import {
   onOpenWorld, onUpdateProgress, openExternal, revealPath, type MenuAction, type UpdateInfo
 } from './native';
 import { expectedLogFolder, formatDiagnostics, newDiagnosticId } from './diagnostics';
-import { hasConsent, loadLocalPrefs, rememberConsent, saveLocalPrefs, type LocalPrefs } from './local-prefs';
+import { hasConsent, rememberConsent, takeLegacyNotifyPref } from './local-prefs';
 import { notificationsAvailable, requestNotificationPermission, sendNotification } from './plugins';
 import { cleanOverrides } from './review';
 import { LISTABLE_PROVIDERS } from './recommended-models';
@@ -91,7 +91,7 @@ export const ISSUES_URL = 'https://github.com/kim0040/PomiTranslate/issues/new';
 const DAY = 24 * 60 * 60;
 export const DEFAULT_PREFS: AppPrefs = {
   theme: 'system', notice_accepted: false, tutorial_seen: false,
-  update_auto_check: true, update_last_check: 0, update_skipped_version: ''
+  update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true
 };
 export type UpdateState = 'idle' | 'checking' | 'installing' | 'error';
 /** Menu commands that work while the core failed to start: help pages and links only. */
@@ -209,8 +209,6 @@ export class AppState {
   lastRestoreId = $state('');
   /** The last failure the person was shown, for the diagnostics copy. */
   lastError = $state<{ code: string; id: string; at: number } | null>(null);
-  /** Switches kept in this web view (see local-prefs.ts). */
-  localPrefs = $state<LocalPrefs>(loadLocalPrefs());
   /** The shell can show system notifications (plugin present). */
   notificationsSupported = $state(false);
   /** The person has not yet picked a display and target language in the first-run dialog. */
@@ -495,6 +493,12 @@ export class AppState {
       if (this.theme !== 'system') carried.theme = this.theme;
       Object.assign(saved, carried);
       if (Object.keys(carried).length) void this.setPrefs(carried);
+    }
+    // The finish-notification switch used to live in web storage: carry an earlier choice over once.
+    const legacyNotify = takeLegacyNotifyPref();
+    if (legacyNotify !== null && legacyNotify !== (saved.notify_on_finish ?? true)) {
+      saved.notify_on_finish = legacyNotify;
+      void this.setPrefs({ notify_on_finish: legacyNotify });
     }
     this.prefs = saved;
     if (saved.theme !== this.theme) this.setThemeOnly(saved.theme);
@@ -1445,7 +1449,7 @@ export class AppState {
 
   /** Tell the person a job ended while the window is in the background. No world text goes in. */
   private announce(kind: 'scan' | 'translate' | 'restore' | 'recovery', ok: boolean, cancelled: boolean): void {
-    if (cancelled || !this.localPrefs.notify_on_finish || !this.notificationsSupported) return;
+    if (cancelled || this.prefs.notify_on_finish === false || !this.notificationsSupported) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'visible' && document.hasFocus()) return;
     void sendNotification(
       t(ok ? 'notify.title.done' : 'notify.title.failed'),
@@ -1457,11 +1461,10 @@ export class AppState {
   async setNotifyOnFinish(on: boolean): Promise<void> {
     if (on && !(await requestNotificationPermission())) {
       this.notify(t('notify.denied'), 'info', 9000);
-      this.localPrefs = { ...this.localPrefs, notify_on_finish: false };
+      await this.setPrefs({ notify_on_finish: false });
     } else {
-      this.localPrefs = { ...this.localPrefs, notify_on_finish: on };
+      await this.setPrefs({ notify_on_finish: on });
     }
-    saveLocalPrefs(this.localPrefs);
   }
 
   // --- consent to send text to a provider --------------------------------------------------

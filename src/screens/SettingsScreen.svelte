@@ -774,7 +774,7 @@
         {#if app.notificationsSupported}
           <div class="field">
             <label class="check">
-              <input type="checkbox" checked={app.localPrefs.notify_on_finish} onchange={(event) => app.setNotifyOnFinish(event.currentTarget.checked)} />
+              <input type="checkbox" checked={app.prefs.notify_on_finish !== false} onchange={(event) => app.setNotifyOnFinish(event.currentTarget.checked)} />
               <span class="label">{t('settings.notify.label')}</span>
             </label>
             <span class="hint">{t('settings.notify.help')}</span>

@@ -277,6 +277,15 @@ test.describe('notifications (FL-05)', () => {
     expect(await page.evaluate(() => (window as any).__pomiNotifications.length)).toBe(count);
   });
 
+  test('an earlier choice kept in web storage moves to the app preference once', async ({ page }) => {
+    await page.addInitScript(() => { localStorage.setItem('pomi.local-prefs.v1', JSON.stringify({ notify_on_finish: false })); });
+    await open(page, 'scenario=selected&notify=granted');
+    await expect.poll(() => page.evaluate(() => (window as any).__pomiPrefs?.notify_on_finish)).toBe(false);
+    expect(await page.evaluate(() => localStorage.getItem('pomi.local-prefs.v1'))).toBeNull();
+    await page.getByRole('navigation', { name: '주 메뉴' }).getByRole('button', { name: '환경 설정' }).click();
+    await expect(page.getByRole('checkbox', { name: '작업이 끝나면 알림 받기' })).not.toBeChecked();
+  });
+
   test('without the plugin the option is hidden', async ({ page }) => {
     await open(page, 'scenario=selected&notify=missing');
     await page.getByRole('navigation', { name: '주 메뉴' }).getByRole('button', { name: '환경 설정' }).click();
