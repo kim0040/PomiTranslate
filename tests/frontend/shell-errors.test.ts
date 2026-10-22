@@ -84,9 +84,12 @@ describe('describing an error for people', () => {
     expect(text).not.toContain('os error 5');
   });
 
-  it('still shows the core message for a core error without catalog text', () => {
+  it('never shows the core message either, only the generic text and a diagnostic id', () => {
     const app = new AppState();
-    expect(app.describe(new BackendError('The world is read only', 'WORLD_READ_ONLY', '', 'core'))).toBe('The world is read only');
+    const text = app.describe(new BackendError('The world is read only', 'WORLD_READ_ONLY', '', 'core'));
+    expect(text).toContain(en['error.default']);
+    expect(text).not.toContain('read only');
+    expect(text).toMatch(/Diagnostic ID: [A-Z0-9]+/);
   });
 });
 

@@ -40,9 +40,28 @@
     writeBlockers: []
   };
   const backups = [
-    { backupSetId: '2026-09-29T16-24-18Z-translation', createdAt: '2026-09-29T16:24:18+09:00', fileCount: 69, verified: true, kind: 'translation', sizeBytes: 1843200, inWorldFolder: false },
-    { backupSetId: 'legacy-2026-09-28T12-10-00', createdAt: '2026-09-28T12:10:00+09:00', fileCount: 12, verified: false, kind: 'recovery', sizeBytes: 512000, inWorldFolder: true }
+    { backupSetId: '2026-09-29T16-24-18Z-translation', createdAt: '2026-09-29T16:24:18+09:00', fileCount: 69, verified: true, kind: 'translation', sizeBytes: 1843200, inWorldFolder: false, journalState: 'committed', legacy: false },
+    { backupSetId: 'legacy-2026-09-28T12-10-00', createdAt: '2026-09-28T12:10:00+09:00', fileCount: 12, verified: false, kind: 'recovery', sizeBytes: 512000, inWorldFolder: true, journalState: null, legacy: true }
   ];
+  // ?scenario=backups-many: enough app-managed sets to exercise "keep latest N".
+  if (new URLSearchParams(location.search).get('scenario') === 'backups-many') {
+    for (let i = 0; i < 5; i++) {
+      backups.push({ backupSetId: `2026-09-2${i}T10-00-00Z-translation`, createdAt: `2026-09-2${i}T10:00:00+09:00`, fileCount: 40 + i, verified: true, kind: 'translation', sizeBytes: 900000 + i * 1000, inWorldFolder: false, journalState: 'committed', legacy: false });
+    }
+  }
+  // ?scenario=backups-last-copy: a single app set that cannot be replaced.
+  if (new URLSearchParams(location.search).get('scenario') === 'backups-last-copy') backups.splice(1, 1);
+  const lastCopyIds = () => (backups.filter((item) => !item.inWorldFolder).length === 1 ? [backups.find((item) => !item.inWorldFolder).backupSetId] : []);
+  const backupUsage = () => ({
+    worldBytes: backups.reduce((sum, item) => sum + (item.sizeBytes || 0), 0), worldCount: backups.length,
+    appBytes: 123456789, appBytesApproximate: new URLSearchParams(location.search).get('scenario') === 'backups-many', lastCopyIds: lastCopyIds()
+  });
+  // Interrupted jobs the core lists on bootstrap (?scenario=interrupted).
+  const interruptedJobs = () => ((['interrupted', 'interrupted-partial'].includes(scenario()) || (scenario() === 'recovery-required' && sessionStorage.getItem('pomi.fixture.rr') === 'true')) && sessionStorage.getItem('pomi.fixture.recovered') !== 'true' ? [
+    { jobId: 'job-interrupted-1', kind: 'translate', worldPath: worldDir, worldName: 'Roguefire', createdAt: '2026-09-30T09:12:00+09:00', unitsTotal: 69, unitsVerified: 41, unitsUnknown: 3, needsAttention: true, legacy: false, state: scenario() === 'interrupted-partial' ? 'partial' : 'committing', blocking: true }
+  ] : []);
+  const drafts = JSON.parse(sessionStorage.getItem('pomi.fixture.drafts') || '{}');
+  const saveDrafts = () => sessionStorage.setItem('pomi.fixture.drafts', JSON.stringify(drafts));
   const credentialModes = new Map();
   const settings = {
     provider: 'openrouter', model: new URLSearchParams(location.search).get('model') || 'xiaomi/mimo-v2.6-flash', base_url: '', wire_format: 'openai',
@@ -118,6 +137,19 @@
     return { candidates: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, kinds: scan.kinds };
   }
   function resultPayload(status) {
+    if (status === 'codes') return {
+      status: 'partial', candidateCount: candidates.length, changedFileCount: 3, providerRequests: 4,
+      backupSetId: backups[0].backupSetId,
+      translation: { unique: 6, translated: 3, failed: 3, kept_original: 0, unchanged: 0 },
+      translationFailures: [
+        { source: 'Welcome to Roguefire', reason: 'RAW PROVIDER TEXT must never be shown', code: 'rate_limit' },
+        { source: 'You are not ready yet.', reason: 'RAW PROVIDER TEXT must never be shown', code: 'format_mismatch' },
+        { source: 'Merchant of the Northern Gate', reason: 'RAW PROVIDER TEXT must never be shown', code: 'brand_new_code' }
+      ],
+      translationFailureCodes: { rate_limit: 1, format_mismatch: 1, other: 1 },
+      warnings: [{ code: 'chunk_too_large', file: 'region/r.0.0.mca', count: 2 }, { code: 'something_new', file: 'x' }],
+      usage: { prompt_tokens: 540, completion_tokens: 180, cost: 0.00018, cost_reported: true, adapted_parameters: ['temperature'] }
+    };
     if (status === 'partial') return {
       status, candidateCount: candidates.length, changedFileCount: 4, providerRequests: 2,
       backupSetId: backups[0].backupSetId,
@@ -174,8 +206,8 @@
       }
       if (current === 'startup-delay') await new Promise((resolve) => setTimeout(resolve, 500));
       const empty = current === 'empty';
-      const resumed = ['scanned', 'review', 'run', 'run-progress', 'result-success', 'result-failed', 'dark-review'].includes(current);
-      const resultScenarios = ['result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
+      const resumed = ['scanned', 'review', 'run', 'run-progress', 'recovery-required', 'translate-fails', 'result-success', 'result-failed', 'dark-review'].includes(current);
+      const resultScenarios = ['result-codes', 'result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
@@ -183,7 +215,7 @@
         apiKeyStored: vaultBroken() ? false : !fresh || freshKeySaved, credentialMode: 'local',
         ...(vaultBroken() ? { credentialState: { mode: 'local', error: 'VAULT_CORRUPT' } } : {}),
         worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
-        worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
+        worldInspection: empty ? null : inspection, backups: empty ? [] : backups, interruptedJobs: interruptedJobs(),
         resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false }
       });
     }
@@ -223,8 +255,58 @@
     }
     if (type === 'worlds.remember') return ok(request, { worlds: [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }] });
     if (type === 'worlds.forget') return ok(request, { worlds: [] });
-    if (type === 'resume.status') return ok(request, ['result-cancelled', 'result-needs_retry'].includes(current) ? { ...resumePayload(), status: current.slice(7) } : { available: false });
-    if (type === 'backups.list') return ok(request, { backups });
+    if (type === 'resume.status') return ok(request, current === 'interrupted-partial' ? { ...resumePayload(), status: 'partial' } : ['result-cancelled', 'result-needs_retry'].includes(current) ? { ...resumePayload(), status: current.slice(7) } : { available: false });
+    if (type === 'backups.list') return ok(request, { backups: [...backups], usage: backupUsage() });
+    if (type === 'backups.delete') {
+      const index = backups.findIndex((item) => item.backupSetId === body.backupSetId);
+      const fail = (code) => ({ v: 1, id: request.id, type: 'response.error', error: { code, message: 'raw core message' } });
+      if (index < 0) return fail('BACKUP_NOT_FOUND');
+      if (backups[index].journalState === 'unfinished') return fail('BACKUP_NEEDED_FOR_RECOVERY');
+      if (lastCopyIds().includes(body.backupSetId) && !body.acknowledgeLastCopy) return fail('BACKUP_LAST_COPY');
+      const [gone] = backups.splice(index, 1);
+      (window.__pomiDeleted ||= []).push(gone.backupSetId);
+      return ok(request, { deleted: true, backupSetId: gone.backupSetId, location: body.location || 'app', freedBytes: gone.sizeBytes });
+    }
+    if (type === 'backups.prune') {
+      const mine = backups.filter((item) => !item.inWorldFolder).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+      const doomed = mine.slice(Math.max(1, Number(body.keepLatest || 1)));
+      for (const item of doomed) backups.splice(backups.indexOf(item), 1);
+      (window.__pomiPruned ||= []).push(doomed.map((item) => item.backupSetId));
+      return ok(request, { deleted: doomed.map((item) => item.backupSetId), kept: mine.length - doomed.length, skipped: [], freedBytes: doomed.reduce((sum, item) => sum + item.sizeBytes, 0), failed: [] });
+    }
+    if (type === 'review.draft.get') {
+      if (current === 'no-draft-support') return { v: 1, id: request.id, type: 'response.error', error: { code: 'UNSUPPORTED_REQUEST', message: 'unknown' } };
+      const draft = drafts[body.scanPlanId];
+      return ok(request, draft ? { scanPlanId: body.scanPlanId, exists: true, ...draft } : { scanPlanId: body.scanPlanId, exists: false, savedAt: null, excludedCandidateIds: [], candidateOverrides: {} });
+    }
+    if (type === 'review.draft.set') {
+      if (current === 'no-draft-support') return { v: 1, id: request.id, type: 'response.error', error: { code: 'UNSUPPORTED_REQUEST', message: 'unknown' } };
+      drafts[body.scanPlanId] = { savedAt: Date.now() / 1000, excludedCandidateIds: body.excludedCandidateIds || [], candidateOverrides: body.candidateOverrides || {} };
+      saveDrafts();
+      (window.__pomiDraftSaves ||= []).push({ ...drafts[body.scanPlanId] });
+      return ok(request, { saved: true, savedAt: drafts[body.scanPlanId].savedAt, excludedCount: (body.excludedCandidateIds || []).length, overrideCount: Object.keys(body.candidateOverrides || {}).length });
+    }
+    if (type === 'review.draft.clear') {
+      const existed = !!drafts[body.scanPlanId];
+      delete drafts[body.scanPlanId];
+      saveDrafts();
+      return ok(request, { cleared: existed });
+    }
+    if (type === 'resume.discard') { (window.__pomiDiscards ||= []).push(body); return ok(request, { discarded: 2 }); }
+    if (type === 'recovery.start') {
+      (window.__pomiRecoveries ||= []).push({ jobId: body.jobId, mode: body.mode, ...(body.acceptConflicts ? { acceptConflicts: true } : {}) });
+      setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'recovery.progress', payload: { event: 'recovery_progress', phase: 'recovery', done: 20, total: 69 } }), 40);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      sessionStorage.setItem('pomi.fixture.recovered', 'true');
+      const conflicts = new URLSearchParams(location.search).get('conflict') === '1' && !body.acceptConflicts
+        ? [{ path: 'region/r.0.0.mca', rootKind: 'world', code: 'RECOVERY_CONFLICT' }, { path: 'resources.zip', rootKind: 'external_pack', code: 'UNIT_INCONSISTENT' }] : [];
+      if (conflicts.length) sessionStorage.removeItem('pomi.fixture.recovered');
+      return ok(request, {
+        jobId: body.jobId, mode: body.mode, state: conflicts.length ? 'recovery_conflict' : (body.mode === 'keep' ? 'kept' : 'rolled_back'),
+        restoredFiles: body.mode === 'keep' ? 0 : 41, keptFiles: body.mode === 'keep' ? 41 : 0, conflicts,
+        quarantineDir: conflicts.length ? '/Users/fixture/quarantine/job-interrupted-1' : null
+      });
+    }
     if (type === 'estimate.get') {
       if (new URLSearchParams(location.search).get('slowEstimate') === '1') await new Promise((resolve) => setTimeout(resolve, 600));
       const excluded = new Set([...(body.excludedCandidateIds || []), ...(body.overrideCandidateIds || [])]);
@@ -250,9 +332,18 @@
     if (type === 'translate.start' || type === 'translate.resume') {
       if (current === 'run-progress') {
         setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'phase_start', phase: 'translate', total: 6, requests_estimate: 1 } }), 50);
-        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1 } }), 120);
+        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1, cost: 0.000123, samples: [{ source: 'Welcome to Roguefire', translated: '로그파이어에 오신 것을 환영합니다' }, { source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }] } }), 120);
         return new Promise((resolve) => setTimeout(() => resolve(ok(request, resultPayload('completed'))), 60000));
       }
+      if (current === 'interrupted-partial') {
+        sessionStorage.setItem('pomi.fixture.recovered', 'true');
+        (window.__pomiResumes ||= []).push(type);
+      }
+      if (current === 'recovery-required') {
+        sessionStorage.setItem('pomi.fixture.rr', 'true');
+        return { v: 1, id: request.id, type: 'response.error', error: { code: 'RECOVERY_REQUIRED', recoverable: true, message: 'raw core text' } };
+      }
+      if (current === 'translate-fails') return { v: 1, id: request.id, type: 'response.error', error: { code: 'AUTH_FAILED', message: 'RAW provider text 401' } };
       return ok(request, resultPayload(current.startsWith('result-') ? current.slice('result-'.length) : 'completed'));
     }
     if (type === 'restore.start') return ok(request, { status: 'restored', recoverySetId: 'recovery-before-restore' });
@@ -329,6 +420,20 @@
         emit('pomi-update-progress', { downloaded: 512, total: 1024 });
         return new Promise(() => {}); // the real app restarts here
       }
+      if (command === 'plugin:notification|is_permission_granted') {
+        const mode = new URLSearchParams(location.search).get('notify') || 'granted';
+        if (mode === 'missing') throw new Error('plugin not registered');
+        return mode === 'granted';
+      }
+      if (command === 'plugin:notification|request_permission') {
+        (window.__pomiShell ||= []).push('notification_permission');
+        return new URLSearchParams(location.search).get('notify') === 'denied' ? 'denied' : 'granted';
+      }
+      if (command === 'plugin:notification|notify') { (window.__pomiNotifications ||= []).push(args.options); return null; }
+      if (command === 'reveal_path') {
+        if (new URLSearchParams(location.search).get('reveal') === 'missing') throw new Error('unknown command');
+        (window.__pomiRevealedPaths ||= []).push(args.path); return null;
+      }
       if (command === 'cancel_active') return true;
       if (command === 'sidecar_request') return sidecar(args.request);
       // Window chrome calls are decoration in the preview: accept and record them.
@@ -336,6 +441,11 @@
       throw new Error(`Unsupported fixture command: ${command}`);
     }
   };
+  // The one-time "text is sent to the provider" question is answered ahead of time, so flows that
+  // start a translation reach the run; ?consent=ask leaves it to be asked.
+  if (new URLSearchParams(location.search).get('consent') !== 'ask') {
+    localStorage.setItem('pomi.consent.v1', JSON.stringify([`${settings.provider}\u0000${settings.model.trim()}`]));
+  }
   if (scenario() !== 'first-run') localStorage.setItem('pomi.notice.v1', 'accepted');
   else localStorage.removeItem('pomi.notice.v1');
   localStorage.setItem('pomi.theme.v1', new URLSearchParams(location.search).get('theme') || (scenario() === 'dark-review' ? 'dark' : 'light'));
