@@ -9,7 +9,7 @@ python3.12 -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 # Windows PowerShell에서는 .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt pyinstaller==6.16.0
+python -m pip install -r requirements.txt -r requirements-build.txt
 pnpm install --frozen-lockfile
 ```
 
@@ -49,7 +49,7 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 ## 패키징
 
 ```bash
-# 일반 incremental sidecar + 현재 OS의 Tauri 패키지
+# 일반 incremental sidecar(onedir) + 현재 OS의 Tauri 패키지
 pnpm sidecar:build
 pnpm exec tauri build
 
@@ -57,7 +57,17 @@ pnpm exec tauri build
 pnpm desktop:build
 ```
 
-각 OS의 sidecar를 해당 OS에서 빌드합니다. 결과는 기본 `src-tauri/target/` 아래에 생성되며 `CARGO_TARGET_DIR`을 지정한 환경에서는 그 경로를 따릅니다. `src-tauri/binaries/`는 generated sidecar 입력용이며 Git에 넣지 않습니다.
+각 OS의 sidecar를 해당 OS에서 빌드합니다. sidecar는 PyInstaller `--onedir` 폴더(`build/sidecar/dist/pomi-sidecar/`)이며 `bundle.resources`로 설치본의 resource 폴더에 들어갑니다. `src-tauri/binaries/`와 `externalBin`은 더 이상 쓰지 않습니다. 설치 결과는 기본 `src-tauri/target/` 아래에 생성되며 `CARGO_TARGET_DIR`을 지정한 환경에서는 그 경로를 따릅니다. 폴더 구조, 프로세스 감독, macOS 서명 절차는 [빌드·패키징 안내](build.md)를 따릅니다.
+
+## 로컬 gate (GitHub Actions 없이)
+
+```bash
+pnpm verify:local                    # Python 회귀 + frontend + Rust(fmt/clippy/test)
+pnpm verify:local --only rust        # 한 묶음만: python | frontend | rust
+pnpm verify:local --skip python      # 일부 제외
+```
+
+Python은 `POMI_PYTHON`(없으면 `python`)으로 실행합니다. 이 gate는 소스 검사이며 sidecar·installer 빌드, native, 실제 provider, release gate를 대신하지 않습니다.
 
 현재 패키지는 서명된 정식 릴리스가 아닙니다. 코드 빌드와 실제 clean-machine 설치, 서명·notarization·updater 검증을 구분합니다. 의존성 목록과 notice/source 의무를 정리하기 전 바이너리를 공개 배포하지 않습니다. [라이선스 검토](legal/license-review.md)
 

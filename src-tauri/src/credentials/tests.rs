@@ -77,7 +77,13 @@ fn encrypted_roundtrip_restart_update_delete_and_provider_isolation() {
     let bytes = fs::read(dir.path().join("credentials/credentials.sqlite")).unwrap();
     assert!(!bytes.windows(SECRET.len()).any(|s| s == SECRET.as_bytes()));
     restarted
-        .save(dir.path(), "openrouter", Mode::Local, "replacement-fixture", None)
+        .save(
+            dir.path(),
+            "openrouter",
+            Mode::Local,
+            "replacement-fixture",
+            None,
+        )
         .unwrap();
     assert_eq!(
         restarted
@@ -98,7 +104,11 @@ fn session_mode_never_persists_secret_and_expires_on_restart() {
         .save(dir.path(), "custom", Mode::Session, SECRET, Some(EP))
         .unwrap();
     assert_eq!(
-        vault.read(dir.path(), "custom", Some(EP)).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "custom", Some(EP))
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET
     );
     assert!(!dir.path().join("credential-key").exists());
@@ -124,9 +134,15 @@ fn local_to_session_removes_the_persisted_key_and_cannot_reactivate_after_restar
     vault
         .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
         .unwrap();
-    vault.save(dir.path(), "custom", Mode::Session, "", Some(EP)).unwrap();
+    vault
+        .save(dir.path(), "custom", Mode::Session, "", Some(EP))
+        .unwrap();
     assert_eq!(
-        vault.read(dir.path(), "custom", Some(EP)).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "custom", Some(EP))
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET
     );
     let conn = Connection::open(dir.path().join("credentials/credentials.sqlite")).unwrap();
@@ -147,7 +163,10 @@ fn local_to_session_removes_the_persisted_key_and_cannot_reactivate_after_restar
             .unwrap()
             .stored
     );
-    assert!(restarted.read(dir.path(), "custom", Some(EP)).unwrap().is_none());
+    assert!(restarted
+        .read(dir.path(), "custom", Some(EP))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -171,7 +190,10 @@ fn an_expired_session_does_not_reactivate_a_legacy_local_copy() {
             .unwrap()
             .stored
     );
-    assert!(restarted.read(dir.path(), "custom", Some(EP)).unwrap().is_none());
+    assert!(restarted
+        .read(dir.path(), "custom", Some(EP))
+        .unwrap()
+        .is_none());
 }
 #[test]
 fn tamper_missing_key_bad_schema_and_aad_fail_closed() {

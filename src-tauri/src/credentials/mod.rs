@@ -151,7 +151,10 @@ pub fn validate_provider(provider: &str) -> Result<(), IpcError> {
 /// SHA-256 of a canonical endpoint URL, hex encoded.
 pub fn endpoint_hash(canonical: &str) -> String {
     let hash = digest::digest(&digest::SHA256, canonical.as_bytes());
-    hash.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
+    hash.as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn now_millis() -> u128 {
@@ -237,15 +240,31 @@ impl Vault {
         let conn = Connection::open(&self.db)
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot open credential database"))?;
         conn.pragma_update(None, "journal_mode", "DELETE")
-            .map_err(|error| sql(error, code::VAULT_IO, "Cannot configure credential database"))?;
+            .map_err(|error| {
+                sql(
+                    error,
+                    code::VAULT_IO,
+                    "Cannot configure credential database",
+                )
+            })?;
         conn.pragma_update(None, "secure_delete", "ON")
-            .map_err(|error| sql(error, code::VAULT_IO, "Cannot configure credential database"))?;
+            .map_err(|error| {
+                sql(
+                    error,
+                    code::VAULT_IO,
+                    "Cannot configure credential database",
+                )
+            })?;
         let schema: i64 = conn
             .query_row("SELECT schema_version FROM vault_meta", [], |row| {
                 row.get(0)
             })
             .map_err(|error| {
-                sql(error, code::VAULT_SCHEMA, "Credential database schema is invalid")
+                sql(
+                    error,
+                    code::VAULT_SCHEMA,
+                    "Credential database schema is invalid",
+                )
             })?;
         if schema != SCHEMA {
             return Err(IpcError::new(
@@ -266,7 +285,8 @@ impl Vault {
         let journal = PathBuf::from(format!("{}-journal", self.db.display()));
         if metadata.is_file() && metadata.len() == 0 && !Self::exists(&journal)? {
             private_fs::check(&self.db, false)?;
-            fs::remove_file(&self.db).map_err(|_| io_error("Cannot discard an unfinished credential database"))?;
+            fs::remove_file(&self.db)
+                .map_err(|_| io_error("Cannot discard an unfinished credential database"))?;
         }
         Ok(())
     }
@@ -290,13 +310,26 @@ impl Vault {
             let conn = Connection::open(&temporary)
                 .map_err(|error| sql(error, code::VAULT_IO, "Cannot open credential database"))?;
             conn.pragma_update(None, "journal_mode", "DELETE")
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot configure credential database"))?;
+                .map_err(|error| {
+                    sql(
+                        error,
+                        code::VAULT_IO,
+                        "Cannot configure credential database",
+                    )
+                })?;
             conn.pragma_update(None, "secure_delete", "ON")
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot configure credential database"))?;
+                .map_err(|error| {
+                    sql(
+                        error,
+                        code::VAULT_IO,
+                        "Cannot configure credential database",
+                    )
+                })?;
             conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE vault_meta (schema_version INTEGER NOT NULL); INSERT INTO vault_meta VALUES (1); CREATE TABLE accounts (provider TEXT PRIMARY KEY, mode TEXT NOT NULL, known_keychain INTEGER NOT NULL DEFAULT 0, endpoint_hash TEXT); CREATE TABLE credentials (provider TEXT PRIMARY KEY, cipher_version INTEGER NOT NULL, key_id BLOB NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch())); COMMIT;")
                 .map_err(|error| sql(error, code::VAULT_IO, "Cannot initialize credential database"))?;
-            conn.close()
-                .map_err(|(_, error)| sql(error, code::VAULT_IO, "Cannot finish credential database"))?;
+            conn.close().map_err(|(_, error)| {
+                sql(error, code::VAULT_IO, "Cannot finish credential database")
+            })?;
         }
         private_fs::open(&temporary, false)?
             .sync_all()
@@ -317,11 +350,23 @@ impl Vault {
                 |_| Ok(()),
             )
             .optional()
-            .map_err(|error| sql(error, code::VAULT_SCHEMA, "Credential database schema is invalid"))?
+            .map_err(|error| {
+                sql(
+                    error,
+                    code::VAULT_SCHEMA,
+                    "Credential database schema is invalid",
+                )
+            })?
             .is_some();
         if !present {
             conn.execute("ALTER TABLE accounts ADD COLUMN endpoint_hash TEXT", [])
-                .map_err(|error| sql(error, code::VAULT_SCHEMA, "Credential database schema is invalid"))?;
+                .map_err(|error| {
+                    sql(
+                        error,
+                        code::VAULT_SCHEMA,
+                        "Credential database schema is invalid",
+                    )
+                })?;
         }
         Ok(())
     }
@@ -359,7 +404,13 @@ impl Vault {
     ) -> Result<(), IpcError> {
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM credentials", [], |row| row.get(0))
-            .map_err(|error| sql(error, code::VAULT_CORRUPT, "Cannot inspect stored credentials"))?;
+            .map_err(|error| {
+                sql(
+                    error,
+                    code::VAULT_CORRUPT,
+                    "Cannot inspect stored credentials",
+                )
+            })?;
         let leftover = self.key_dir.join("master.new");
         if Self::exists(&self.key_dir)? && fs::symlink_metadata(&leftover).is_ok() {
             if self.leftover_is_promotable(conn, &leftover) {
@@ -473,7 +524,13 @@ fn account_flags(conn: &Connection, provider: &str) -> Result<(bool, Option<Stri
             |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()
-        .map_err(|error| sql(error, code::VAULT_CORRUPT, "Cannot inspect credential metadata"))?
+        .map_err(|error| {
+            sql(
+                error,
+                code::VAULT_CORRUPT,
+                "Cannot inspect credential metadata",
+            )
+        })?
         .unwrap_or((false, None)))
 }
 
@@ -484,7 +541,12 @@ fn aad(provider: &str, id: &[u8]) -> Vec<u8> {
 fn cipher(key: &[u8]) -> Result<LessSafeKey, IpcError> {
     UnboundKey::new(&aead::AES_256_GCM, &key[..32])
         .map(LessSafeKey::new)
-        .map_err(|_| IpcError::new(code::VAULT_CORRUPT, "Cannot initialize credential encryption"))
+        .map_err(|_| {
+            IpcError::new(
+                code::VAULT_CORRUPT,
+                "Cannot initialize credential encryption",
+            )
+        })
 }
 fn decrypt(
     conn: &Connection,
@@ -499,7 +561,13 @@ fn decrypt(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
-        .map_err(|error| sql(error, code::VAULT_CORRUPT, "Cannot read encrypted credential"))?;
+        .map_err(|error| {
+            sql(
+                error,
+                code::VAULT_CORRUPT,
+                "Cannot read encrypted credential",
+            )
+        })?;
     let Some((version, id, nonce, ciphertext)) = row else {
         return Ok(None);
     };
@@ -519,7 +587,8 @@ fn decrypt(
         .map_err(|_| {
             corrupt("Credential authentication failed; stored data was altered or the master key is wrong")
         })?;
-    let value = std::str::from_utf8(plain).map_err(|_| corrupt("Decrypted credential is invalid"))?;
+    let value =
+        std::str::from_utf8(plain).map_err(|_| corrupt("Decrypted credential is invalid"))?;
     Ok(Some(Zeroizing::new(value.to_owned())))
 }
 
@@ -579,7 +648,13 @@ impl Credentials {
                     [provider],
                     |row| row.get(0),
                 )
-                .map_err(|error| sql(error, code::VAULT_CORRUPT, "Cannot inspect credential metadata"))?,
+                .map_err(|error| {
+                    sql(
+                        error,
+                        code::VAULT_CORRUPT,
+                        "Cannot inspect credential metadata",
+                    )
+                })?,
             Mode::Session => sessions.contains_key(provider),
             Mode::Keychain => account_flags(&conn, provider)?.0,
         };
@@ -617,7 +692,11 @@ impl Credentials {
 
     /// A key saved before the binding existed has no recorded endpoint; it is bound to the first
     /// endpoint it is used with, which is the one the person configured.
-    fn check_endpoint(conn: &Connection, provider: &str, endpoint: Option<&str>) -> Result<(), IpcError> {
+    fn check_endpoint(
+        conn: &Connection,
+        provider: &str,
+        endpoint: Option<&str>,
+    ) -> Result<(), IpcError> {
         let wanted = endpoint.map(endpoint_hash);
         let (_, stored) = account_flags(conn, provider)?;
         match (stored, wanted) {
@@ -674,7 +753,13 @@ impl Credentials {
         // Existing rows from earlier versions also must not substitute for a missing key.
         if mode != Mode::Local || (previous != mode && secret.is_none()) {
             tx.execute("DELETE FROM credentials WHERE provider=?1", [provider])
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot remove previous encrypted credential"))?;
+                .map_err(|error| {
+                    sql(
+                        error,
+                        code::VAULT_IO,
+                        "Cannot remove previous encrypted credential",
+                    )
+                })?;
         }
         if let Some(ref secret) = secret {
             if mode == Mode::Local {
@@ -725,13 +810,14 @@ impl Credentials {
         // Derive the acknowledgement inside this transaction. A second status read after
         // commit could fail and falsely report that an already committed key was not saved.
         let stored = match mode {
-            Mode::Local => tx
-                .query_row(
+            Mode::Local => {
+                tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM credentials WHERE provider=?1)",
                     [provider],
                     |row| row.get(0),
                 )
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot inspect credential metadata"))?,
+                .map_err(|error| sql(error, code::VAULT_IO, "Cannot inspect credential metadata"))?
+            }
             Mode::Session => secret.is_some() || sessions.contains_key(provider),
             Mode::Keychain => known,
         };
@@ -760,8 +846,13 @@ impl Credentials {
                 },
             )?;
         } else {
-            tx.commit()
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot commit credential transaction"))?;
+            tx.commit().map_err(|error| {
+                sql(
+                    error,
+                    code::VAULT_IO,
+                    "Cannot commit credential transaction",
+                )
+            })?;
         }
         if mode == Mode::Session {
             if let Some(secret) = secret {
@@ -894,7 +985,9 @@ impl Credentials {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    if name.starts_with("credentials.broken-") || name.starts_with("credential-key.broken-") {
+                    if name.starts_with("credentials.broken-")
+                        || name.starts_with("credential-key.broken-")
+                    {
                         targets.push(entry.path());
                     }
                 }

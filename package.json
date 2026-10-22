@@ -23,11 +23,15 @@
     "verify:ui": "node scripts/verify.mjs check frontend browser-smoke --run",
     "verify:final": "node scripts/verify.mjs check frontend python-final rust-final browser-final --run",
     "sidecar:build:clean": "node scripts/build-sidecar.mjs --clean",
+    "sidecar:nested": "node scripts/build-sidecar.mjs --list-nested",
+    "verify:local": "node scripts/verify-local.mjs",
     "desktop:dev:ui": "tauri dev"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.0",
     "@tauri-apps/plugin-dialog": "2.8.0",
+    "@tauri-apps/plugin-notification": "2.5.1",
+    "@tauri-apps/plugin-window-state": "2.5.0",
     "svelte": "5.57.1"
   },
   "devDependencies": {
@@ -38,7 +42,7 @@
     "@types/node": "26.6.3",
     "svelte-check": "4.7.6",
     "typescript": "5.9.3",
-    "vite": "8.3.1",
-    "vitest": "^5.0.2"
+    "vite": "8.3.3",
+    "vitest": "^5.0.3"
   }
 }

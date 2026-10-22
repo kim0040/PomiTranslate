@@ -10,8 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from mwt.durable import atomic_write_text, copy_durable, fsync_dir, mkdir_durable
-from mwt.durable import replace as durable_replace
+from mwt.durable import atomic_write_text, copy_durable, mkdir_durable
+from mwt.journal import JOURNAL_NAME, journal_state_of_set
 
 SKIP_DIR_NAMES = {".pomi-backups", ".pomi-translate", "__pycache__", ".venv"}
 DATA_SUFFIXES = {".mca", ".mcc", ".mcr", ".linear", ".dat"}
@@ -72,6 +72,43 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def world_baseline(world_dir: Path, cache: "DigestCache | None" = None) -> tuple[str, dict[str, tuple[int, str]]]:
+    """``world_fingerprint`` plus the size and sha256 of every file it covered, in one read.
+
+    The per-file digests are what a later write compares each target against. A file whose size
+    or modification time changed while it was read is not remembered in ``cache``.
+    """
+    outer = hashlib.sha256()
+    root = world_dir.resolve()
+    files: dict[str, tuple[int, str]] = {}
+    for path in iter_data_files(root):
+        relative = path.relative_to(root).as_posix()
+        outer.update(relative.encode("utf-8"))
+        outer.update(b"\0")
+        inner = hashlib.sha256()
+        size = 0
+        before = path.stat()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                outer.update(block)
+                inner.update(block)
+                size += len(block)
+        outer.update(b"\0")
+        digest = inner.hexdigest()
+        files[relative] = (size, digest)
+        if cache is not None:
+            after = path.stat()
+            if (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns) and size == before.st_size:
+                cache.remember(path, size, before.st_mtime_ns, digest)
+    return outer.hexdigest(), files
+
+
+def world_inventory(world_dir: Path) -> dict[str, int]:
+    """Relative path -> size of every file ``world_fingerprint`` covers. No file content is read."""
+    root = world_dir.resolve()
+    return {path.relative_to(root).as_posix(): path.stat().st_size for path in iter_data_files(root)}
+
+
 class DigestCache:
     """File digests remembered for one run, keyed by (path, size, mtime_ns).
 
@@ -97,6 +134,9 @@ class DigestCache:
 
     def forget(self, path: Path) -> None:
         self._entries.pop(str(path), None)
+
+    def remember(self, path: Path, size: int, mtime_ns: int, digest: str) -> None:
+        self._entries[str(path)] = (size, mtime_ns, digest)
 
 
 def world_state_fingerprint(world_dir: Path, cache: DigestCache | None = None) -> str:
@@ -245,6 +285,13 @@ class BackupSet:
         if commit:
             self.commit()
 
+    def entry_for(self, path: Path) -> dict[str, str] | None:
+        """The manifest entry that backs up ``path``, if there is one."""
+        resolved = Path(path).resolve()
+        if resolved.is_relative_to(self.world_dir):
+            return self._index.get(resolved.relative_to(self.world_dir).as_posix())
+        return self._index.get(self._external_archive_path(resolved))
+
     def _append(self, entry: dict[str, str]) -> None:
         self.entries.append(entry)
         self._index[entry["path"]] = entry
@@ -310,21 +357,28 @@ class BackupSet:
             resolved = path.resolve()
             self._written.add(resolved.relative_to(self.world_dir).as_posix() if resolved.is_relative_to(self.world_dir) else self._external_archive_path(resolved))
 
-    def restore(self, recovery_store: Path | None = None, *, hold_guards: bool = True) -> str:
+    def restore(self, recovery_store: Path | None = None, *, hold_guards: bool = True, lock_dir: Path | None = None) -> str:
         """Put the backed-up files back. The files they replace are kept as a recovery set first.
 
-        The world write lock and the game's session locks are held for the whole restore, and a
-        busy world raises ``WorldWriteLocked`` / ``MinecraftWorldInUse`` before anything is
-        written. Pass ``hold_guards=False`` only when the caller already holds both.
+        The world write lock, the game's session locks and the lock of every external pack are
+        held for the whole restore, and a busy world raises ``WorldWriteLocked`` /
+        ``MinecraftWorldInUse`` / ``TargetLocked`` before anything is written. Pass
+        ``hold_guards=False`` only when the caller already holds all of them.
+
+        The restore is a job like a translation: its recovery set carries a journal, so a restore
+        that is cut off shows up as an interrupted job and can be rolled back.
         """
         if not hold_guards:
             return self._restore(recovery_store)
         from mwt.locking import hold_world
 
-        with hold_world(self.world_dir, "restore"):
+        with hold_world(self.world_dir, "restore", external_targets=[Path(path) for path in self.external_files],
+                        lock_dir=lock_dir):
             return self._restore(recovery_store)
 
     def _restore(self, recovery_store: Path | None) -> str:
+        from mwt import journal as journal_module
+
         payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         entries = self._validated_manifest_entries(payload)
         if not payload.get("verified") or not entries:
@@ -338,38 +392,65 @@ class BackupSet:
             if not source.is_file() or file_sha256(source) != entry["sha256"]:
                 raise BackupError(f"Refusing to restore an unverified backup of {entry['path']}")
 
+        units = self._restore_units(entries)
+        if not units:
+            return ""
         recovery = BackupSet.new(self.world_dir, kind="recovery", store=recovery_store or self.store,
                                  external_files=[Path(path) for path in self.external_files])
+        record = journal_module.Journal.create(
+            recovery.root / journal_module.JOURNAL_NAME, job_id=recovery.backup_id, kind="restore", world_dir=self.world_dir)
+        outcome = journal_module.WriteTransaction(record, recovery, self.world_dir).run(units)
+        if outcome.state != "committed":
+            failed = next((result for result in outcome.units if result.attempted and not result.verified), None)
+            code = (failed.error_code if failed else "") or outcome.stopped or "RESTORE_INCOMPLETE"
+            label = failed.label if failed else "a file"
+            message = (f"Restore stopped at {label} ({code}). The files it replaced are saved in recovery set "
+                       f"{recovery.backup_id}, which can undo what was restored.")
+            if code in {"WORLD_CHANGED", "DISK_FULL"}:
+                raise journal_module.JournalError(code, message)
+            raise BackupError(message)
+        return recovery.backup_id
+
+    def _restore_units(self, entries: list[dict[str, str]]) -> list:
+        """One unit per region file with the ``.mcc`` payloads that belong to it, one per other file.
+
+        Inside a unit: payloads that come back first, the region next, files the job had created
+        removed last. That is the order this module always used; it keeps a region from pointing
+        at a payload that is not there yet or was already deleted.
+        """
+        from mwt.journal import TargetSpec, UnitSpec
+
+        groups: dict[str, list[tuple[int, TargetSpec]]] = {}
+        labels: dict[str, str] = {}
         for entry in entries:
-            current = self._target(entry)
-            if current.is_file():
-                recovery.add(current, commit=False)
-            elif entry.get("restoreAction") != "remove_created" and "externalTarget" not in entry:
-                recovery.record_absent(current, commit=False)  # undoing this restore removes it again
-        if recovery.entries:
-            recovery.publish_latest()
-        ordered = sorted(entries, key=lambda entry: 2 if entry.get("restoreAction") == "remove_created"
-                         else 0 if entry["path"].endswith(".mcc") else 1)
-        for entry in ordered:
             destination = self._target(entry)
-            if entry.get("restoreAction") == "remove_created":
-                # The recovery set above includes the current bytes, even if Minecraft
-                # edited them since translation. Restore returns to the pre-write absence.
-                destination.unlink(missing_ok=True)
-                fsync_dir(destination.parent)
-                continue
-            source = self.root / entry["path"]
-            mkdir_durable(destination.parent)
-            temporary = destination.with_name(f".{destination.name}.pomi-restore-{uuid.uuid4().hex}.tmp")
-            try:
-                copy_durable(source, temporary)
-                durable_replace(temporary, destination)
-            finally:
-                temporary.unlink(missing_ok=True)
-            fsync_dir(destination.parent)
-            if file_sha256(destination) != entry["sha256"]:
-                raise BackupError(f"Restore hash mismatch for {entry['path']}")
-        return recovery.backup_id if recovery.entries else ""
+            remove = entry.get("restoreAction") == "remove_created"
+            if remove and not os.path.lexists(destination):
+                continue  # nothing was created, so there is nothing to remove
+            external = "externalTarget" in entry
+            name = PurePosixPath(entry["path"]).name
+            mcc = re.fullmatch(r"c\.(-?\d+)\.(-?\d+)\.mcc", name)
+            if mcc and not external:
+                region_name = f"r.{int(mcc.group(1)) // 32}.{int(mcc.group(2)) // 32}.mca"
+                key = (PurePosixPath(entry["path"]).parent / region_name).as_posix()
+                rank = 2 if remove else 0
+                role = "payload"
+            else:
+                key = entry["externalTarget"] if external else entry["path"]
+                rank = 2 if remove else 1
+                role = "pack" if external else "region" if re.fullmatch(r"r\.-?\d+\.-?\d+\.mca", name) else "file"
+            groups.setdefault(key, []).append((rank, TargetSpec(
+                path=destination,
+                root_kind="external_pack" if external else "world",
+                source=None if remove else self.root / entry["path"],
+                role=role,
+            )))
+            labels[key] = Path(key).name if external else key
+        return [
+            UnitSpec(unit_id=f"restore:{key}", kind="restore", label=labels[key],
+                     targets=[spec for _rank, spec in sorted(groups[key], key=lambda item: item[0])])
+            for key in sorted(groups)
+        ]
 
     @staticmethod
     def _parent_identity(path: Path) -> str:
@@ -502,6 +583,10 @@ def list_backup_sets(world_dir: Path, stores: list[Path] | None = None) -> list[
                     "sizeBytes": sum(int(item.get("size", 0)) for item in files if isinstance(item, dict) and str(item.get("size", "")).isdigit()),
                     "inWorldFolder": store.resolve() == legacy_backup_store(world_dir),
                     "externalTargets": [item["externalTarget"] for item in files if isinstance(item, dict) and isinstance(item.get("externalTarget"), str)],
+                    # None: written before recovery records existed. Such a set stays listable and
+                    # restorable, but nothing says what its job intended, so it is flagged as legacy.
+                    "journalState": journal_state_of_set(manifest.parent),
+                    "legacy": not (manifest.parent / JOURNAL_NAME).is_file(),
                 })
             except (OSError, ValueError, TypeError, AttributeError):
                 continue

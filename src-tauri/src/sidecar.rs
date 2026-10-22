@@ -1,36 +1,81 @@
-//! One request to the translation core: spawn it, send the request, read its JSONL replies, and shut
-//! it down. The decisions are in plain types (`LineScanner`, `Exchange`, `termination_error`) so they
-//! are tested without a child process.
+//! Requests to the translation core: spawn it under supervision, send the request, read its JSONL
+//! replies, and shut it down. The decisions are in plain types (`LineScanner`, `Exchange`,
+//! `termination_error`) so they are tested without a child process; the process work is in
+//! `core_process` (Job Object / process group).
+//!
+//! Two lanes share one process role (a fresh core per request, as before):
+//!
+//! * `Query` - short reads and settings changes;
+//! * `Job` - scan, translate, resume, restore, recovery and backup maintenance. These can run for
+//!   long, write to worlds, and are the ones the person may cancel and, when the core does not
+//!   react, force-stop.
 use std::{
+    ffi::OsString,
     fs,
-    path::{Path, PathBuf},
-    sync::Mutex,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
+use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
-    ShellExt,
+use tokio::{
+    sync::mpsc,
+    time::{timeout, timeout_at, Instant},
 };
-use tokio::time::{timeout_at, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    core_process::{self, CoreEvent, ProcessControl, SpawnSpec, Stdin},
     diagnostics,
-    error::{code, IpcError},
+    error::{code, detail, IpcError},
     sidecar_paths, startup,
 };
 
 /// A reply larger than this is a protocol error, not something to buffer without limit.
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+/// A progress event is a status line. A bigger one is a core bug, not something to forward.
+const MAX_PROGRESS_BYTES: usize = 1024 * 1024;
+/// Output that is not this request's protocol traffic (stray prints, other requests' messages) is
+/// tolerated up to this much per request; a core that floods stdout is broken.
+const MAX_STRAY_BYTES: usize = 1024 * 1024;
+/// Everything a short request may produce on stdout, progress included.
+const MAX_QUERY_BYTES: usize = 32 * 1024 * 1024;
 /// Requests that write to a world or the backup store: after a protocol fault they are asked to
 /// cancel and given time to stop before they are killed.
-const LONG_WRITERS: &[&str] = &["translate.start", "translate.resume", "restore.start"];
+const WORLD_WRITERS: &[&str] = &[
+    "translate.start",
+    "translate.resume",
+    "restore.start",
+    "recovery.start",
+    "jobs.recover",
+    "backups.delete",
+    "backups.prune",
+];
+/// Requests that run as a job: they hold the job slot, can be cancelled and force-stopped.
+const JOB_REQUESTS: &[&str] = &[
+    "scan.start",
+    "translate.start",
+    "translate.resume",
+    "restore.start",
+    "recovery.start",
+    "jobs.recover",
+    "backups.delete",
+    "backups.prune",
+];
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How long the core may take to exit after its stdin is closed, before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
+/// How long a killed core may take to be reported gone before the slot is kept occupied.
+const KILL_WAIT: Duration = Duration::from_secs(10);
+/// A request line that cannot be written in this time means the core is not reading.
+const REQUEST_WRITE_LIMIT: Duration = Duration::from_secs(20);
+/// The person may force-stop a job only this long after asking it to cancel.
+pub const FORCE_STOP_AFTER_CANCEL: Duration = Duration::from_secs(30);
 /// Kept per unparseable line in the log.
 const STRAY_LOG_CHARS: usize = 300;
 
@@ -48,49 +93,225 @@ const SECRET_ENV: &[&str] = &[
     "CUSTOM_ANTHROPIC_API_KEY",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lane {
+    Query,
+    Job,
+}
+
+pub fn lane(kind: &str) -> Lane {
+    if JOB_REQUESTS.contains(&kind) {
+        Lane::Job
+    } else {
+        Lane::Query
+    }
+}
+
+fn writes_world(kind: &str) -> bool {
+    WORLD_WRITERS.contains(&kind)
+}
+
+/// Everything needed to start the core for one request.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
+    pub cwd: PathBuf,
+    pub cancel_path: PathBuf,
+}
+
+impl Launch {
+    fn spec(&self) -> SpawnSpec {
+        SpawnSpec {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+            cwd: Some(self.cwd.clone()),
+        }
+    }
+}
+
+/// The environment every core child gets: UTF-8 channels (SC-4), no provider keys from the outside,
+/// and the app's own identity so the core reports the same version and build as the shell.
+fn core_environment() -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = vec![
+        // The JSONL channel is UTF-8 on every Windows code page.
+        ("PYTHONUTF8".into(), "1".into()),
+        ("PYTHONIOENCODING".into(), "utf-8".into()),
+        ("POMI_APP_VERSION".into(), env!("CARGO_PKG_VERSION").into()),
+        ("POMI_BUILD_SHA".into(), crate::BUILD_SHA.into()),
+        ("POMI_BUILD_DATE".into(), crate::BUILD_DATE.into()),
+    ];
+    env.extend(
+        SECRET_ENV
+            .iter()
+            .map(|name| ((*name).into(), OsString::new())),
+    );
+    env
+}
+
+/// The launch for this app: the resolved core, its data and report folders, and the cancel marker.
+fn launch_for(app: &AppHandle) -> Result<Launch, IpcError> {
+    let app_data = crate::app_data_root(app)?;
+    let data_dir = sidecar_paths::core_data_dir(&app_data, &app.config().identifier)
+        .map_err(|message| IpcError::new(code::INTERNAL, message))?;
+    let report_dir = app_data.join("reports");
+    fs::create_dir_all(&report_dir)
+        .map_err(|_| IpcError::new(code::INTERNAL, "Cannot create the report directory"))?;
+    let cancel_path = report_dir.join("active-operation.cancel");
+    let resource_dir = tauri::Manager::path(app).resource_dir().ok();
+    let command = sidecar_paths::resolve(
+        resource_dir.as_deref(),
+        sidecar_paths::dev_options().as_ref(),
+    )
+    .map_err(|message| {
+        diagnostics::global().log("ERROR", "core", &message);
+        IpcError::new(
+            code::CORE_SPAWN_FAILED,
+            "Packaged translation core is unavailable",
+        )
+    })?;
+    let (program, mut args, mut env) = command.program_and_args();
+    args.extend(
+        sidecar_paths::arguments(&data_dir, &report_dir, &cancel_path)
+            .into_iter()
+            .map(OsString::from),
+    );
+    env.extend(core_environment());
+    Ok(Launch {
+        program,
+        args,
+        env,
+        cwd: report_dir,
+        cancel_path,
+    })
+}
+
 struct ActiveProcess {
-    pid: u32,
+    control: Arc<ProcessControl>,
     /// Dropping this closes the core's stdin.
-    stdin: Option<CommandChild>,
+    stdin: Option<Stdin>,
     cancel_path: PathBuf,
+    /// When the person asked this job to cancel.
+    cancel_requested: Option<std::time::Instant>,
+    /// Set by a force-stop so the request reports it instead of a generic crash.
+    forced: Arc<AtomicBool>,
+}
+
+/// What a force-stop did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForceStopped {
+    /// Nothing was running (the job ended on its own in the meantime).
+    pub was_running: bool,
+    /// The core did not end after its stdin closed and was killed.
+    pub killed: bool,
 }
 
 #[derive(Default)]
 pub struct ActiveSidecar {
-    process: Mutex<Option<ActiveProcess>>,
+    process: Arc<Mutex<Option<ActiveProcess>>>,
     pub request_gate: tauri::async_runtime::Mutex<()>,
+}
+
+fn lock_slot(
+    slot: &Mutex<Option<ActiveProcess>>,
+) -> std::sync::MutexGuard<'_, Option<ActiveProcess>> {
+    // A panic elsewhere must not make every later request fail (RB-1).
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl ActiveSidecar {
     fn process(&self) -> std::sync::MutexGuard<'_, Option<ActiveProcess>> {
-        // A panic elsewhere must not make every later request fail (RB-1).
-        self.process
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock_slot(&self.process)
     }
 
+    /// A request is being served or a core process has not been seen to end.
     pub fn busy(&self) -> bool {
-        self.request_gate.try_lock().is_err()
+        self.request_gate.try_lock().is_err() || self.process().is_some()
+    }
+
+    /// Free the slot, but only once the core's exit was observed - never because time passed.
+    fn clear(slot: &Mutex<Option<ActiveProcess>>, pid: u32) {
+        let mut slot = lock_slot(slot);
+        if slot
+            .as_ref()
+            .is_some_and(|active| active.control.pid() == pid && active.control.has_exited())
+        {
+            if let Some(active) = slot.take() {
+                let _ = fs::remove_file(active.cancel_path);
+            }
+        }
     }
 
     /// Ask the running operation to stop. False when none is running.
     pub fn request_cancel(&self) -> Result<bool, IpcError> {
-        let active = self.process();
-        let Some(process) = active.as_ref() else {
+        let mut active = self.process();
+        let Some(process) = active.as_mut() else {
             return Ok(false);
         };
         fs::write(&process.cancel_path, b"cancel").map_err(|_| {
             IpcError::new(code::INTERNAL, "Could not write the cancellation marker")
         })?;
+        process
+            .cancel_requested
+            .get_or_insert_with(std::time::Instant::now);
         Ok(true)
     }
 
-    /// Kill the core now (quit-now after a stuck cancel). Safe when nothing is running.
+    /// Kill the core now (quit-now after a stuck cancel). Safe when nothing is running. The app is
+    /// on its way out, so the slot is released without waiting for the exit.
     pub fn kill_now(&self) {
         if let Some(process) = self.process().take() {
-            terminate(process.pid);
+            process.control.kill_tree();
             let _ = fs::remove_file(process.cancel_path);
         }
+    }
+
+    /// Stop a job that did not react to its cancel marker: close its stdin (a core that listens to
+    /// it stops there), wait a moment, then kill the whole tree. Returns once the exit was
+    /// observed; the slot is released only then. Refused until `min_after_cancel` has passed since
+    /// the cancel request, so a healthy job is not killed at the first click.
+    pub async fn force_stop(&self, min_after_cancel: Duration) -> Result<ForceStopped, IpcError> {
+        let (control, stdin) = {
+            let mut slot = self.process();
+            let Some(active) = slot.as_mut() else {
+                return Ok(ForceStopped {
+                    was_running: false,
+                    killed: false,
+                });
+            };
+            let waited = active.cancel_requested.map(|at| at.elapsed());
+            if waited.is_none_or(|waited| waited < min_after_cancel) {
+                return Err(IpcError::new(
+                    code::BUSY,
+                    "The job has not been given time to stop after the cancel request",
+                ));
+            }
+            active.forced.store(true, Ordering::SeqCst);
+            (Arc::clone(&active.control), active.stdin.take())
+        };
+        drop(stdin);
+        diagnostics::global().log("WARN", "core", "force-stopping the translation core");
+        let mut killed = false;
+        if control.wait_exit(EXIT_GRACE).await.is_none() {
+            killed = true;
+            control.kill_tree();
+            control.wait_exit(KILL_WAIT).await;
+        }
+        if !control.has_exited() {
+            return Err(IpcError::new(
+                code::CORE_STOPPED,
+                "The translation core could not be stopped; it is still running",
+            ));
+        }
+        Self::clear(&self.process, control.pid());
+        Ok(ForceStopped {
+            was_running: true,
+            killed,
+        })
     }
 }
 
@@ -100,7 +321,9 @@ impl ActiveSidecar {
 pub enum Scan {
     Line(Vec<u8>),
     /// A line grew past the limit. `message_type` is read from its first bytes when present.
-    Oversize { message_type: Option<String> },
+    Oversize {
+        message_type: Option<String>,
+    },
 }
 
 /// Splits stdout into lines. A byte is looked at once: the scan resumes where the last chunk ended,
@@ -180,7 +403,11 @@ fn peek_type(line: &[u8]) -> Option<String> {
     let head = &line[..line.len().min(512)];
     let text = String::from_utf8_lossy(head);
     let after = text.split_once("\"type\"")?.1;
-    let value = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let value = after
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start()
+        .strip_prefix('"')?;
     let kind: String = value
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -209,7 +436,12 @@ pub fn classify_line(line: &[u8], saw_hello: bool, id: &str) -> Line {
         .filter(|message| message.get("type").and_then(Value::as_str).is_some());
     let Some(message) = parsed else {
         return if saw_hello {
-            Line::Stray(String::from_utf8_lossy(line).chars().take(STRAY_LOG_CHARS).collect())
+            Line::Stray(
+                String::from_utf8_lossy(line)
+                    .chars()
+                    .take(STRAY_LOG_CHARS)
+                    .collect(),
+            )
         } else {
             Line::Fatal(IpcError::new(
                 code::CORE_PROTOCOL,
@@ -279,10 +511,15 @@ pub enum Step {
 pub struct Exchange {
     id: String,
     kind: String,
+    lane: Lane,
     saw_hello: bool,
     scanner: LineScanner,
     stderr: LineScanner,
-    /// Set after a protocol fault on a long writer: the fault is reported once the core stops.
+    /// Bytes of non-protocol output so far (stray lines, other requests' messages).
+    stray_bytes: usize,
+    /// Every stdout byte so far; bounds a short request as a whole.
+    total_bytes: usize,
+    /// Set after a protocol fault on a world writer: the fault is reported once the core stops.
     pending_fault: Option<IpcError>,
 }
 
@@ -291,9 +528,12 @@ impl Exchange {
         Self {
             id: id.to_owned(),
             kind: kind.to_owned(),
+            lane: lane(kind),
             saw_hello: false,
             scanner: LineScanner::new(MAX_LINE_BYTES),
             stderr: LineScanner::new(64 * 1024),
+            stray_bytes: 0,
+            total_bytes: 0,
             pending_fault: None,
         }
     }
@@ -302,7 +542,7 @@ impl Exchange {
         self.saw_hello
     }
 
-    /// True while a faulted long writer is being given time to stop.
+    /// True while a faulted world writer is being given time to stop.
     #[cfg(test)]
     pub fn cancelling(&self) -> bool {
         self.pending_fault.is_some()
@@ -313,10 +553,10 @@ impl Exchange {
         self.pending_fault.clone()
     }
 
-    pub fn on_event(&mut self, event: CommandEvent) -> Vec<Step> {
+    pub fn on_event(&mut self, event: CoreEvent) -> Vec<Step> {
         match event {
-            CommandEvent::Stdout(bytes) => self.on_stdout(&bytes),
-            CommandEvent::Stderr(bytes) => {
+            CoreEvent::Stdout(bytes) => self.on_stdout(&bytes),
+            CoreEvent::Stderr(bytes) => {
                 for scan in self.stderr.push(&bytes) {
                     if let Scan::Line(line) = scan {
                         diagnostics::global().core_stderr(&String::from_utf8_lossy(&line));
@@ -324,60 +564,87 @@ impl Exchange {
                 }
                 vec![]
             }
-            CommandEvent::Terminated(payload) => {
+            CoreEvent::Exited(info) => {
                 if let Some(rest) = self.stderr.finish() {
                     diagnostics::global().core_stderr(&String::from_utf8_lossy(&rest));
                 }
-                vec![Step::Done(Err(self
-                    .pending_fault
-                    .clone()
-                    .unwrap_or_else(|| termination_error(payload.code, payload.signal))))]
+                vec![Step::Done(Err(self.pending_fault.clone().unwrap_or_else(
+                    || termination_error(info.code, info.signal),
+                )))]
             }
-            CommandEvent::Error(message) => {
+            CoreEvent::Error(message) => {
                 diagnostics::global().log("ERROR", "core", &message);
-                vec![Step::Done(Err(self
-                    .pending_fault
-                    .clone()
-                    .unwrap_or_else(|| {
-                        IpcError::new(code::CORE_STOPPED, "The translation core connection failed")
-                    })))]
+                vec![Step::Done(Err(self.pending_fault.clone().unwrap_or_else(
+                    || IpcError::new(code::CORE_STOPPED, "The translation core connection failed"),
+                )))]
             }
-            _ => vec![],
+        }
+    }
+
+    /// A protocol fault: a world writer is asked to cancel first (it may be mid-write), anything
+    /// else is stopped at once. True when the caller must stop reading.
+    fn fault_step(&mut self, fault: IpcError, steps: &mut Vec<Step>) -> bool {
+        if writes_world(&self.kind) && self.saw_hello {
+            if self.pending_fault.is_none() {
+                self.pending_fault = Some(fault);
+                steps.push(Step::Cancel);
+            }
+            false
+        } else {
+            steps.push(Step::Done(Err(fault)));
+            true
         }
     }
 
     fn on_stdout(&mut self, bytes: &[u8]) -> Vec<Step> {
         let mut steps = Vec::new();
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        if self.lane == Lane::Query && self.total_bytes > MAX_QUERY_BYTES {
+            let fault = IpcError::new(
+                code::CORE_PROTOCOL,
+                "Translation core returned too much output",
+            );
+            self.fault_step(fault, &mut steps);
+            return steps;
+        }
         for scan in self.scanner.push(bytes) {
             match scan {
                 Scan::Oversize { message_type } => {
-                    let fault = IpcError::new(
-                        code::CORE_PROTOCOL,
-                        format!(
-                            "Translation core returned an oversized message (type {})",
-                            message_type.as_deref().unwrap_or("unknown")
-                        ),
-                    );
-                    if LONG_WRITERS.contains(&self.kind.as_str()) && self.saw_hello {
-                        if self.pending_fault.is_none() {
-                            self.pending_fault = Some(fault);
-                            steps.push(Step::Cancel);
-                        }
-                    } else {
-                        steps.push(Step::Done(Err(fault)));
+                    let fault = oversize_fault(message_type.as_deref());
+                    if self.fault_step(fault, &mut steps) {
                         return steps;
                     }
                 }
                 Scan::Line(line) => match classify_line(&line, self.saw_hello, &self.id) {
                     Line::Hello => self.saw_hello = true,
-                    Line::Progress(message) => steps.push(Step::Progress(message)),
+                    Line::Progress(message) => {
+                        if line.len() > MAX_PROGRESS_BYTES {
+                            let fault = oversize_fault(Some("progress"));
+                            if self.fault_step(fault, &mut steps) {
+                                return steps;
+                            }
+                        } else {
+                            steps.push(Step::Progress(message));
+                        }
+                    }
                     Line::Reply(message) => {
                         steps.push(Step::Done(Ok(message)));
                         return steps;
                     }
-                    Line::Ignore => {}
+                    Line::Ignore => {
+                        if self.over_stray_budget(line.len(), &mut steps) {
+                            return steps;
+                        }
+                    }
                     Line::Stray(snippet) => {
-                        diagnostics::global().log("WARN", "core", &format!("ignored non-protocol stdout: {snippet}"));
+                        diagnostics::global().log(
+                            "WARN",
+                            "core",
+                            &format!("ignored non-protocol stdout: {snippet}"),
+                        );
+                        if self.over_stray_budget(line.len(), &mut steps) {
+                            return steps;
+                        }
                     }
                     Line::Fatal(error) => {
                         steps.push(Step::Done(Err(error)));
@@ -388,31 +655,31 @@ impl Exchange {
         }
         steps
     }
+
+    fn over_stray_budget(&mut self, bytes: usize, steps: &mut Vec<Step>) -> bool {
+        self.stray_bytes = self.stray_bytes.saturating_add(bytes);
+        if self.stray_bytes <= MAX_STRAY_BYTES {
+            return false;
+        }
+        let fault = IpcError::new(
+            code::CORE_PROTOCOL,
+            "Translation core wrote too much output outside the protocol",
+        );
+        self.fault_step(fault, steps)
+    }
+}
+
+fn oversize_fault(message_type: Option<&str>) -> IpcError {
+    IpcError::new(
+        code::CORE_PROTOCOL,
+        format!(
+            "Translation core returned an oversized message (type {})",
+            message_type.unwrap_or("unknown")
+        ),
+    )
 }
 
 // --- process control --------------------------------------------------------------------------
-
-#[cfg(windows)]
-fn terminate(pid: u32) {
-    use windows_sys::Win32::{
-        Foundation::CloseHandle,
-        System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE},
-    };
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle != 0 {
-            TerminateProcess(handle, 1);
-            CloseHandle(handle);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn terminate(pid: u32) {
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-    }
-}
 
 /// Request bytes with the key in them, wiped on every exit path (CR-9).
 struct SecretRequest(Value);
@@ -452,37 +719,33 @@ fn request_line(request: &Value) -> Result<Zeroizing<Vec<u8>>, IpcError> {
     Ok(line)
 }
 
-fn spawn_core(
-    app: &AppHandle,
-    data_dir: &Path,
-    report_dir: &Path,
-    cancel_path: &Path,
-) -> Result<(tauri::async_runtime::Receiver<CommandEvent>, CommandChild), IpcError> {
-    let unavailable = |message: &str| IpcError::new(code::CORE_SPAWN_FAILED, message.to_owned());
-    let mut command = app
-        .shell()
-        .sidecar("pomi-sidecar")
-        .map_err(|_| unavailable("Packaged translation core is unavailable"))?
-        .args(sidecar_paths::arguments(data_dir, report_dir, cancel_path))
-        // The JSONL channel is UTF-8 on every Windows code page (SC-4).
-        .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8");
-    for name in SECRET_ENV {
-        command = command.env(name, "");
-    }
-    command
-        .spawn()
-        .map_err(|_| unavailable("Could not start the translation core"))
-}
-
 /// Run one request against a fresh core process and shut it down afterwards.
 pub async fn exchange(
     app: &AppHandle,
     state: &ActiveSidecar,
     request: Value,
 ) -> Result<Value, IpcError> {
+    let launch = launch_for(app)?;
+    run(&launch, state, request, |message| {
+        let _ = app.emit("pomi-progress", message);
+    })
+    .await
+}
+
+/// [`exchange`] without the app: the core to start and the progress sink are passed in.
+pub async fn run(
+    launch: &Launch,
+    state: &ActiveSidecar,
+    request: Value,
+    on_progress: impl Fn(&Value),
+) -> Result<Value, IpcError> {
     let request = SecretRequest(request);
-    let kind = request.0.get("type").and_then(Value::as_str).unwrap_or("").to_owned();
+    let kind = request
+        .0
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     let id = request
         .0
         .get("id")
@@ -490,43 +753,75 @@ pub async fn exchange(
         .ok_or_else(|| IpcError::new(code::INVALID_REQUEST, "Missing request id"))?
         .to_owned();
     let deadlines = startup::StartupDeadlines::new(&kind);
-    let app_data = crate::app_data_root(app)?;
-    let data_dir = sidecar_paths::core_data_dir(&app_data, &app.config().identifier)
-        .map_err(|message| IpcError::new(code::INTERNAL, message))?;
-    let report_dir = app_data.join("reports");
-    fs::create_dir_all(&report_dir)
-        .map_err(|_| IpcError::new(code::INTERNAL, "Cannot create the report directory"))?;
-    let cancel_path = report_dir.join("active-operation.cancel");
+    let line = request_line(&request.0)?;
+    // The key now lives only in the line that is written; the Value copy is wiped.
+    drop(request);
 
-    let mut receiver = {
+    let core_process::Spawned {
+        pid,
+        mut stdin,
+        events: mut receiver,
+        control,
+    } = {
         let mut active = state.process();
         if active.is_some() {
-            return Err(IpcError::new(code::BUSY, "Another PomiTranslate operation is still running"));
-        }
-        let _ = fs::remove_file(&cancel_path);
-        let line = request_line(&request.0)?;
-        let (receiver, mut child) = spawn_core(app, &data_dir, &report_dir, &cancel_path)?;
-        let pid = child.pid();
-        if child.write(&line).is_err() {
-            terminate(pid);
             return Err(IpcError::new(
-                code::CORE_STOPPED,
-                "Could not send the request to the translation core",
+                code::BUSY,
+                "Another PomiTranslate operation is still running",
             ));
         }
+        let _ = fs::remove_file(&launch.cancel_path);
+        let spawned = core_process::spawn(&launch.spec()).map_err(|error| {
+            diagnostics::global().log(
+                "ERROR",
+                "core",
+                &format!("could not start the translation core: {error}"),
+            );
+            IpcError::new(
+                code::CORE_SPAWN_FAILED,
+                "Could not start the translation core",
+            )
+        })?;
         *active = Some(ActiveProcess {
-            pid,
-            stdin: Some(child),
-            cancel_path: cancel_path.clone(),
+            control: Arc::clone(&spawned.control),
+            stdin: None,
+            cancel_path: launch.cancel_path.clone(),
+            cancel_requested: None,
+            forced: Arc::new(AtomicBool::new(false)),
         });
-        receiver
+        spawned
     };
-    // The key now lives only in the line that was written; the Value copy is wiped.
-    drop(request);
+    diagnostics::global().log(
+        "INFO",
+        "core",
+        &format!("started the translation core (pid {pid}) for {kind}"),
+    );
+    let forced = state
+        .process()
+        .as_ref()
+        .map(|active| Arc::clone(&active.forced))
+        .unwrap_or_default();
+
+    let sent = timeout(REQUEST_WRITE_LIMIT, stdin.send(line)).await;
+    if !matches!(sent, Ok(Ok(()))) {
+        control.kill_tree();
+        shutdown(state, &control, &mut receiver).await;
+        return Err(IpcError::new(
+            code::CORE_STOPPED,
+            "Could not send the request to the translation core",
+        ));
+    }
+    {
+        // Held by the slot from here on, so a force-stop can close it.
+        let mut active = state.process();
+        match active.as_mut() {
+            Some(active) => active.stdin = Some(stdin),
+            None => drop(stdin),
+        }
+    }
 
     let mut session = Exchange::new(&id, &kind);
     let mut cancel_deadline: Option<Instant> = None;
-    let mut exited = false;
     let result: Result<Value, IpcError> = 'events: loop {
         let wait = async {
             match cancel_deadline {
@@ -535,7 +830,12 @@ pub async fn exchange(
             }
         };
         let event = match deadlines.receive(session.saw_hello(), wait).await {
-            Err(startup_code) => break Err(IpcError::new(startup_code, "The translation core did not answer in time")),
+            Err(startup_code) => {
+                break Err(IpcError::new(
+                    startup_code,
+                    "The translation core did not answer in time",
+                ))
+            }
             Ok(Err(())) => {
                 // The faulted writer did not stop in the grace period.
                 break Err(session.fault().unwrap_or_else(|| {
@@ -546,17 +846,15 @@ pub async fn exchange(
         };
         let Some(event) = event else {
             break Err(session.fault().unwrap_or_else(|| {
-                IpcError::new(code::CORE_STOPPED, "Translation core stopped before it returned a result")
+                IpcError::new(
+                    code::CORE_STOPPED,
+                    "Translation core stopped before it returned a result",
+                )
             }));
         };
-        if matches!(event, CommandEvent::Terminated(_) | CommandEvent::Error(_)) {
-            exited = true;
-        }
         for step in session.on_event(event) {
             match step {
-                Step::Progress(message) => {
-                    let _ = app.emit("pomi-progress", &message);
-                }
+                Step::Progress(message) => on_progress(&message),
                 Step::Cancel => {
                     let _ = state.request_cancel();
                     cancel_deadline = Some(Instant::now() + CANCEL_GRACE);
@@ -566,230 +864,95 @@ pub async fn exchange(
         }
     };
 
+    shutdown(state, &control, &mut receiver).await;
+    let result = match result {
+        Err(error)
+            if forced.load(Ordering::SeqCst)
+                && matches!(error.code, code::CORE_STOPPED | code::CORE_CRASHED) =>
+        {
+            Err(
+                IpcError::new(code::CORE_STOPPED, "The job was stopped by force")
+                    .with_detail(detail::JOB_FORCE_STOPPED),
+            )
+        }
+        other => other,
+    };
     if let Err(error) = &result {
         diagnostics::global().log_error(&format!("core:{kind}"), error);
     }
-    shutdown(state, &mut receiver, exited).await;
     result
 }
 
-/// Release the core: close its stdin so it can exit by itself (a one-file bundle then removes its
-/// temporary files), wait briefly, and only then kill it.
-async fn shutdown(
-    state: &ActiveSidecar,
-    receiver: &mut tauri::async_runtime::Receiver<CommandEvent>,
-    mut exited: bool,
-) {
-    let Some(mut process) = state.process().take() else {
-        return;
-    };
-    drop(process.stdin.take());
-    if !exited {
-        let deadline = Instant::now() + EXIT_GRACE;
-        while let Ok(event) = timeout_at(deadline, receiver.recv()).await {
-            match event {
-                Some(CommandEvent::Terminated(_)) | Some(CommandEvent::Error(_)) | None => {
-                    exited = true;
-                    break;
-                }
-                Some(CommandEvent::Stderr(bytes)) => {
-                    for line in String::from_utf8_lossy(&bytes).lines() {
-                        diagnostics::global().core_stderr(line);
-                    }
-                }
-                Some(_) => {}
+/// Send what the core wrote to stderr in its last moments to the diagnostics.
+fn drain_stderr(receiver: &mut mpsc::Receiver<CoreEvent>) {
+    while let Ok(event) = receiver.try_recv() {
+        if let CoreEvent::Stderr(bytes) = event {
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                diagnostics::global().core_stderr(line);
             }
         }
     }
-    if !exited {
-        terminate(process.pid);
+}
+
+/// Wait for the end-of-process event (collecting stderr on the way), but at most `limit`. Whether the
+/// core is gone is decided by `ProcessControl`, not by this wait.
+async fn wait_for_end(receiver: &mut mpsc::Receiver<CoreEvent>, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        match timeout_at(deadline, receiver.recv()).await {
+            Ok(Some(CoreEvent::Stderr(bytes))) => {
+                for line in String::from_utf8_lossy(&bytes).lines() {
+                    diagnostics::global().core_stderr(line);
+                }
+            }
+            Ok(Some(CoreEvent::Stdout(_))) => {}
+            Ok(Some(CoreEvent::Exited(_) | CoreEvent::Error(_)) | None) | Err(_) => return,
+        }
     }
-    let _ = fs::remove_file(process.cancel_path);
+}
+
+/// Release the core: close its stdin so it can exit by itself, wait briefly, then kill the whole
+/// tree. The slot is freed once the exit was observed. A core whose exit cannot be observed keeps
+/// the slot (the world may still be being written) until it is.
+async fn shutdown(
+    state: &ActiveSidecar,
+    control: &Arc<ProcessControl>,
+    receiver: &mut mpsc::Receiver<CoreEvent>,
+) {
+    let stdin = state
+        .process()
+        .as_mut()
+        .and_then(|active| active.stdin.take());
+    drop(stdin);
+    if !control.has_exited() {
+        wait_for_end(receiver, EXIT_GRACE).await;
+    }
+    if !control.has_exited() {
+        control.kill_tree();
+        wait_for_end(receiver, KILL_WAIT).await;
+    }
+    drain_stderr(receiver);
+    if control.has_exited() {
+        ActiveSidecar::clear(&state.process, control.pid());
+        return;
+    }
+    diagnostics::global().log(
+        "ERROR",
+        "core",
+        &format!("the translation core (pid {}) did not end after being killed; the job slot stays occupied", control.pid()),
+    );
+    let (slot, control) = (Arc::clone(&state.process), Arc::clone(control));
+    tokio::spawn(async move {
+        // Keep watching: the slot is freed whenever the exit is finally seen.
+        while control.wait_exit(Duration::from_secs(3600)).await.is_none() && !control.has_exited()
+        {
+        }
+        ActiveSidecar::clear(&slot, control.pid());
+    });
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tauri_plugin_shell::process::TerminatedPayload;
+mod tests;
 
-    fn lines(scans: Vec<Scan>) -> Vec<String> {
-        scans
-            .into_iter()
-            .filter_map(|scan| match scan {
-                Scan::Line(line) => Some(String::from_utf8(line).unwrap()),
-                Scan::Oversize { .. } => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_message_split_across_chunks_is_reassembled() {
-        let mut scanner = LineScanner::new(1024);
-        assert_eq!(lines(scanner.push(b"{\"a\":1}\n{\"b\":")), ["{\"a\":1}"]);
-        assert_eq!(lines(scanner.push(b"2}\r\n\n  \n")), ["{\"b\":2}"]);
-        assert!(scanner.finish().is_none());
-    }
-
-    #[test]
-    fn several_messages_in_one_chunk_come_out_in_order() {
-        let mut scanner = LineScanner::new(1024);
-        assert_eq!(lines(scanner.push(b"one\ntwo\nthree\n")), ["one", "two", "three"]);
-    }
-
-    #[test]
-    fn scanning_resumes_where_the_last_chunk_ended() {
-        let mut scanner = LineScanner::new(1 << 20);
-        for _ in 0..1000 {
-            assert!(scanner.push(&[b'x'; 100]).is_empty());
-        }
-        assert_eq!(scanner.scanned, 100_000, "no byte is looked at twice");
-        let out = scanner.push(b"\n");
-        assert_eq!(out.len(), 1);
-        assert_eq!(scanner.scanned, 0);
-    }
-
-    #[test]
-    fn an_oversized_line_is_reported_once_and_skipped_to_its_end() {
-        let mut scanner = LineScanner::new(64);
-        let mut head = br#"{"v":1,"id":"a","type":"response.ok","payload":""#.to_vec();
-        head.extend_from_slice(&[b'x'; 100]);
-        let first = scanner.push(&head);
-        assert_eq!(
-            first,
-            [Scan::Oversize {
-                message_type: Some("response.ok".into())
-            }]
-        );
-        assert!(scanner.push(&[b'x'; 500]).is_empty(), "the rest of the line is dropped");
-        let after = scanner.push(b"\"}\n{\"next\":1}\n");
-        assert_eq!(lines(after), ["{\"next\":1}"]);
-    }
-
-    #[test]
-    fn a_complete_oversized_line_in_one_chunk_is_reported_and_the_next_line_survives() {
-        let mut scanner = LineScanner::new(32);
-        let mut chunk = vec![b'y'; 200];
-        chunk.push(b'\n');
-        chunk.extend_from_slice(b"ok\n");
-        let out = scanner.push(&chunk);
-        assert_eq!(out.len(), 2);
-        assert!(matches!(out[0], Scan::Oversize { message_type: None }));
-        assert_eq!(out[1], Scan::Line(b"ok".to_vec()));
-    }
-
-    #[test]
-    fn the_message_type_is_read_with_or_without_spaces() {
-        assert_eq!(peek_type(br#"{"v": 1, "id": "x", "type": "progress.scan", "p": 1"#).as_deref(), Some("progress.scan"));
-        assert_eq!(peek_type(b"no type here"), None);
-    }
-
-    const HELLO: &[u8] = b"{\"v\":1,\"id\":\"boot\",\"type\":\"system.hello\",\"payload\":{\"protocolVersion\":1}}\n";
-
-    fn feed(exchange: &mut Exchange, bytes: &[u8]) -> Vec<Step> {
-        exchange.on_event(CommandEvent::Stdout(bytes.to_vec()))
-    }
-
-    #[test]
-    fn stray_output_after_the_handshake_is_ignored_and_the_reply_still_arrives() {
-        let mut exchange = Exchange::new("req-1", "scan.start");
-        assert!(feed(&mut exchange, HELLO).is_empty());
-        assert!(exchange.saw_hello());
-        for stray in [
-            &b"DeprecationWarning: something noisy\n"[..],
-            b"{not json\n",
-            b"[1,2,3]\n",
-            b"{\"no\":\"type\"}\n",
-            "한글 로그 줄\n".as_bytes(),
-        ] {
-            assert!(feed(&mut exchange, stray).is_empty(), "{stray:?}");
-        }
-        let steps = feed(
-            &mut exchange,
-            b"{\"v\":1,\"id\":\"other\",\"type\":\"response.ok\"}\n{\"v\":1,\"id\":\"req-1\",\"type\":\"scan.progress\",\"payload\":{\"n\":1}}\n{\"v\":1,\"id\":\"req-1\",\"type\":\"response.ok\",\"payload\":{}}\n",
-        );
-        assert_eq!(steps.len(), 2);
-        assert!(matches!(steps[0], Step::Progress(_)));
-        assert!(matches!(&steps[1], Step::Done(Ok(reply)) if reply["type"] == "response.ok"));
-    }
-
-    #[test]
-    fn output_before_the_handshake_must_be_the_handshake() {
-        for first in [&b"garbage\n"[..], b"{\"v\":1,\"id\":\"req-1\",\"type\":\"response.ok\"}\n"] {
-            let mut exchange = Exchange::new("req-1", "scan.start");
-            let steps = feed(&mut exchange, first);
-            assert!(
-                matches!(&steps[..], [Step::Done(Err(error))] if error.code == code::CORE_PROTOCOL),
-                "{first:?}"
-            );
-        }
-        let mut exchange = Exchange::new("req-1", "scan.start");
-        let steps = feed(
-            &mut exchange,
-            b"{\"v\":1,\"id\":\"b\",\"type\":\"system.hello\",\"payload\":{\"protocolVersion\":2}}\n",
-        );
-        assert!(matches!(&steps[..], [Step::Done(Err(error))] if error.code == code::CORE_PROTOCOL));
-    }
-
-    #[test]
-    fn an_oversized_reply_kills_a_reader_but_cancels_a_writer_first() {
-        let big = |exchange: &mut Exchange| {
-            let mut line = br#"{"v":1,"id":"req-1","type":"response.ok","payload":""#.to_vec();
-            line.extend_from_slice(&vec![b'x'; MAX_LINE_BYTES + 10]);
-            feed(exchange, &line)
-        };
-        let mut reader = Exchange::new("req-1", "candidates.page");
-        feed(&mut reader, HELLO);
-        let steps = big(&mut reader);
-        assert!(matches!(&steps[..], [Step::Done(Err(error))]
-            if error.code == code::CORE_PROTOCOL && error.message.contains("response.ok")));
-
-        let mut writer = Exchange::new("req-1", "translate.start");
-        feed(&mut writer, HELLO);
-        let steps = big(&mut writer);
-        assert!(matches!(&steps[..], [Step::Cancel]));
-        assert!(writer.cancelling());
-        // The core stops after the cancel: the fault is what gets reported.
-        let ended = writer.on_event(CommandEvent::Terminated(TerminatedPayload { code: Some(0), signal: None }));
-        assert!(matches!(&ended[..], [Step::Done(Err(error))] if error.code == code::CORE_PROTOCOL));
-    }
-
-    #[test]
-    fn the_core_ending_maps_to_stable_codes() {
-        assert_eq!(termination_error(Some(0), None).code, code::CORE_STOPPED);
-        assert_eq!(termination_error(None, None).code, code::CORE_STOPPED);
-        assert_eq!(termination_error(Some(3), None).code, code::CORE_CRASHED);
-        assert_eq!(termination_error(None, Some(9)).code, code::CORE_CRASHED);
-        let mut exchange = Exchange::new("r", "scan.start");
-        feed(&mut exchange, HELLO);
-        let steps = exchange.on_event(CommandEvent::Terminated(TerminatedPayload { code: Some(-1073741819), signal: None }));
-        assert!(matches!(&steps[..], [Step::Done(Err(error))] if error.code == code::CORE_CRASHED));
-    }
-
-    #[test]
-    fn core_stderr_reaches_the_redacted_ring_without_keys() {
-        diagnostics::global().reset();
-        let mut exchange = Exchange::new("r", "scan.start");
-        exchange.on_event(CommandEvent::Stderr(
-            b"Traceback (most recent call last):\n  provider echoed Bearer sk-live-00112233445566778899aabb\n".to_vec(),
-        ));
-        let kept = diagnostics::global().stderr_lines().join("\n");
-        assert!(kept.contains("Traceback"));
-        assert!(!kept.contains("sk-live"), "{kept}");
-    }
-
-    #[test]
-    fn the_secret_in_a_request_is_wiped_when_the_guard_drops() {
-        let request = serde_json::json!({"v":1,"id":"x","type":"models.list","payload":{"apiKey":"fixture-key-1234567890"}});
-        let line = request_line(&request).unwrap();
-        assert!(String::from_utf8_lossy(&line).contains("fixture-key-1234567890"));
-        assert_eq!(line.capacity(), line.len(), "sized exactly, so no regrown copy is left behind");
-        let mut guard = SecretRequest(request);
-        let key_ptr = guard.0["payload"]["apiKey"].as_str().unwrap().as_ptr();
-        // Zeroizing in place keeps the buffer, so the bytes it held are now zero.
-        if let Some(Value::String(key)) = guard.0["payload"].as_object_mut().and_then(|p| p.get_mut("apiKey")) {
-            key.zeroize();
-        }
-        let _ = key_ptr;
-        assert!(guard.0["payload"]["apiKey"].as_str().unwrap().is_empty());
-    }
-}
+#[cfg(test)]
+mod smoke_tests;

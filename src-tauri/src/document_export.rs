@@ -45,15 +45,19 @@ pub async fn export_document(
             .map_err(|_| IpcError::new(code::BUSY, "Another operation is running"))?;
         match kind {
             DocumentKind::Settings => {
-                let value = document
-                    .ok_or_else(|| IpcError::new(code::INVALID_REQUEST, "Missing public settings"))?;
+                let value = document.ok_or_else(|| {
+                    IpcError::new(code::INVALID_REQUEST, "Missing public settings")
+                })?;
                 serde_json::to_vec_pretty(&value)
                     .map_err(|_| IpcError::new(code::INVALID_REQUEST, "Invalid public settings"))?
             }
             _ => {
                 let path = crate::app_data_root(&app)?.join("reports").join(filename);
                 let bytes = std::fs::read(path).map_err(|_| {
-                    IpcError::new(code::EXPORT_REPORT_MISSING, "The latest report is unavailable")
+                    IpcError::new(
+                        code::EXPORT_REPORT_MISSING,
+                        "The latest report is unavailable",
+                    )
                 })?;
                 serde_json::from_slice::<Value>(&bytes).map_err(|_| {
                     IpcError::new(code::EXPORT_REPORT_MISSING, "The report is not valid JSON")
@@ -77,35 +81,79 @@ pub async fn export_document(
             .into_path()
             .map_err(|_| failed("Invalid export destination"))?;
         if destination.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            return Err(IpcError::new(code::EXPORT_BAD_EXTENSION, "Choose a JSON file for the export"));
+            return Err(IpcError::new(
+                code::EXPORT_BAD_EXTENSION,
+                "Choose a JSON file for the export",
+            ));
         }
-        if std::fs::symlink_metadata(&destination).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return Err(failed("Cannot export through a symbolic link"));
-        }
-        let parent = destination.parent().ok_or_else(|| failed("Invalid export destination"))?;
-        let mut temporary =
-            tempfile::NamedTempFile::new_in(parent).map_err(|_| failed("Cannot create export file"))?;
-        temporary
-            .write_all(&bytes)
-            .map_err(|_| failed("Cannot write export file"))?;
-        temporary
-            .as_file()
-            .sync_all()
-            .map_err(|_| failed("Cannot finish export file"))?;
-        // A scanner or indexer can hold the new file for a moment on Windows.
-        let mut delay = Duration::from_millis(40);
-        for attempt in 0..4 {
-            match temporary.persist(&destination) {
-                Ok(_) => return Ok(true),
-                Err(error) if attempt < 3 => {
-                    temporary = error.file;
-                    std::thread::sleep(delay);
-                    delay *= 2;
-                }
-                Err(_) => break,
+        write_atomically(&destination, &bytes)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| failed("Export could not finish"))?
+}
+
+/// Write `bytes` to `destination` through a temporary file in the same folder, so a half-written
+/// export never replaces an existing file. A symbolic link at the destination is refused.
+pub fn write_atomically(destination: &std::path::Path, bytes: &[u8]) -> Result<(), IpcError> {
+    let failed = |message: &str| IpcError::new(code::EXPORT_FAILED, message.to_owned());
+    if std::fs::symlink_metadata(destination).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(failed("Cannot export through a symbolic link"));
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| failed("Invalid export destination"))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|_| failed("Cannot create export file"))?;
+    temporary
+        .write_all(bytes)
+        .map_err(|_| failed("Cannot write export file"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|_| failed("Cannot finish export file"))?;
+    // A scanner or indexer can hold the new file for a moment on Windows.
+    let mut delay = Duration::from_millis(40);
+    for attempt in 0..4 {
+        match temporary.persist(destination) {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt < 3 => {
+                temporary = error.file;
+                std::thread::sleep(delay);
+                delay *= 2;
             }
+            Err(_) => break,
         }
-        Err(failed("Cannot save export file"))
+    }
+    Err(failed("Cannot save export file"))
+}
+
+/// Save the diagnostics bundle (`diagnostics.export`): a plain UTF-8 text file the person can read
+/// before sending it. The destination comes from a native save dialog. `Ok(false)` when the dialog
+/// was dismissed, `Ok(true)` once the file is written.
+#[tauri::command]
+pub async fn diagnostics_export(app: tauri::AppHandle) -> Result<bool, IpcError> {
+    let failed = |message: &str| IpcError::new(code::EXPORT_FAILED, message.to_owned());
+    let text = crate::diagnostics::global().bundle(&app.package_info().version.to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(destination) = app
+            .dialog()
+            .file()
+            .add_filter("Text", &["txt"])
+            .set_file_name(crate::diagnostics::bundle_file_name())
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let mut destination = destination
+            .into_path()
+            .map_err(|_| failed("Invalid export destination"))?;
+        // It is only text: a name typed without an extension gets one, any other is kept.
+        if destination.extension().is_none() {
+            destination.set_extension("txt");
+        }
+        write_atomically(&destination, text.as_bytes())?;
+        Ok(true)
     })
     .await
     .map_err(|_| failed("Export could not finish"))?

@@ -98,3 +98,11 @@ jobs:
         run: python tests/test_text_tokens.py
       - name: Legacy web UI token, Host, Origin and JSON checks
         run: python tests/test_webui_security.py
+      - name: Write journal, staged transaction and fault-injection matrix
+        run: python tests/test_journal.py
+      - name: Guarded recovery, conflicts and interrupted restores
+        run: python tests/test_recovery.py
+      - name: Provider/core retry contract by error kind
+        run: python tests/test_retry_contract.py
+      - name: Review follow-ups for write reporting, layout gate, locks and diagnostics
+        run: python tests/test_review_a_followups.py

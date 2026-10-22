@@ -50,9 +50,15 @@ else:
 """
 
 
+# A Windows venv's python.exe is a launcher that runs the real interpreter as its child. Killing the
+# launcher would leave that child holding the lock for a moment, so lock holders and probes start the
+# real interpreter directly. They import only the standard library and this repository.
+PYTHON = getattr(sys, "_base_executable", None) or sys.executable
+
+
 def start_holder(world: Path, cls: str = "WorldWriteLock") -> subprocess.Popen:
     process = subprocess.Popen(
-        [sys.executable, "-B", "-c", HOLDER.format(cls=cls), str(ROOT), str(world)],
+        [PYTHON, "-B", "-c", HOLDER.format(cls=cls), str(ROOT), str(world)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     assert process.stdout is not None
@@ -63,7 +69,7 @@ def start_holder(world: Path, cls: str = "WorldWriteLock") -> subprocess.Popen:
 
 def probe(kind: str, world: Path) -> str:
     done = subprocess.run(
-        [sys.executable, "-B", "-c", PROBE, str(ROOT), kind, str(world)],
+        [PYTHON, "-B", "-c", PROBE, str(ROOT), kind, str(world)],
         capture_output=True, text=True, timeout=60,
     )
     assert done.returncode == 0, done.stderr
@@ -71,7 +77,7 @@ def probe(kind: str, world: Path) -> str:
 
 
 def dead_pid() -> int:
-    process = subprocess.Popen([sys.executable, "-B", "-c", "pass"])
+    process = subprocess.Popen([PYTHON, "-B", "-c", "pass"])
     process.wait()
     return process.pid
 
@@ -185,7 +191,7 @@ def test_leftover_files_never_block(tmp: Path) -> None:
 def test_live_old_owner_keeps_the_world(tmp: Path) -> None:
     world = tmp / "legacy-alive"
     world.mkdir()
-    sleeper = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(120)"])
+    sleeper = subprocess.Popen([PYTHON, "-B", "-c", "import time; time.sleep(120)"])
     try:
         legacy_lock(world, pid=sleeper.pid)
         lock = WorldWriteLock(world)
@@ -206,7 +212,7 @@ def test_live_old_owner_keeps_the_world(tmp: Path) -> None:
 
 
 def test_liveness_probe_never_kills(tmp: Path) -> None:
-    sleeper = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(120)"])
+    sleeper = subprocess.Popen([PYTHON, "-B", "-c", "import time; time.sleep(120)"])
     try:
         for _ in range(5):
             assert pid_is_alive(sleeper.pid) is True

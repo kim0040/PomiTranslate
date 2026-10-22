@@ -508,7 +508,8 @@ class JobManager:
                 job["status"] = final_status
                 job["finished_at"] = now_iso()
                 job["result"] = report
-                job["can_resume"] = final_status == "cancelled"
+                # A partial or needs_retry run keeps its checkpoint, so it can be resumed like a cancelled one.
+                job["can_resume"] = final_status in {"cancelled", "partial", "needs_retry"}
                 if final_status == "cancelled":
                     job["progress"]["phase"] = "cancelled"
                     job["progress"]["current_activity"] = "cancelled"
@@ -609,6 +610,23 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.handle_request(send_body=False)
 
+    def _discard_body(self) -> None:
+        """Read and drop a refused request's body before the connection closes.
+
+        Closing a socket with unread data makes Windows reset the connection, and the client then
+        loses the error response it was just sent.
+        """
+        try:
+            remaining = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        remaining = min(max(remaining, 0), MAX_REQUEST_BODY_BYTES)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _refuse(self, status: HTTPStatus, message: str) -> bool:
         self.send_error_json(status, message)
         return False
@@ -695,6 +713,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if not self.authorize(True, post=True):
+            self._discard_body()
             return
         job_manager = self.server.job_manager
 

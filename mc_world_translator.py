@@ -36,9 +36,33 @@ from llm_backends import (
 )
 
 from mwt import nbtio as nbt
-from mwt.durable import atomic_write_bytes, atomic_write_text, fsync_fd, replace as durable_replace
+from mwt.durable import CommittedWriteError, atomic_write_bytes, atomic_write_text, fsync_dir, fsync_fd, replace as durable_replace
 from mwt.extract import TextExtractionMixin, TextRef
-from mwt.safety import DigestCache, PlanInvalidated, file_sha256, world_state_fingerprint
+from mwt.locking import object_identity
+from mwt.journal import (
+    JOURNAL_NAME,
+    DiskFull,
+    Journal,
+    JournalError,
+    TargetSpec,
+    UnitResult,
+    UnitSpec,
+    WorldChanged,
+    WriteTransaction,
+    clear_staging,
+    is_disk_full,
+    staging_dir,
+    unsettled_for_world,
+)
+from mwt.safety import (
+    DigestCache,
+    PlanInvalidated,
+    file_sha256,
+    world_baseline,
+    world_fingerprint,
+    world_inventory,
+    world_state_fingerprint,
+)
 
 
 STYLE_PRESETS: dict[str, str] = {
@@ -434,9 +458,16 @@ def normalize_config(config: dict[str, Any], config_path: Path | None) -> dict[s
 
 
 MAX_CONSECUTIVE_REQUEST_FAILURES = 6
-# A run of provider rejections (HTTP 4xx other than 429) with no success in between is a
-# configuration problem, not bad luck on one batch.
-MAX_CONSECUTIVE_REJECTIONS = 12
+# A run of "rejected" answers (HTTP 400/422 that are neither too large nor filtered) with no
+# accepted request in between is a configuration problem, not bad luck on one batch. Three calls
+# are enough to tell: the whole batch, one fifth of it, and a single string.
+MAX_CONSECUTIVE_REJECTIONS = 3
+
+# The provider layer classifies every failed request (``ProviderError.kind``); the core decides
+# only from that kind. SPLIT_NOW kinds never retry the identical request: a smaller one may succeed.
+SPLIT_NOW_KINDS = frozenset({"too_large", "filtered", "rejected"})
+FATAL_KINDS = frozenset({"redirect", "auth", "config"})
+RETRY_KINDS = frozenset({"rate_limit", "transient", "timeout", "unknown"})
 
 # Stable reasons a string could not be translated. The raw provider text stays in the report file;
 # the interface shows its own wording for each code.
@@ -452,16 +483,72 @@ _PROVIDER_CODE_FAILURES = {
     "PROVIDER_ERROR": "provider_unavailable",
     "NETWORK_ERROR": "provider_unavailable",
     "REQUEST_REJECTED": "bad_request",
+    "REQUEST_TOO_LARGE": "bad_request",
+    "PROVIDER_TIMEOUT": "timeout",
+    "PROVIDER_REDIRECT_REFUSED": "auth",
 }
 
 
+def failure_kind(exc: BaseException) -> str | None:
+    """The retry class of a failed request, or None when it is not a provider failure at all.
+
+    Uses ``exc.kind`` when the provider layer set one. Otherwise (a fake client, an older
+    exception) it falls back to the HTTP status, with the meaning of the table on
+    ``llm_backends.ProviderError.kind``.
+    """
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, str) and kind:
+        return kind
+    status = getattr(exc, "status", None)
+    if not isinstance(exc, ProviderError) and not isinstance(status, int):
+        return None
+    error_code = getattr(exc, "error_code", None)
+    if error_code == "PROVIDER_REDIRECT_REFUSED":
+        return "redirect"
+    if error_code == "PROVIDER_TIMEOUT":
+        return "timeout"
+    if getattr(exc, "filtered", False):
+        return "filtered"
+    if getattr(exc, "too_large", False) or status == 413:
+        return "too_large"
+    if status in {401, 402, 403}:
+        return "auth"
+    if status in {404, 405, 415}:
+        return "config"
+    if status in {400, 422}:
+        return "rejected"
+    if status == 429:
+        return "rate_limit"
+    if status in {408, 409, 425} or status is None or (isinstance(status, int) and status >= 500):
+        return "transient"
+    return "unknown"
+
+
 def classify_failure(exc: BaseException) -> str:
-    """Map one failed request to a code from ``FAILURE_CODES``."""
+    """Map one failed request to a code from ``FAILURE_CODES``, from the structured kind first."""
     if isinstance(exc, TranslationCancelled):
         return "cancelled"
-    message = str(exc).lower()
     if isinstance(exc, ProviderUnavailable):
         return _PROVIDER_CODE_FAILURES.get(exc.code, "provider_unavailable")
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, str) and kind:
+        error_code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
+        # Decisive kinds map directly. rate_limit, rejected, transient and unknown fall through to the
+        # status checks below, which tell quota from rate limit, a missing model from a bad request and
+        # a gateway timeout from an outage.
+        if kind == "timeout":
+            return "timeout"
+        if error_code == "NO_CREDIT":
+            return "quota"
+        if kind == "auth":
+            return "auth"
+        if kind == "config":
+            return "unsupported_model" if getattr(exc, "status", None) == 404 or error_code == "MODEL_NOT_FOUND" else "bad_request"
+        if kind in {"too_large", "filtered"}:
+            return "bad_request"
+        if kind == "redirect":
+            return "auth"
+    message = str(exc).lower()
     status = getattr(exc, "status", None)
     if isinstance(status, int):
         if status in {401, 403}:
@@ -483,12 +570,35 @@ def classify_failure(exc: BaseException) -> str:
         if status >= 500:
             return "provider_unavailable"
     if isinstance(exc, ProviderError):
-        return "timeout" if "timed out" in message or "timeout" in message else "provider_unavailable"
+        timed_out = getattr(exc, "error_code", None) == "PROVIDER_TIMEOUT" or "timed out" in message or "timeout" in message
+        return "timeout" if timed_out else "provider_unavailable"
+    if isinstance(kind, str) and kind:
+        return {"rate_limit": "rate_limit", "rejected": "bad_request"}.get(kind, "provider_unavailable")
     if isinstance(exc, TimeoutError):
         return "timeout"
     if "incomplete translation json" in message or isinstance(exc, json.JSONDecodeError):
         return "format_mismatch"
     return "other"
+
+
+# What progress events say about a failure: one stable sentence per failure code. The provider's
+# own text (which can echo the prompt or the request) stays in the report file only.
+FAILURE_MESSAGES = {
+    "timeout": "The provider did not answer in time.",
+    "auth": "The provider rejected the credentials.",
+    "rate_limit": "The provider is limiting requests.",
+    "quota": "The provider reports no credit or quota left.",
+    "bad_request": "The provider rejected the request.",
+    "unsupported_model": "The provider does not offer this model.",
+    "format_mismatch": "The provider's answer could not be read.",
+    "provider_unavailable": "The provider is not available.",
+    "cancelled": "The request was cancelled.",
+    "other": "The request failed.",
+}
+
+
+def public_failure_message(failure: str) -> str:
+    return FAILURE_MESSAGES.get(failure, FAILURE_MESSAGES["other"])
 
 
 class ProviderUnavailable(RuntimeError):
@@ -498,6 +608,64 @@ class ProviderUnavailable(RuntimeError):
         super().__init__(message)
         self.code = code
         self.fatal = fatal
+
+
+class BatchLog:
+    """Append-only record of what the provider answered, flushed to disk line by line.
+
+    A crash after a batch was paid for must not make the next run buy it again, so each answer is
+    appended and fsynced the moment it arrives, long before the next full checkpoint. The log
+    also notes every request sent and every batch that gave up, with its failure code. A torn
+    last line (a crash while writing it) is ignored when the log is read.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def path_for(checkpoint_path: Path) -> Path:
+        return checkpoint_path.with_name(f"{checkpoint_path.name}.batches.jsonl")
+
+    def append(self, kind: str, **payload: Any) -> None:
+        line = (json.dumps({"kind": kind, "at": time.time(), **payload}, ensure_ascii=False) + "\n").encode("utf-8")
+        with self._lock:
+            created = not self.path.exists()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
+            try:
+                os.write(descriptor, line)
+                fsync_fd(descriptor)
+            finally:
+                os.close(descriptor)
+            if created:
+                fsync_dir(self.path.parent)
+
+    @staticmethod
+    def read(path: Path) -> tuple[dict[str, str], dict[str, int]]:
+        """(translations, counts) from a log. Unreadable lines are skipped, never fatal."""
+        translations: dict[str, str] = {}
+        counts = {"sent": 0, "received": 0, "failed": 0}
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return translations, counts
+        for line in raw.splitlines():
+            try:
+                item = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            if kind in counts:
+                counts[kind] += 1
+            if kind == "received" and isinstance(item.get("translations"), dict):
+                translations.update({k: v for k, v in item["translations"].items() if isinstance(k, str) and isinstance(v, str)})
+        return translations, counts
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 class BatchTranslator:
@@ -526,6 +694,13 @@ class BatchTranslator:
         self._lock = threading.RLock()
         self._throttle_lock = threading.Lock()
         self._abort: BaseException | None = None
+        # Called as sink(kind, **details) for "sent", "received" and "failed". Set by the job so
+        # that provider answers reach the disk at once; the translator itself never depends on it.
+        self.sink: Any = None
+
+    def _record(self, kind: str, **details: Any) -> None:
+        if self.sink is not None:
+            self.sink(kind, **details)
 
     def throttle(self, batch_size: int) -> None:
         if self.rpm_limit <= 0 and self.tpm_limit <= 0:
@@ -648,31 +823,34 @@ class BatchTranslator:
         return self.lookup(texts)
 
     def _note_failure(self, exc: Exception, *, attempt: int, max_retries: int, batch_size: int) -> float:
-        """Record one failed request and return how long to wait before the next try."""
+        """Record one failed request and return how long to wait before the next try.
+
+        The decision comes from the failure's kind (see ``failure_kind``): fatal kinds stop the job,
+        size/filter/rejection kinds are never retried as they are (the caller splits the batch) and
+        only a run of rejections ends the job; outages count toward their own breaker.
+        """
+        kind = failure_kind(exc)
         status = getattr(exc, "status", None)
         code = getattr(exc, "code", "REQUEST_FAILED")
-        # Only outages count toward the circuit breaker. A rejected or malformed answer for one
-        # batch says nothing about the next one.
+        failure = classify_failure(exc)
         with self._lock:
-            provider_outage = isinstance(exc, ProviderError) and (status is None or status == 429 or status >= 500)
-            rejected = isinstance(exc, ProviderError) and isinstance(status, int) and 400 <= status < 500 and status != 429
-            if provider_outage:
+            if kind in RETRY_KINDS:
                 self.consecutive_failures += 1
-            if rejected:
+            if kind == "rejected":
                 self.consecutive_rejections += 1
             streak = self.consecutive_failures
             abort: ProviderUnavailable | None = None
-            if getattr(exc, "fatal", False):
+            fatal = kind in FATAL_KINDS or (kind not in SPLIT_NOW_KINDS and kind not in RETRY_KINDS and bool(getattr(exc, "fatal", False)))
+            if fatal:
                 abort = ProviderUnavailable(str(exc), code=code, fatal=True)
             elif streak >= MAX_CONSECUTIVE_REQUEST_FAILURES:
-                abort = ProviderUnavailable(
-                    f"{streak} requests in a row failed. Last error: {exc}",
-                    code=code,
-                )
+                # An outage is never reported as a rejection, whatever the exception's own code says.
+                outage_code = "PROVIDER_ERROR" if code == "REQUEST_REJECTED" else code
+                abort = ProviderUnavailable(f"{streak} requests in a row failed. Last error: {exc}", code=outage_code)
             elif self.consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
                 abort = ProviderUnavailable(
                     f"{self.consecutive_rejections} requests in a row were rejected. Check the model, key and endpoint settings. Last error: {exc}",
-                    code=code,
+                    code="REQUEST_REJECTED",
                     fatal=True,
                 )
             # Publish the breaker while the failure counter is still locked. Otherwise a worker
@@ -689,17 +867,30 @@ class BatchTranslator:
             max_attempts=max_retries,
             code=code,
             status=status,
-            message=str(exc),
-            failure=classify_failure(exc),
+            kind=kind,
+            message=public_failure_message(failure),
+            failure=failure,
         )
         if abort is not None:
             raise abort from exc
         retry_after = getattr(exc, "retry_after", None)
         if retry_after:
             return float(retry_after)
-        if status == 429:
+        if kind == "rate_limit" or status == 429:
             return min(2.0 * (2 ** (attempt - 1)), 30.0)
         return min(1.5 * attempt, 4.0)
+
+    def _raw_failure_text(self, exc: BaseException) -> str:
+        from mwt.secrets import bounded_public_text
+
+        return bounded_public_text(str(exc), str(self.config["api"].get("api_key") or ""), 500)
+
+    @staticmethod
+    def _charge_extra_requests(budget: dict[str, Any], requests_before: int) -> None:
+        """Requests the client made beyond the one already counted (parameter adaptation retries)."""
+        made = LLMProviderClient.request_count - requests_before
+        if made > 1:
+            budget["left"] -= made - 1
 
     def _translate_batch(self, texts: list[str], batch_size: int, budget: dict[str, Any] | None = None) -> dict[str, str]:
         payload = {str(i): text for i, text in enumerate(texts)}
@@ -712,30 +903,40 @@ class BatchTranslator:
                 break
             self.ensure_not_cancelled()
             budget["left"] -= 1
+            requests_before = LLMProviderClient.request_count
             try:
                 self.throttle(len(texts))
                 # The breaker may have tripped while this worker waited for the shared throttle.
                 self.ensure_not_cancelled()
                 self.emit("translation_batch_start", batch_size=len(texts), attempt=attempt, max_attempts=max_retries)
+                self._record("sent", size=len(texts), attempt=attempt)
                 parsed = self.client.translate_mapping(
                     payload,
                     system_prompt=self.system_prompt(),
                     temperature=float(self.config["temperature"]),
                 )
+                self._charge_extra_requests(budget, requests_before)
                 self.emit("translation_batch_done", batch_size=len(texts), attempt=attempt)
                 with self._lock:
                     self.consecutive_failures = 0
                     self.consecutive_rejections = 0
-                return {
+                answered = {
                     text: parsed.get(str(i), text)
                     for i, text in enumerate(texts)
                 }
+                # On disk before anything else can fail: this answer was paid for.
+                self._record("received", translations=answered)
+                return answered
             except (TranslationCancelled, ProviderUnavailable):
                 raise
             except Exception as exc:
-                budget["error"] = str(exc)
+                self._charge_extra_requests(budget, requests_before)
+                # Raw provider text goes to the report file (through the failed-strings table), never to progress events.
+                budget["error"] = self._raw_failure_text(exc)
                 budget["code"] = classify_failure(exc)
                 delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts))
+                if failure_kind(exc) in SPLIT_NOW_KINDS:
+                    break  # the same request would fail the same way; a smaller one may not
                 if attempt < max_retries and budget["left"] > 0:
                     self.wait(delay)
 
@@ -752,6 +953,7 @@ class BatchTranslator:
             for text in texts:
                 self.failed[text] = reason
                 self.failed_codes[text] = budget["code"]
+        self._record("failed", count=len(texts), code=budget["code"])
         return {}
 
 
@@ -787,6 +989,17 @@ class WorldTranslator(TextExtractionMixin):
         self._backup_published = False
         self._write_lock = None
         self._session_locks = None
+        self._target_locks = None
+        self._journal: Journal | None = None
+        # What the world looked like when this run took its locks: {relative path: (size, sha256)}.
+        # Every file a write replaces must still match it, and no file may appear or vanish.
+        self._baseline: dict[str, tuple[int, str]] = {}
+        self._baseline_inventory: dict[str, int] = {}
+        self._planned: dict[str, dict[str, Any]] = {}
+        self._staged = 0
+        self._batch_log_failed = False
+        self.stopped_status = ""
+        self.external_pack_identity: dict[str, str] = {}
         self.digest_cache = DigestCache()
         # External packs this job wrote itself: {path: {"before": sha256, "after": sha256}}.
         self.external_pack_writes: dict[str, dict[str, str]] = {}
@@ -803,13 +1016,22 @@ class WorldTranslator(TextExtractionMixin):
             "errors": [],
             "warnings": [],
         }
+        self.batch_log = (
+            BatchLog(BatchLog.path_for(self.checkpoint_path))
+            if self.checkpoint_path is not None and self.runtime_config["checkpoint_enabled"] and not config["dry_run"]
+            else None
+        )
         self.load_checkpoint()
+        if self.batch_log is not None and not self.checkpoint_loaded:
+            self.batch_log.clear()  # answers of a run this one does not continue
         self.translator = None if config["dry_run"] else BatchTranslator(
             config,
             progress_callback=self.emit,
             cancel_check=self.is_cancelled,
             initial_cache=self.translation_cache,
         )
+        if self.translator is not None:
+            self.translator.sink = self._batch_sink
 
     def emit(self, event: str, **payload: Any) -> None:
         if self.progress_callback is not None:
@@ -825,14 +1047,30 @@ class WorldTranslator(TextExtractionMixin):
             raise TranslationCancelled("Translation was cancelled by the user.")
 
     def release_write_lock(self) -> None:
+        targets, self._target_locks = self._target_locks, None
         session, self._session_locks = self._session_locks, None
         write_lock, self._write_lock = self._write_lock, None
         try:
-            if session is not None:
-                session.release()
+            if targets is not None:
+                targets.release()
         finally:
-            if write_lock is not None:
-                write_lock.release()
+            try:
+                if session is not None:
+                    session.release()
+            finally:
+                if write_lock is not None:
+                    write_lock.release()
+
+    def _batch_sink(self, kind: str, **details: Any) -> None:
+        """Make a provider answer durable at once. Failing to is reported, never fatal."""
+        log = self.batch_log
+        if log is None or self._batch_log_failed:
+            return
+        try:
+            log.append(kind, **details)
+        except OSError as exc:
+            self._batch_log_failed = True
+            self._warn("batch_log_unavailable", message=type(exc).__name__)
 
     def checkpoint_config_fingerprint(self) -> str:
         """Identify settings that would make a resumed translation inconsistent."""
@@ -931,6 +1169,10 @@ class WorldTranslator(TextExtractionMixin):
                 Path(self.config["world_dir"]), backup_set_id, self._backup_store(),
                 external_files=self._external_backup_files(),
             )
+        if self.batch_log is not None:
+            answered, _counts = BatchLog.read(self.batch_log.path)
+            for source, translated in answered.items():
+                self.translation_cache.setdefault(source, translated)
         self.checkpoint_loaded = True
         self.emit(
             "checkpoint_loaded",
@@ -957,6 +1199,8 @@ class WorldTranslator(TextExtractionMixin):
                 self.checkpoint_path.unlink()
             except FileNotFoundError:
                 pass
+        if self.batch_log is not None:
+            self.batch_log.clear()
 
     def save_checkpoint(self) -> None:
         if not self.runtime_config["checkpoint_enabled"] or self.checkpoint_path is None:
@@ -1017,8 +1261,13 @@ class WorldTranslator(TextExtractionMixin):
 
         try:
             from mwt.layout import detect_write_blockers
-            from mwt.locking import MinecraftSessionLocks, MinecraftWorldInUse, WorldWriteLock, WorldWriteLocked
-            from mwt.safety import world_fingerprint
+            from mwt.locking import (
+                MinecraftSessionLocks,
+                MinecraftWorldInUse,
+                TargetLocked,
+                WorldWriteLock,
+                WorldWriteLocked,
+            )
 
             blockers = detect_write_blockers(world_dir)
             self.report["write_blockers"] = blockers
@@ -1052,12 +1301,39 @@ class WorldTranslator(TextExtractionMixin):
                     self.release_write_lock()
                     return self.report
 
-            fingerprint = world_fingerprint(world_dir)
+                try:
+                    self._acquire_target_locks()
+                except TargetLocked as exc:
+                    self.report["status"] = "locked"
+                    self.report["errors"].append({"scope": "target_lock", "code": "TARGET_LOCKED", "message": str(exc)})
+                    self.refresh_report_counts()
+                    self.write_report()
+                    self.release_write_lock()
+                    return self.report
+                blocking = self._blocking_interrupted_jobs(world_dir)
+                if blocking:
+                    self.report["status"] = "failed"
+                    self.report["error"] = "An earlier write to this world was interrupted. Finish or undo it first."
+                    self.report["errors"].append({
+                        "scope": "recovery", "code": "RECOVERY_REQUIRED",
+                        "message": self.report["error"], "jobIds": [item["jobId"] for item in blocking],
+                    })
+                    self.refresh_report_counts()
+                    self.write_report()
+                    self.release_write_lock()
+                    return self.report
+
+            if self.config["dry_run"]:
+                fingerprint = world_fingerprint(world_dir)
+            else:
+                # One read of the world gives both the scan comparison and the per-file baseline.
+                fingerprint, self._baseline = world_baseline(world_dir, self.digest_cache)
+                self._baseline_inventory = {name: size for name, (size, _digest) in self._baseline.items()}
             self.report["world_fingerprint"] = fingerprint
             expected = str(self.runtime_config.get("expected_world_fingerprint") or "")
             if expected and expected != fingerprint and not self.checkpoint_loaded:
                 self.report["status"] = "invalidated"
-                self.report["errors"].append({"scope": "plan", "message": "World changed after scan"})
+                self.report["errors"].append({"scope": "plan", "code": "WORLD_CHANGED", "message": "World changed after scan"})
                 self.refresh_report_counts()
                 self.write_report()
                 self.release_write_lock()
@@ -1142,6 +1418,8 @@ class WorldTranslator(TextExtractionMixin):
                 batch_size=batch_size,
                 requests_estimate=math.ceil(len(self.translator.pending(ordered)) / batch_size),
             )
+            # A first checkpoint before any request is paid for, so a crash can be resumed from the answer log.
+            self.save_checkpoint()
             try:
                 self.translator.translate_texts(ordered)
             except ProviderUnavailable as exc:
@@ -1154,37 +1432,12 @@ class WorldTranslator(TextExtractionMixin):
 
             self._verify_external_pack_inputs()
             self.emit("phase_start", phase="write", total=len(pending_files))
-            if self.config["resource_pack"]["enabled"]:
-                self.write_resource_packs()
-            for index, file_path in enumerate(pending_files, start=1):
-                self.ensure_not_cancelled()
-                self.emit("file_start", phase="write", index=index, total=total_files, file=str(file_path))
-                scanned = self.file_scan.get(str(file_path), {})
-                if scanned.get("skipped") or not scanned.get("candidates", 0):
-                    result = scanned
-                else:
-                    result = self._run_file_step(self.apply_region_file, file_path)
-                if result.get("skipped") not in {"file_error", "parse_error"} and not result.get("untranslated"):
-                    self.completed_region_files.add(str(file_path))
-                if result["changed_chunks"] > 0 or result.get("candidates", 0) > 0 or result.get("skipped"):
-                    self.report["changed_files"].append(result)
-                if result.get("written_files") or result.get("skipped") or time.monotonic() - self._checkpoint_saved_at >= 5.0:
-                    self.save_checkpoint()
-                self.emit(
-                    "file_done",
-                    phase="write",
-                    index=index,
-                    total=total_files,
-                    file=str(file_path),
-                    changed_chunks=result["changed_chunks"],
-                    candidates=result.get("candidates", 0),
-                    candidate_text_count=len(self.candidate_texts),
-                    skipped=result.get("skipped", ""),
-                )
-
+            self._write_phase(pending_files, total_files)
+            if self.stopped_status:
+                return self._finish(self.stopped_status)
             return self._finish("partial" if self._left_untranslated() else "completed")
         except PlanInvalidated as exc:
-            self.report["errors"].append({"scope": "plan", "message": str(exc)})
+            self.report["errors"].append({"scope": "plan", "code": "WORLD_CHANGED", "message": str(exc)})
             return self._finish("invalidated")
         except TranslationCancelled:
             self.report["status"] = "cancelled"
@@ -1205,6 +1458,7 @@ class WorldTranslator(TextExtractionMixin):
             error_entry = {
                 "scope": "run",
                 "message": str(exc) or exc.__class__.__name__,
+                "exception": exc.__class__.__name__,
             }
             self.report["status"] = "failed"
             self.report["errors"].append(error_entry)
@@ -1290,21 +1544,42 @@ class WorldTranslator(TextExtractionMixin):
         raise ValueError(f"Unsupported compression type: {compression}")
 
     def backup_once(self, path: Path) -> None:
+        self.backup_many([path])
+
+    def backup_many(self, paths: list[Path]) -> None:
+        """Back up several files with one verification and one publication.
+
+        ``BackupSet.add`` already hashes each source and its copy, so every new entry is checked
+        once; the set is verified as a whole and made the "latest" once, before the first
+        destructive write, instead of once per file.
+        """
         if not self.config["backup"]:
             return
         from mwt.safety import BackupSet
 
         world_dir = Path(self.config["world_dir"]).resolve()
-        resolved = path.resolve()
         external_files = self._external_backup_files()
-        if not resolved.is_relative_to(world_dir) and resolved not in {path.resolve() for path in external_files}:
-            raise ValueError("Backup source is outside the selected world")
+        allowed_external = {item.resolve() for item in external_files}
+        resolved_paths = []
+        for path in paths:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(world_dir) and resolved not in allowed_external:
+                raise ValueError("Backup source is outside the selected world")
+            resolved_paths.append(resolved)
         if self._run_backup is None:
             self._run_backup = BackupSet.new(world_dir, store=self._backup_store(), external_files=external_files)
-        self._run_backup.add(resolved)
-        self._run_backup.verify()
-        self._run_backup.publish_latest()
-        self.report["backup_set_id"] = self._run_backup.backup_id
+        backup = self._run_backup
+        before = len(backup.entries)
+        for resolved in resolved_paths:
+            backup.add(resolved, commit=False)
+        if len(backup.entries) == before:
+            return  # everything was in the set already: nothing new to check or publish
+        backup.commit()
+        if not self._backup_published:
+            backup.verify()
+            backup.publish_latest(verify=False)
+            self._backup_published = True
+        self.report["backup_set_id"] = backup.backup_id
 
     def _preflight_resource_pack_backup_paths(self, world_dir: Path) -> None:
         """Only explicitly selected external ZIP targets may extend the world write scope."""
@@ -1349,6 +1624,7 @@ class WorldTranslator(TextExtractionMixin):
                     raise PlanInvalidated("An external resource pack changed after scan")
                 self.external_pack_inputs[str(resolved)] = digest
                 self.external_pack_parents[str(resolved)] = identity
+                self.external_pack_identity[str(resolved)] = object_identity(resolved)
 
     def _verify_external_pack_inputs(self) -> None:
         for path, digest in self.external_pack_inputs.items():
@@ -1357,6 +1633,9 @@ class WorldTranslator(TextExtractionMixin):
             identity = f"{parent.st_dev}:{parent.st_ino}" if parent else None
             if target.is_symlink() or not target.is_file() or identity != self.external_pack_parents[path] or file_sha256(target) != digest:
                 raise PlanInvalidated("An external resource pack changed during translation. Rescan before writing.")
+            known = self.external_pack_identity.get(path)
+            if known is not None and object_identity(target) != known:
+                raise PlanInvalidated("An external resource pack was replaced during translation. Rescan before writing.")
 
     def _external_backup_files(self) -> list[Path]:
         if not self.config["resource_pack"]["enabled"]:
@@ -1387,13 +1666,17 @@ class WorldTranslator(TextExtractionMixin):
         for attempt in range(1, max(1, int(self.runtime_config["max_file_write_retries"])) + 1):
             try:
                 write_bytes_atomic(path, content)
-                self.digest_cache.forget(path)
                 last_error = None
                 break
             except Exception as exc:
                 last_error = exc
+                if is_disk_full(exc) or isinstance(exc, CommittedWriteError):
+                    break  # more attempts cannot help; a committed file is reported as written, not retried
                 self.emit("file_write_retry", file=str(path), attempt=attempt, message=str(exc))
                 time.sleep(min(0.5 * attempt, 2.0))
+            finally:
+                # Whatever happened, the file may have changed: a remembered digest is not to be trusted.
+                self.digest_cache.forget(path)
         if last_error is not None:
             raise last_error
 
@@ -1422,21 +1705,7 @@ class WorldTranslator(TextExtractionMixin):
         except (TranslationCancelled, ProviderUnavailable):
             raise
         except Exception as exc:
-            result = {
-                "file": str(file_path),
-                "changed_chunks": 0,
-                "unique_texts": 0,
-                "candidates": 0,
-                "skipped": "file_error",
-                "error": str(exc),
-            }
-            committed = getattr(exc, "written_files", None)
-            if committed:
-                # Some files reached the disk before this one failed: they still count as changed.
-                result["written_files"] = list(committed)
-            self.file_errors.append(result)
-            self.report["errors"].append(result)
-            self.emit("file_error", file=str(file_path), message=str(exc))
+            result = self._file_error_result(file_path, exc)
             if not self.runtime_config["continue_on_file_error"]:
                 raise
             return result
@@ -1557,24 +1826,250 @@ class WorldTranslator(TextExtractionMixin):
             self._add_candidates(unique_texts)
         return result
 
-    def apply_region_file(self, path: Path) -> dict[str, Any]:
-        """Write cached translations into one region file, backing it up first."""
-        from mwt.region import external_chunk_path
+    # ------------------------------------------------------------------ write phase
+    #
+    # Nothing in the world changes until every new file exists on disk (staged inside the backup
+    # set), every original is copied and verified, and the recovery record says so. Then the units
+    # are published one by one (see mwt/journal.py for the model and the guarantees).
+
+    def _ensure_backup(self) -> Any:
         from mwt.safety import BackupSet
+
+        if self._run_backup is None:
+            self._run_backup = BackupSet.new(
+                Path(self.config["world_dir"]).resolve(), store=self._backup_store(),
+                external_files=self._external_backup_files(),
+            )
+        return self._run_backup
+
+    def _job(self) -> tuple[Journal, Any]:
+        """The recovery record of this run, next to its backup set. A resumed run continues its own."""
+        backup = self._ensure_backup()
+        if self._journal is None:
+            path = backup.root / JOURNAL_NAME
+            world_dir = Path(self.config["world_dir"]).resolve()
+            self._journal = Journal.load(path) if path.is_file() else Journal.create(
+                path, job_id=backup.backup_id, kind="translate", world_dir=world_dir)
+        return self._journal, backup
+
+    def _acquire_target_locks(self) -> None:
+        """Lock every external pack this run may replace, after the world locks, in sorted key order."""
+        from mwt.locking import ExternalTargetLocks, target_lock_dir
+
+        external = [Path(path).resolve(strict=False) for path in self._external_backup_files()]
+        if not external:
+            return
+        data_dir = self.runtime_config.get("data_dir")
+        locks = ExternalTargetLocks(external, target_lock_dir(Path(data_dir) if data_dir else None))
+        locks.acquire(float(self.runtime_config.get("target_lock_wait", 0) or 0))
+        self._target_locks = locks
+
+    def _blocking_interrupted_jobs(self, world_dir: Path) -> list[dict]:
+        """Jobs of this world that died in the middle of a write. A new write waits for their recovery."""
+        from mwt.journal import BLOCKING_STATES
+        from mwt.safety import legacy_backup_store
+
+        stores = [self._backup_store() or legacy_backup_store(world_dir)]
+        return [item for item in unsettled_for_world(world_dir, stores) if item.get("journalState") in BLOCKING_STATES]
+
+    def _revalidate_world(self) -> None:
+        """Stop with ``WorldChanged`` if files appeared, vanished or changed size since this run
+        read the world under its locks. Per-file contents are compared again target by target."""
+        if not self._baseline_inventory:
+            return  # a direct call without a run: there is no baseline to compare with
+        now = world_inventory(Path(self.config["world_dir"]).resolve())
+        added = sorted(set(now) - set(self._baseline_inventory))
+        removed = sorted(set(self._baseline_inventory) - set(now))
+        resized = sorted(name for name in now if name in self._baseline_inventory and now[name] != self._baseline_inventory[name])
+        if added or removed or resized:
+            raise WorldChanged(
+                f"The world changed after it was scanned ({len(added)} added, {len(removed)} removed, {len(resized)} modified)."
+            )
+
+    def _expected_pre(self, path: Path) -> str | None:
+        """The sha256 a target had when this run read the world; "" if it did not exist."""
+        if not self._baseline:
+            return None
+        try:
+            relative = path.resolve().relative_to(Path(self.config["world_dir"]).resolve()).as_posix()
+        except ValueError:
+            return None
+        entry = self._baseline.get(relative)
+        return entry[1] if entry else ""
+
+    def _stage(self, name: str, content: bytes | None = None) -> Path:
+        """A file inside the backup set that will hold a new file's bytes until it is published."""
+        directory = staging_dir(self._ensure_backup().root)
+        directory.mkdir(parents=True, exist_ok=True)
+        self._staged += 1
+        path = directory / f"{self._staged:05d}-{re.sub(r'[^A-Za-z0-9._-]', '_', name)[:60]}"
+        if content is not None:
+            path.write_bytes(content)  # plain write: nothing depends on it until the publish copies it
+        return path
+
+    def _cleanup_staging(self) -> None:
+        if self._run_backup is not None:
+            clear_staging(self._run_backup.root)
+
+    def _commit_units(self, units: list[UnitSpec], *, on_unit_done: Any = None, stop_on_error: bool = False) -> Any:
+        journal, backup = self._job()
+        self.report["backup_set_id"] = backup.backup_id
+        self.report["job_id"] = backup.backup_id
+        transaction = WriteTransaction(
+            journal, backup, Path(self.config["world_dir"]).resolve(), retries=1,
+            write_bytes=self._write_world_bytes, should_stop=self.is_cancelled,
+        )
+        try:
+            outcome = transaction.run(units, stop_on_error=stop_on_error, on_unit_done=on_unit_done)
+        finally:
+            self._backup_published = True
+        self.report["write_state"] = outcome.state
+        return outcome
+
+    def _unit_failure(self, result: UnitResult, label: str) -> BaseException:
+        error = result.error or RuntimeError(f"{label} could not be written")
+        error.written_files = [str(path) for path in result.written]  # type: ignore[attr-defined]
+        return error
+
+    def _write_phase(self, pending_files: list[Path], total_files: int) -> None:
+        entries: list[dict[str, Any]] = []
+        try:
+            try:
+                self._revalidate_world()
+                if self.config["resource_pack"]["enabled"]:
+                    entries.extend(self.write_resource_packs())
+                for index, file_path in enumerate(pending_files, start=1):
+                    self.ensure_not_cancelled()
+                    scanned = self.file_scan.get(str(file_path), {})
+                    entry: dict[str, Any] = {"kind": "region", "path": file_path, "index": index, "unit": None}
+                    if scanned.get("skipped") or not scanned.get("candidates", 0):
+                        entry["result"] = scanned
+                    else:
+                        entry["result"] = self._run_file_step(self._plan_region_step(entry), file_path)
+                    entries.append(entry)
+                # Files that need no write are settled now; the rest wait for their unit.
+                for entry in entries:
+                    if entry["unit"] is None:
+                        self._settle_entry(entry, None, total_files)
+                by_unit = {entry["unit"].unit_id: entry for entry in entries if entry["unit"] is not None}
+                units = [entry["unit"] for entry in entries if entry["unit"] is not None]
+                first_error: list[BaseException] = []
+
+                def unit_done(result: UnitResult) -> None:
+                    error = self._settle_entry(by_unit[result.unit_id], result, total_files)
+                    if error is not None and not first_error:
+                        first_error.append(error)
+
+                outcome = self._commit_units(
+                    units, on_unit_done=unit_done,
+                    stop_on_error=not self.runtime_config["continue_on_file_error"],
+                )
+            except WorldChanged as exc:
+                raise PlanInvalidated(str(exc)) from exc
+            except DiskFull as exc:
+                # Stopped before the first publish (the backup or staging did not fit): nothing changed.
+                entry = {"scope": "write", "code": "DISK_FULL", "message": str(exc)[:300]}
+                self.report["errors"].append(entry)
+                self.file_errors.append(entry)
+                self.stopped_status = "needs_retry"
+                return
+            if outcome.stopped == "CANCELLED":
+                self.ensure_not_cancelled()
+            if outcome.stopped == "WORLD_CHANGED":
+                failed = next((r for r in outcome.units if r.error_code == "WORLD_CHANGED"), None)
+                raise PlanInvalidated(str(failed.error) if failed and failed.error else "The world changed during the write.")
+            if outcome.stopped == "DISK_FULL":
+                entry = {"scope": "write", "code": "DISK_FULL", "message": "The disk is full. Free some space and resume."}
+                self.report["errors"].append(entry)
+                self.file_errors.append(entry)
+            if first_error and not self.runtime_config["continue_on_file_error"]:
+                raise first_error[0]
+        finally:
+            self._cleanup_staging()
+
+    def _plan_region_step(self, entry: dict[str, Any]) -> Any:
+        def step(path: Path) -> dict[str, Any]:
+            result, unit = self._plan_region_file(path)
+            entry["unit"] = unit
+            return result
+
+        return step
+
+    def _settle_entry(self, entry: dict[str, Any], unit_result: UnitResult | None, total_files: int) -> BaseException | None:
+        """Everything the old write loop did for one file, once its write has a verified outcome."""
+        if entry["kind"] == "pack":
+            return self._settle_pack(entry, unit_result)
+        path: Path = entry["path"]
+        result = entry["result"]
+        error: BaseException | None = None
+        self.emit("file_start", phase="write", index=entry["index"], total=total_files, file=str(path))
+        if unit_result is not None:
+            result["written_files"] = [str(p) for p in unit_result.written]
+            if unit_result.unknown:
+                result["unknown_files"] = [str(p) for p in unit_result.unknown]
+            if not unit_result.verified:
+                error = self._unit_failure(unit_result, path.name)
+                result = self._file_error_result(path, error, list(result["written_files"]), unit_result)
+                entry["result"] = result
+        if result.get("skipped") not in {"file_error", "parse_error"} and not result.get("untranslated"):
+            self.completed_region_files.add(str(path))
+        if result["changed_chunks"] > 0 or result.get("candidates", 0) > 0 or result.get("skipped"):
+            self.report["changed_files"].append(result)
+        if result.get("written_files") or result.get("skipped") or time.monotonic() - self._checkpoint_saved_at >= 5.0:
+            self.save_checkpoint()
+        self.emit(
+            "file_done",
+            phase="write",
+            index=entry["index"],
+            total=total_files,
+            file=str(path),
+            changed_chunks=result["changed_chunks"],
+            candidates=result.get("candidates", 0),
+            candidate_text_count=len(self.candidate_texts),
+            skipped=result.get("skipped", ""),
+        )
+        return error
+
+    def _file_error_result(self, file_path: Path, exc: BaseException, committed: list[str] | None = None,
+                           unit_result: UnitResult | None = None) -> dict[str, Any]:
+        result = {
+            "file": str(file_path),
+            "changed_chunks": 0,
+            "unique_texts": 0,
+            "candidates": 0,
+            "skipped": "file_error",
+            "error": str(exc),
+        }
+        code = getattr(exc, "code", "") or (unit_result.error_code if unit_result is not None else "")
+        if code:
+            result["code"] = code
+        committed = committed if committed is not None else getattr(exc, "written_files", None)
+        if committed:
+            # Some files reached the disk before this one failed: they still count as changed.
+            result["written_files"] = list(committed)
+        if unit_result is not None and unit_result.unknown:
+            result["unknown_files"] = [str(p) for p in unit_result.unknown]
+        self.file_errors.append(result)
+        self.report["errors"].append(result)
+        self.emit("file_error", file=str(file_path), message=str(exc))
+        return result
+
+    def _plan_region_file(self, path: Path) -> tuple[dict[str, Any], UnitSpec | None]:
+        """Work out the new bytes of one region file (and its ``.mcc`` payloads) without writing any."""
+        from mwt.region import external_chunk_path
 
         region, early = self._open_region(path)
         if early is not None:
-            return early
+            return early, None
         if region.unsupported_ids:
-            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "unsupported_compression"}
+            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "unsupported_compression"}, None
         if region.layout_unsafe:
             self._warn("region_layout_unsafe", file=self._relative(path), message=region.layout_unsafe[:200])
-            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "region_layout_unsafe"}
+            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "region_layout_unsafe"}, None
         changed_chunks = 0
         unique_texts: dict[str, None] = {}
         candidate_count = 0
         untranslated = 0
-        written_files: list[str] = []
         failed = self.translator.failed if self.translator is not None else {}
         for chunk, root, refs, occurrences in self._chunk_refs(region, path, {"unreadable_chunks": 0}):
             texts = list(dict.fromkeys(text for text, _ in occurrences))
@@ -1588,53 +2083,58 @@ class WorldTranslator(TextExtractionMixin):
                 changed_chunks += 1
                 region.replace_nbt(chunk.index, self.dump_nbt_bytes(root))
 
+        unit: UnitSpec | None = None
         if changed_chunks > 0:
             data, mcc_files = region.build()
-            world_dir = Path(self.config["world_dir"]).resolve()
-            if self._run_backup is None:
-                self._run_backup = BackupSet.new(world_dir, store=self._backup_store(), external_files=self._external_backup_files())
-            backup = self._run_backup
-            # Each copy is checked when it is added and flushed to disk; one manifest write
-            # covers the region file and its .mcc files before anything is overwritten.
-            backup.add(path, commit=False)
-            for chunk in region.chunks:
-                if not chunk.external:
-                    continue
-                mcc_path = external_chunk_path(path, chunk.index)
-                if mcc_path.is_file():
-                    backup.add(mcc_path, commit=False)
-                elif chunk.index in mcc_files:
-                    backup.record_new_external_chunk(mcc_path, commit=False)
-            backup.commit()
-            if not self._backup_published:
-                backup.publish_latest(verify=False)
-                self._backup_published = True
-            self.report["backup_set_id"] = backup.backup_id
-            try:
-                # Publish payloads before the region points at a newly created .mcc.
-                for index, payload in mcc_files.items():
-                    mcc_path = external_chunk_path(path, index)
-                    self._write_world_bytes(mcc_path, payload)
-                    backup.mark_written([mcc_path])
-                    written_files.append(str(mcc_path))
-                self._write_world_bytes(path, data)
-                backup.mark_written([path])
-                written_files.append(str(path))
-            except Exception as exc:
-                if written_files:
-                    exc.written_files = list(written_files)  # what already reached the disk; see _run_file_step
-                raise
+            label = self._relative(path)
+            targets = [
+                TargetSpec(
+                    path=external_chunk_path(path, index), source=self._stage(f"{label}.{index}.mcc", payload),
+                    role="payload", discard_source=True,
+                    expected_pre=self._expected_pre(external_chunk_path(path, index)),
+                )
+                for index, payload in mcc_files.items()
+            ]
+            # The region goes last, so it never points at a payload that is not on disk yet.
+            targets.append(TargetSpec(
+                path=path, source=self._stage(label, data), role="region", discard_source=True,
+                expected_pre=self._expected_pre(path),
+            ))
+            # Payloads the region references but this run does not rewrite are still backed up.
+            bystanders = [
+                external_chunk_path(path, chunk.index) for chunk in region.chunks
+                if chunk.external and chunk.index not in mcc_files and external_chunk_path(path, chunk.index).is_file()
+            ]
+            unit = UnitSpec(unit_id=f"region:{label}", kind="region", label=label, targets=targets, bystanders=bystanders)
 
         result = {
             "file": str(path),
             "changed_chunks": changed_chunks,
             "unique_texts": len(unique_texts),
             "candidates": candidate_count,
-            "written_files": written_files,
+            "written_files": [],
         }
         if untranslated:
             # Strings the provider failed on were skipped by policy; a retry must visit this file again.
             result["untranslated"] = untranslated
+        return result, unit
+
+    def apply_region_file(self, path: Path) -> dict[str, Any]:
+        """Write cached translations into one region file, backing it up first.
+
+        A one-unit write job: the same plan, backup, record and verification as a whole run.
+        """
+        result, unit = self._plan_region_file(path)
+        if unit is None:
+            return result
+        try:
+            outcome = self._commit_units([unit])
+        finally:
+            self._cleanup_staging()
+        unit_result = outcome.units[0]
+        result["written_files"] = [str(p) for p in unit_result.written]
+        if not unit_result.verified:
+            raise self._unit_failure(unit_result, path.name)
         return result
 
     def _translation_stats(self, ordered: list[str]) -> dict[str, Any]:
@@ -1687,10 +2187,6 @@ class WorldTranslator(TextExtractionMixin):
             for item in self.file_scan.values()
         )
 
-    def _retryable_work_remains(self) -> bool:
-        """Failures a second attempt could fix: files that errored, strings the provider failed on."""
-        return bool(self.file_errors) or bool(self.translator is not None and self.translator.failed)
-
     def _verify_backup_copies(self) -> None:
         """One full check of the backup copies at the end, instead of one after every file."""
         backup = self._run_backup
@@ -1713,10 +2209,13 @@ class WorldTranslator(TextExtractionMixin):
         self.report["provider_requests"] = LLMProviderClient.request_count
         self.report["usage"] = dict(LLMProviderClient.usage)
         self.write_report()
-        if status == "partial" and not self.config["dry_run"] and self._retryable_work_remains():
-            self.save_checkpoint()  # kept so the remaining work can be retried
+        if status in {"partial", "needs_retry"} and not self.config["dry_run"]:
+            # Only a fully completed job (or an explicit discard) clears its checkpoint. A partial run,
+            # including one whose only problem was a backup that failed verification, stays resumable.
+            self.save_checkpoint()
         else:
             self.clear_checkpoint()
+        self._cleanup_staging()
         self.emit(
             "done",
             status=status,
@@ -1733,7 +2232,9 @@ class WorldTranslator(TextExtractionMixin):
         failed = self.translator.failed
         if exc is not None:
             status = "failed" if exc.fatal else "needs_retry"
-            entry = {"scope": "provider", "code": exc.code, "message": str(exc)[:400]}
+            # The raw text stays in the report file; ``failure`` is the structured category progress and results use.
+            entry = {"scope": "provider", "code": exc.code, "failure": classify_failure(exc),
+                     "message": self.translator._raw_failure_text(exc)[:400]}
         else:
             status = "needs_retry"
             entry = {
@@ -1751,7 +2252,8 @@ class WorldTranslator(TextExtractionMixin):
         self.report["usage"] = dict(LLMProviderClient.usage)
         self.write_report()
         self.save_checkpoint()
-        self.emit("translation_stopped", status=status, code=entry["code"], message=entry["message"])
+        self.emit("translation_stopped", status=status, code=entry["code"], failure=entry.get("failure", ""),
+                  message=public_failure_message(entry["failure"]) if "failure" in entry else entry["message"])
         self.release_write_lock()
         return self.report
 
@@ -1788,14 +2290,17 @@ class WorldTranslator(TextExtractionMixin):
 
     translate_resource_packs = collect_resource_packs  # name used before the phases were split
 
-    def write_resource_packs(self) -> None:
+    def write_resource_packs(self) -> list[dict[str, Any]]:
+        """Plan the write of every resource pack ZIP. The transaction that follows writes them."""
+        entries: list[dict[str, Any]] = []
         for zip_path_str in self.config["resource_pack"]["zip_paths"]:
             self.ensure_not_cancelled()
             if zip_path_str in self.completed_resource_pack_paths:
                 continue
             zip_path = Path(zip_path_str)
+            unit = meta = None
             try:
-                result = self.translate_resource_pack_zip(zip_path)
+                result, unit, meta = self._plan_resource_pack(zip_path)
             except (TranslationCancelled, PlanInvalidated):
                 raise
             except Exception as exc:
@@ -1811,10 +2316,51 @@ class WorldTranslator(TextExtractionMixin):
                 self.emit("file_error", file=str(zip_path), message=str(exc))
                 if not self.runtime_config["continue_on_file_error"]:
                     raise
-            self.report["resource_packs"].append(result)
-            if result.get("skipped") not in {"missing", "resource_pack_error"}:
-                self.completed_resource_pack_paths.add(zip_path_str)
-            self.save_checkpoint()
+            entries.append({"kind": "pack", "path": zip_path, "unit": unit, "meta": meta, "result": result, "config_key": zip_path_str})
+        return entries
+
+    def _after_pack_published(self, meta: dict[str, Any]) -> None:
+        """Remember what a pack looks like after this run wrote it, so its own write is not a change."""
+        from mwt.locking import object_identity
+
+        key = meta["key"]
+        if key in self.external_pack_inputs:
+            self.external_pack_inputs[key] = meta["after"]
+            if meta["before"] is not None:
+                # Recorded in the checkpoint so this job can still resume after its own write.
+                self.external_pack_writes[key] = {"before": meta["before"], "after": meta["after"]}
+            try:
+                self.external_pack_identity[key] = object_identity(Path(key))
+            except OSError:
+                self.external_pack_identity.pop(key, None)
+
+    def _settle_pack(self, entry: dict[str, Any], unit_result: UnitResult | None) -> BaseException | None:
+        result = entry["result"]
+        zip_path: Path = entry["path"]
+        error: BaseException | None = None
+        if unit_result is not None:
+            if unit_result.written:
+                self._after_pack_published(entry["meta"])  # the bytes are there, whatever happened next
+            if not unit_result.verified:
+                error = self._unit_failure(unit_result, zip_path.name)
+                code = getattr(error, "code", "") or unit_result.error_code
+                failure = {"zip_path": str(zip_path), "error": str(error), **({"code": code} if code else {})}
+                if unit_result.written:
+                    # Written but not confirmed durable: it counts as changed, and the error stays visible.
+                    result = {**result, "written": True}
+                else:
+                    result = {"zip_path": str(zip_path), "translated_files": 0, "candidates": 0,
+                              "skipped": "resource_pack_error", **failure}
+                if unit_result.unknown:
+                    result["unknown_files"] = [str(p) for p in unit_result.unknown]
+                self.file_errors.append({**failure, "skipped": "resource_pack_error"})
+                self.report["errors"].append(failure)
+                self.emit("file_error", file=str(zip_path), message=str(error))
+        self.report["resource_packs"].append(result)
+        if result.get("skipped") not in {"missing", "resource_pack_error"}:
+            self.completed_resource_pack_paths.add(entry["config_key"])
+        self.save_checkpoint()
+        return error
 
     def resource_pack_language_files(self, names: list[str]) -> list[tuple[str, str]]:
         """Return language files once, in configured source-language priority order."""
@@ -1897,16 +2443,16 @@ class WorldTranslator(TextExtractionMixin):
             "dry_run": True,
         }
 
-    def translate_resource_pack_zip(self, zip_path: Path) -> dict[str, Any]:
+    def _plan_resource_pack(self, zip_path: Path) -> tuple[dict[str, Any], UnitSpec | None, dict[str, Any] | None]:
+        """Build the translated ZIP next to its backup (not in the pack's folder) and describe the write."""
         import copy
+        import hashlib as _hashlib
         import zipfile
-
-        from mwt.durable import fsync_dir
 
         self.ensure_not_cancelled()
         self._verify_external_pack_inputs()
         if not zip_path.exists():
-            return {"zip_path": str(zip_path), "translated_files": 0, "candidates": 0, "skipped": "missing"}
+            return {"zip_path": str(zip_path), "translated_files": 0, "candidates": 0, "skipped": "missing"}, None, None
 
         target_name = self.config["resource_pack"]["target_lang_file"]
         replacements: dict[str, bytes] = {}
@@ -1944,62 +2490,78 @@ class WorldTranslator(TextExtractionMixin):
                 translated_files += 1
 
         self.candidate_texts.update(candidate_texts)
+        result = {"zip_path": str(zip_path), "translated_files": translated_files, "candidates": len(candidate_texts)}
+        if not replacements:
+            return result, None, None
 
-        if replacements:
-            self.backup_once(zip_path)
-            tmp_path: Path | None = None
+        resolved = zip_path.resolve()
+        key = str(resolved)
+        world_dir = Path(self.config["world_dir"]).resolve()
+        external = not resolved.is_relative_to(world_dir)
+        staged = self._stage(zip_path.name)
+        with open(staged, "wb") as tmp:
+            with zipfile.ZipFile(zip_path, "r") as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+                dst.comment = src.comment
+                members = src.infolist()
+                # Readers use the last member of a name, so only that one is replaced.
+                last_index = {info.filename: index for index, info in enumerate(members)}
+                written_targets: set[str] = set()
+                for index, info in enumerate(members):
+                    self.ensure_not_cancelled()
+                    header = copy.copy(info)  # the writer fills in sizes and offsets on its own copy
+                    if info.filename in replacements and last_index[info.filename] == index:
+                        dst.writestr(header, replacements[info.filename])
+                        written_targets.add(info.filename)
+                    else:
+                        # By ZipInfo, not by name: duplicates must each keep their own bytes.
+                        with src.open(info) as reader, dst.open(
+                            header, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT
+                        ) as writer:
+                            shutil.copyfileobj(reader, writer, 1024 * 1024)
+                for target_path, payload in replacements.items():
+                    self.ensure_not_cancelled()
+                    if target_path not in written_targets:
+                        dst.writestr(target_path, payload)
+            tmp.flush()
+            fsync_fd(tmp.fileno())  # on the writable handle: a read-only one fails on Windows
+        self._verify_external_pack_inputs()
+
+        def precheck() -> None:
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=str(zip_path.parent)) as tmp:
-                    tmp_path = Path(tmp.name)  # known before any byte is written, so it is always cleaned up
-                    with zipfile.ZipFile(zip_path, "r") as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
-                        dst.comment = src.comment
-                        members = src.infolist()
-                        # Readers use the last member of a name, so only that one is replaced.
-                        last_index = {info.filename: index for index, info in enumerate(members)}
-                        written_targets: set[str] = set()
-                        for index, info in enumerate(members):
-                            self.ensure_not_cancelled()
-                            header = copy.copy(info)  # the writer fills in sizes and offsets on its own copy
-                            if info.filename in replacements and last_index[info.filename] == index:
-                                dst.writestr(header, replacements[info.filename])
-                                written_targets.add(info.filename)
-                            else:
-                                # By ZipInfo, not by name: duplicates must each keep their own bytes.
-                                with src.open(info) as reader, dst.open(
-                                    header, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT
-                                ) as writer:
-                                    shutil.copyfileobj(reader, writer, 1024 * 1024)
-                        for target_path, payload in replacements.items():
-                            self.ensure_not_cancelled()
-                            if target_path not in written_targets:
-                                dst.writestr(target_path, payload)
-                    tmp.flush()
-                    fsync_fd(tmp.fileno())  # on the writable handle: a read-only one fails on Windows
-                shutil.copymode(zip_path, tmp_path)
-                new_digest = file_sha256(tmp_path)
                 self._verify_external_pack_inputs()
-                resolved_key = str(zip_path.resolve())
-                before_digest = self.external_pack_inputs.get(resolved_key)
-                durable_replace(tmp_path, zip_path)
-                tmp_path = None
-                fsync_dir(zip_path.parent)
-                self.digest_cache.forget(zip_path)
-                if resolved_key in self.external_pack_inputs:
-                    self.external_pack_inputs[resolved_key] = new_digest
-                    if before_digest is not None:
-                        # Recorded in the checkpoint so this job can still resume after its own write.
-                        self.external_pack_writes[resolved_key] = {"before": before_digest, "after": new_digest}
-                if self._run_backup is not None:
-                    self._run_backup.mark_written([zip_path])
-            finally:
-                if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
+            except PlanInvalidated as exc:
+                raise WorldChanged(str(exc)) from exc
 
-        return {
-            "zip_path": str(zip_path),
-            "translated_files": translated_files,
-            "candidates": len(candidate_texts),
-        }
+        if external:
+            label = f"{resolved.name}~{_hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}"
+            expected = self.external_pack_inputs.get(key)
+        else:
+            label = resolved.relative_to(world_dir).as_posix()
+            expected = self._expected_pre(resolved)
+        spec = TargetSpec(
+            path=resolved, root_kind="external_pack" if external else "world", source=staged, role="pack",
+            expected_pre=expected, discard_source=True,
+        )
+        unit = UnitSpec(unit_id=f"pack:{label}", kind="resource_pack", label=label, targets=[spec],
+                        precheck=precheck if external else None)
+        meta = {"key": key, "before": self.external_pack_inputs.get(key), "after": file_sha256(staged)}
+        return result, unit, meta
+
+    def translate_resource_pack_zip(self, zip_path: Path) -> dict[str, Any]:
+        """Translate one pack and write it as a one-unit job (the whole run uses ``write_resource_packs``)."""
+        result, unit, meta = self._plan_resource_pack(zip_path)
+        if unit is None:
+            return result
+        try:
+            outcome = self._commit_units([unit])
+        finally:
+            self._cleanup_staging()
+        unit_result = outcome.units[0]
+        if unit_result.written:
+            self._after_pack_published(meta)
+        if not unit_result.verified:
+            raise self._unit_failure(unit_result, zip_path.name)
+        return result
 
     def write_report(self) -> None:
         report_path = Path(self.config["report_path"])

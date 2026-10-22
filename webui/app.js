@@ -1844,7 +1844,7 @@ function setRunButtonsDisabled(disabled) {
   const status = state.job?.status || "idle";
   const running = disabled || status === "queued" || status === "running";
   const hasWorldDir = Boolean(dom.worldDir.value.trim());
-  const canResume = !running && hasWorldDir && (state.job ? Boolean(state.job.can_resume) : dom.checkpointEnabled.checked);
+  const canResume = !running && hasWorldDir && (state.job ? jobCanResume(state.job) : dom.checkpointEnabled.checked);
 
   dom.scanButton.disabled = running;
   dom.translateButton.disabled = running;
@@ -2156,9 +2156,14 @@ function activityLabel(activity) {
   }
 }
 
+// A cancelled, partial or needs_retry run keeps its checkpoint; the server says so with can_resume.
+function jobCanResume(job) {
+  return Boolean(job.can_resume) || job.status === "partial" || job.status === "needs_retry";
+}
+
 function canResumeFromState(job) {
   if (job) {
-    return Boolean(job.can_resume);
+    return jobCanResume(job);
   }
   return Boolean(dom.worldDir.value.trim()) && dom.checkpointEnabled.checked;
 }

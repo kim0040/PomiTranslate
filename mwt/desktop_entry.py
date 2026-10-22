@@ -25,6 +25,8 @@ from mwt.desktop_settings import (
     normalize_source_overrides,
 )
 from mwt.notices import ABOUT, FIRST_LAUNCH, PRE_TRANSLATE, payload
+from mwt.journal import JournalError, find_journal, list_interrupted, recover_job
+from mwt.locking import MinecraftWorldInUse, TargetLocked, WorldWriteLocked, target_lock_dir
 from mwt.safety import BackupSet, ExternalTargetError, backup_store, legacy_backup_store, list_backup_sets
 from mwt.userdata import APP_PREF_DEFAULTS
 from mwt.desktop_resource_packs import ExternalPackUnavailable, normalize_external_pack_paths, pack_scope_signature, selected_pack_files
@@ -33,7 +35,9 @@ from mwt.desktop_resource_packs import ExternalPackUnavailable, normalize_extern
 # A job stopped by the user, by an outage, or by a provider error keeps its translated strings
 # in the checkpoint. A partial run (files that errored, strings the provider failed on) keeps it
 # too, so "retry remaining" only redoes what is left. Only these states may be continued.
-RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed", "partial"}
+# "running" is what a checkpoint says when its process died without finishing: the answers the
+# provider already gave are in it, and the world fingerprint check decides whether it still applies.
+RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed", "partial", "running"}
 
 # Why a string could not be translated. The interface owns the wording; the raw provider text
 # stays in the report file only.
@@ -156,6 +160,19 @@ def _backup_stores(world: Path, data_dir: Path) -> list[Path]:
     return [backup_store(world, data_dir), legacy_backup_store(world)]
 
 
+def _all_backup_stores(data_dir: Path, world: Path | None = None) -> list[Path]:
+    """Every per-world store in the app data folder, plus the in-world store of ``world``."""
+    stores: list[Path] = []
+    root = data_dir / "backups"
+    try:
+        stores.extend(sorted(path for path in root.iterdir() if path.is_dir()))
+    except OSError:
+        pass
+    if world is not None:
+        stores.append(legacy_backup_store(world))
+    return stores
+
+
 def _scan_plan_path(data_dir: Path, scan_plan_id: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{64}", scan_plan_id):
         raise ValueError("Invalid scan plan ID")
@@ -239,6 +256,34 @@ def _public_failure(item: object) -> dict:
     if code not in FAILURE_REASON_TEXT:
         code = "other"
     return {"source": str(item.get("source") or ""), "code": code, "reason": FAILURE_REASON_TEXT[code]}
+
+
+# Error scopes whose text can come from a provider or from deep inside a library. The interface gets
+# a code and a fixed sentence for these; the detail stays in the report file.
+_OPAQUE_ERROR_SCOPES = {"provider", "models", "run", "translation"}
+
+
+def _public_error(item: object) -> dict:
+    """An error entry as the interface sees it: scope, code, bounded and redacted text, no raw provider text."""
+    from mc_world_translator import public_failure_message
+    from mwt.secrets import bounded_public_text
+
+    if not isinstance(item, dict):
+        return {"scope": "run", "message": "The operation failed."}
+    result = {key: value for key, value in item.items() if key not in {"message", "error", "exception"}}
+    scope = str(item.get("scope") or "")
+    for field in ("message", "error"):
+        text = item.get(field)
+        if text is None:
+            continue
+        if scope in _OPAQUE_ERROR_SCOPES:
+            failure = str(item.get("failure") or "other")
+            result[field] = public_failure_message(failure) if scope != "run" else "The operation failed."
+        else:
+            result[field] = bounded_public_text(str(text), "", 300)
+    if scope == "run" and item.get("exception"):
+        result["exception"] = str(item["exception"])[:80]
+    return result
 
 
 def _format_location(location: dict) -> str:
@@ -584,6 +629,7 @@ def _discard_checkpoints(data_dir: Path, world: Path, scan_plan_id: str = "") ->
             if scan_plan_id and str((checkpoint.get("resume") or {}).get("scan_plan_id") or "") != scan_plan_id:
                 continue
             path.unlink()
+            path.with_name(f"{path.name}.batches.jsonl").unlink(missing_ok=True)
             removed += 1
         except (OSError, ValueError, TypeError, AttributeError):
             continue
@@ -682,6 +728,7 @@ def _run_translator(
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     if scan_plan_id and not dry_run and not resume_from_checkpoint:
         checkpoint_path.unlink(missing_ok=True)
+        checkpoint_path.with_name(f"{checkpoint_path.name}.batches.jsonl").unlink(missing_ok=True)
     config = merge_nested(
         DEFAULT_CONFIG,
         {
@@ -784,6 +831,68 @@ def prepare_stdio() -> None:
             pass
 
 
+# Credentials of the request being handled. Diagnostics (tracebacks, stray prints) are written
+# through ``redact_diagnostic`` so none of them reaches stderr in the clear.
+_REQUEST_SECRETS: list[str] = []
+_SECRET_KEY_WORDS = ("key", "token", "secret", "password", "authorization", "credential")
+
+
+def _secrets_in(message: object) -> list[str]:
+    """String values the request carries under credential-looking names."""
+    found: list[str] = []
+
+    def walk(value: object, named: bool) -> None:
+        if isinstance(value, dict):
+            for name, item in value.items():
+                walk(item, any(word in str(name).lower() for word in _SECRET_KEY_WORDS))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, named)
+        elif named and isinstance(value, str) and len(value) >= 8:
+            found.append(value)
+
+    walk(message, False)
+    return found
+
+
+def redact_diagnostic(text: str) -> str:
+    """Hide the active request's credentials and common key shapes in a diagnostic text."""
+    from mwt.secrets import redact_log
+
+    for secret in list(_REQUEST_SECRETS):
+        text = redact_log(text, secret)
+    return redact_log(text, "")
+
+
+class _RedactingStdout:
+    """Replaces ``sys.stdout`` in the sidecar: stray prints go to stderr, redacted."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def write(self, text: str) -> int:
+        try:
+            sys.stderr.write(redact_diagnostic(str(text)))
+        except (OSError, ValueError):
+            pass
+        return len(text)
+
+    def flush(self) -> None:
+        try:
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        return 1  # points at stderr after isolate_protocol_streams
+
+    def writable(self) -> bool:
+        return True
+
+
 def isolate_protocol_streams() -> None:
     """Keep protocol lines on a private copy of stdout; point stdout itself at stderr.
 
@@ -808,6 +917,9 @@ def isolate_protocol_streams() -> None:
         os.dup2(2, 1)
     except OSError:
         os.dup2(os.open(os.devnull, os.O_WRONLY), 1)  # no stderr either: drop stray output
+    # Prints from Python code are redacted on the way; bytes that native code writes straight to
+    # fd 1 reach stderr as they are.
+    sys.stdout = _RedactingStdout()  # type: ignore[assignment]
 
 
 def _plain(value: object, flags: set[str]):
@@ -873,6 +985,7 @@ def hello() -> None:
                     "scan",
                     "translate",
                     "restore",
+                    "recovery",
                     "settings",
                     "models",
                     "region.lz4",
@@ -939,6 +1052,8 @@ def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyri
         "worlds": _or_default(lambda: list_recent_worlds(data_dir), []),
         "worldInspection": inspection,
         "backups": _or_default(lambda: list_backup_sets(world, _backup_stores(world, data_dir)), []) if valid_world else [],
+        # Jobs that stopped in the middle of a write. Listing them changes nothing on disk.
+        "interruptedJobs": _or_default(lambda: list_interrupted(_all_backup_stores(data_dir, world if valid_world else None)), []),
         "resume": (_or_default(lambda: _resume_candidate(data_dir, world), {}) or no_resume) if valid_world else no_resume,
     }
 
@@ -1386,7 +1501,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "localhostServer": False,
                     "preTranslate": PRE_TRANSLATE,
                     "writeBlockers": blockers,
-                    "errors": report.get("errors", []),
+                    "errors": [_public_error(item) for item in report.get("errors", [])],
                     "warnings": report.get("warnings", []),
                     "requestEstimate": estimate["requests"],
                     "estimate": estimate,
@@ -1573,9 +1688,11 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "changedFileCount": report.get("changed_file_count", 0),
                     "providerRequests": report.get("provider_requests", 0),
                     "backupSetId": report.get("backup_set_id", ""),
+                    "jobId": report.get("job_id", ""),
+                    "writeState": report.get("write_state", ""),
                     "preTranslate": PRE_TRANSLATE,
                     "localhostServer": False,
-                    "errors": report.get("errors", []),
+                    "errors": [_public_error(item) for item in report.get("errors", [])],
                     "warnings": report.get("warnings", []),
                     "translation": report.get("translation") or {},
                     "translationFailures": [_public_failure(item) for item in report.get("translation_failures", [])],
@@ -1611,11 +1728,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         allowed = [Path(path) for path in normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
                    if Path(path).resolve(strict=False) in required]
         selected = BackupSet.find(world, backup_id, stores, external_files=allowed)
-        from mwt.locking import MinecraftWorldInUse, WorldWriteLocked
-
         try:
-            # Holds the write lock and the game's session locks for the whole restore.
-            recovery_id = selected.restore(recovery_store=stores[0])
+            # Holds the write lock, the game's session locks and every external pack's lock.
+            recovery_id = selected.restore(recovery_store=stores[0], lock_dir=target_lock_dir(data_dir))
         except WorldWriteLocked:
             emit({"v": 1, "id": request_id, "type": "response.error",
                   "error": {"code": "WORLD_LOCKED", "recoverable": True,
@@ -1625,6 +1740,11 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             emit({"v": 1, "id": request_id, "type": "response.error",
                   "error": {"code": "WORLD_IN_USE", "recoverable": True,
                             "message": "Minecraft or a server is using this world. Close it completely and try again. Nothing was restored."}})
+            return
+        except TargetLocked:
+            emit({"v": 1, "id": request_id, "type": "response.error",
+                  "error": {"code": "TARGET_LOCKED", "recoverable": True,
+                            "message": "A resource pack in this backup is in use by another job. Nothing was restored."}})
             return
         emit(
             {
@@ -1640,6 +1760,10 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             }
         )
         return
+    extra = REQUEST_HANDLERS.get(kind)
+    if extra is not None:
+        extra(message, report_dir, data_dir, cancel_path)
+        return
     emit(
         {
             "v": 1,
@@ -1648,6 +1772,49 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             "error": {"code": "UNKNOWN_MESSAGE", "message": f"Unknown message {kind}"},
         }
     )
+
+
+def _handle_recovery_start(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | None) -> None:
+    """``recovery.start {jobId, mode}``: roll an interrupted job back, or keep its result and settle it.
+
+    Takes the same guards as a restore (world write lock, the game's session locks, external pack
+    locks) and refuses with WORLD_LOCKED / WORLD_IN_USE / TARGET_LOCKED when one is busy.
+    """
+    request_id = message.get("id", "")
+    body = message.get("payload") or {}
+    mode = body.get("mode")
+    if mode not in {"rollback", "keep"}:
+        raise ValueError("Recovery mode must be rollback or keep")
+    world_text = str(body.get("worldDir") or "")
+    world = Path(world_text).expanduser() if world_text else None
+    try:
+        path = find_journal(str(body.get("jobId") or ""), _all_backup_stores(data_dir, world))
+        allowed = normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
+        result = recover_job(
+            path, mode, authorized_external=[Path(item) for item in allowed], lock_dir=target_lock_dir(data_dir),
+            progress=lambda done, total: emit({"v": 1, "id": request_id, "type": "recovery.progress",
+                                               "payload": {"phase": "recovery", "done": done, "total": total}}),
+        )
+    except WorldWriteLocked:
+        _reply_error(request_id, "WORLD_LOCKED", "Another PomiTranslate operation is using this world. Nothing was changed.")
+        return
+    except MinecraftWorldInUse:
+        _reply_error(request_id, "WORLD_IN_USE", "Minecraft or a server is using this world. Close it completely and try again. Nothing was changed.")
+        return
+    except TargetLocked:
+        _reply_error(request_id, "TARGET_LOCKED", "A resource pack of this job is in use by another job. Nothing was changed.")
+        return
+    except JournalError as exc:
+        _reply_error(request_id, exc.code, str(exc))
+        return
+    emit({"v": 1, "id": request_id, "type": "response.ok", "payload": {**result, "localhostServer": False}})
+
+
+# Request type -> handler(message, report_dir, data_dir, cancel_path), for requests that live outside
+# the long if-chain in ``handle``. Add new request types here.
+REQUEST_HANDLERS = {
+    "recovery.start": _handle_recovery_start,
+}
 
 
 def _read_requests():
@@ -1694,7 +1861,10 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
                 raise ValueError("Protocol message must be an object")
             if message.get("v") != 1:
                 raise ValueError("Unsupported protocol version")
+            _REQUEST_SECRETS[:] = _secrets_in(message)
             handle(message, report_dir, data_dir, cancel_path)
+        except JournalError as exc:
+            _reply_error(request_id, exc.code, str(exc))
         except (ExternalPackUnavailable, ExternalTargetError):
             _reply_error(request_id, "EXTERNAL_PACK_UNAVAILABLE",
                          "Selected external ZIP is unavailable or its parent directory changed. Select the original ZIP in Settings before scanning or restoring.")
@@ -1703,13 +1873,20 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
         except (BrokenPipeError, ConnectionError):
             return  # the shell is gone; nobody is left to answer
         except Exception as exc:
-            traceback.print_exc(file=sys.stderr)  # diagnostics go to stderr, never into the protocol
+            # Diagnostics go to stderr, never into the protocol, and never with a credential in them.
+            try:
+                sys.stderr.write(redact_diagnostic(traceback.format_exc()))
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
             try:
                 _reply_error(request_id, "OPERATION_FAILED",
                              "The operation failed. The world was not marked as completed.",
                              detail=type(exc).__name__)
             except (OSError, ValueError):
                 return
+        finally:
+            _REQUEST_SECRETS.clear()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1767,11 +1944,9 @@ def main(argv: list[str] | None = None) -> None:
         listed = list_backup_sets(world, stores)
         if not listed:
             raise SystemExit("There is no backup to restore")
-        from mwt.locking import MinecraftWorldInUse, WorldWriteLocked
-
         try:
-            BackupSet.find(world, listed[0]["backupSetId"], stores).restore(recovery_store=stores[0])
-        except (WorldWriteLocked, MinecraftWorldInUse) as exc:
+            BackupSet.find(world, listed[0]["backupSetId"], stores).restore(recovery_store=stores[0], lock_dir=target_lock_dir(data_dir))
+        except (WorldWriteLocked, MinecraftWorldInUse, TargetLocked) as exc:
             raise SystemExit(f"Nothing was restored: {exc}") from exc
         print(json.dumps({"status": "restored", "localhostServer": False}))
         return
