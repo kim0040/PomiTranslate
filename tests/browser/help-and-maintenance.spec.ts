@@ -50,8 +50,12 @@ test('the Help menu opens help, shortcuts, the tour, licenses and a problem repo
 
   await emit(page, 'pomi-menu', 'licenses');
   const licenses = page.getByRole('dialog', { name: '오픈소스 라이선스' });
-  await expect(licenses.locator('pre')).toContainText('tauri');
+  // The dialog opens on the notice overview; a package is picked from the list.
   await expect(licenses.locator('pre')).toContainText('NOT AN OFFICIAL MINECRAFT PRODUCT');
+  await licenses.getByRole('searchbox', { name: '구성 요소 찾기' }).fill('tauri');
+  await licenses.getByRole('button', { name: /^tauri\s*\d/ }).first().click();
+  await expect(licenses.getByRole('heading', { name: /^tauri\s*\d/ })).toBeVisible();
+  await expect(licenses.locator('pre')).toContainText(/Permission is hereby granted|Apache License/);
   await licenses.getByRole('button', { name: 'PomiTranslate', exact: true }).click();
   await expect(licenses.locator('pre')).toContainText('MIT License');
   await licenses.getByRole('button', { name: '닫기', exact: true }).last().click();
@@ -127,7 +131,7 @@ test('reset asks twice, keeps backups, can keep keys, and restarts at first laun
   await page.getByRole('button', { name: '초기화…' }).click();
   dialog = page.getByRole('dialog', { name: '앱을 초기화할까요?' });
   await dialog.getByLabel('저장된 API 키도 모두 삭제').uncheck();
-  await dialog.getByRole('button', { name: '계속', exact: true }).click();
+  await dialog.getByRole('button', { name: '초기화 계속', exact: true }).click();
   const confirm = page.getByRole('dialog', { name: '정말 초기화할까요?' });
   await expect(confirm).toContainText('되돌릴 수 없습니다');
   await expect(confirm).not.toContainText('저장된 API 키도 삭제됩니다');
@@ -140,7 +144,7 @@ test('reset with keys deletes every provider key', async ({ page }) => {
   await boot(page, 'scenario=selected');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
   await page.getByRole('button', { name: '초기화…' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: '계속', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '초기화 계속', exact: true }).click();
   const confirm = page.getByRole('dialog', { name: '정말 초기화할까요?' });
   await expect(confirm).toContainText('저장된 API 키도 삭제됩니다');
   await Promise.all([page.waitForEvent('load'), confirm.getByRole('button', { name: '초기화', exact: true }).click()]);

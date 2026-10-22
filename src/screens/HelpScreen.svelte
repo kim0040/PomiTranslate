@@ -5,6 +5,8 @@
   import { appVersion, isMac, openExternal } from '../lib/native';
   import { APP_VERSION } from '../lib/version';
   import Icon, { type IconName } from '../components/Icon.svelte';
+  import ListRow from '../components/ListRow.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
 
   const steps: { icon: IconName; title: MessageKey; body: MessageKey }[] = [
     { icon: 'folder', title: 'tour.2.title', body: 'tour.2.body' },
@@ -72,15 +74,13 @@
   }
 </script>
 
+{#snippet tourAction()}
+  <button type="button" class="btn btn-secondary btn-sm" onclick={() => (app.showTour = true)}><Icon name="play" size={12} /> {t('help.tourButton')}</button>
+{/snippet}
+
 <div class="page help">
-  <header class="page-head" class:with-actions={!app.startupFailed}>
-    <h1>{t('help.title')}</h1>
-    <p class="lead">{t('help.lead')}</p>
-    <!-- The tour walks into settings, which needs a started core. -->
-    {#if !app.startupFailed}
-      <div class="actions"><button type="button" class="btn btn-secondary btn-sm" onclick={() => (app.showTour = true)}><Icon name="play" size={12} /> {t('help.tourButton')}</button></div>
-    {/if}
-  </header>
+  <!-- The tour walks into settings, which needs a started core. -->
+  <PageHeader title={t('help.title')} lead={t('help.lead')} actions={app.startupFailed ? undefined : tourAction} />
 
   <section aria-labelledby="start-title">
     <h2 id="start-title" class="section-title">{t('help.start.title')}</h2>
@@ -96,7 +96,7 @@
 
   <section aria-labelledby="faq-title">
     <h2 id="faq-title" class="section-title">{t('help.faq.title')}</h2>
-    <div class="group faq">
+    <div class="list faq">
       {#each faq as item (item.id)}
         <details id={`faq-${item.id}`}>
           <summary><span>{t(item.q)}</span><Icon name="chevron-down" size={16} /></summary>
@@ -109,17 +109,20 @@
   <div class="columns">
     <section id="shortcuts" aria-labelledby="shortcuts-title" bind:this={shortcutsSection}>
       <h2 id="shortcuts-title" class="section-title">{t('help.shortcuts.title')}</h2>
-      <dl class="group">
+      <ul class="list">
         {#each shortcuts as shortcut (shortcut.label)}
-          <div class="row-item"><dt class="k">{t(shortcut.label)}</dt><dd class="v keys">{#each shortcut.keys as key}<kbd>{key}</kbd>{/each}</dd></div>
+          <ListRow>
+            {t(shortcut.label)}
+            {#snippet trailing()}<span class="keys">{#each shortcut.keys as key}<kbd>{key}</kbd>{/each}</span>{/snippet}
+          </ListRow>
         {/each}
-      </dl>
+      </ul>
     </section>
 
     <section aria-labelledby="keys-title">
       <h2 id="keys-title" class="section-title">{t('help.keys.title')}</h2>
       <p class="muted small">{t('help.keys.lead')}</p>
-      <ul class="group links">
+      <ul class="list links">
         {#each keyPages as page (page.name)}
           <li><button type="button" class="link" onclick={() => open(page.url)}><span>{page.name}</span><Icon name="chevron-right" size={15} /></button></li>
         {/each}
@@ -151,6 +154,7 @@
   .faq details + details { border-top: 1px solid var(--border); }
   .faq summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: 10px var(--space-4); font-weight: 500; list-style: none; }
   .faq summary::-webkit-details-marker { display: none; }
+  .faq summary:focus-visible, .link:focus-visible { outline-offset: -2px; }
   .faq summary :global(.icon) { color: var(--text-secondary); flex: none; transition: rotate var(--dur-base) var(--ease-out); }
   .faq details[open] summary :global(.icon) { rotate: 180deg; }
   .faq details p { padding: 0 var(--space-4) var(--space-3); color: var(--text-secondary); font-size: var(--text-sm); max-width: 80ch; }
