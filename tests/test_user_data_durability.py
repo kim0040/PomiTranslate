@@ -61,7 +61,9 @@ def main() -> None:
         assert prefs["theme"] == "dark" and prefs["notice_accepted"] and prefs["update_auto_check"] is True
         remember_user_settings({"model": "other"}, root)
         assert load_app_prefs(root)["theme"] == "dark", "a settings save must not drop app state"
-        for bad in ({"theme": "neon"}, {"notice_accepted": "yes"}, {"unknown": 1}, {"update_last_check": -1}):
+        assert prefs["notify_on_finish"] is True, "finish notifications are on by default"
+        assert remember_app_prefs({"notify_on_finish": False}, root)["notify_on_finish"] is False
+        for bad in ({"theme": "neon"}, {"notice_accepted": "yes"}, {"unknown": 1}, {"update_last_check": -1}, {"notify_on_finish": 0}):
             try:
                 remember_app_prefs(bad, root)
             except ValueError:
@@ -74,7 +76,7 @@ def main() -> None:
 
         # Reset: needs an explicit confirmation, removes app state, keeps backups and damaged copies.
         remember_model_catalog("openrouter", [{"id": "m"}], root)
-        for folder in ("scans", "jobs"):
+        for folder in ("scans", "jobs", "review-drafts"):
             (root / folder).mkdir(exist_ok=True)
             (root / folder / "x.json").write_text("{}", encoding="utf-8")
         backup = root / "backups" / "world-123" / "set" / "region.mca"
@@ -90,7 +92,7 @@ def main() -> None:
         assert load_user_settings(root)["provider"] == "gemini"
         response = call(root, "app.reset", {"confirm": "reset"})
         assert response["type"] == "response.ok", response
-        assert set(response["payload"]["removed"]) >= {"settings.json", "settings.backup.json", "scans", "jobs", "models"}
+        assert set(response["payload"]["removed"]) >= {"settings.json", "settings.backup.json", "scans", "jobs", "models", "review-drafts"}
         assert response["payload"]["kept"] == ["backups"]
         assert load_user_settings(root) == {} and load_app_prefs(root) == APP_PREF_DEFAULTS
         assert backup.read_bytes() == b"backup bytes", "world backups survive a reset"

@@ -300,6 +300,7 @@ APP_PREF_DEFAULTS: dict = {
     "update_auto_check": True,
     "update_last_check": 0,
     "update_skipped_version": "",
+    "notify_on_finish": True,
 }
 
 
@@ -308,7 +309,7 @@ def _valid_pref(key: str, value):
         if not isinstance(value, str) or value not in {"system", "light", "dark"}:
             raise ValueError("theme must be system, light or dark")
         return value
-    if key in {"notice_accepted", "tutorial_seen", "update_auto_check"}:
+    if key in {"notice_accepted", "tutorial_seen", "update_auto_check", "notify_on_finish"}:
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false")
         return value
@@ -352,7 +353,8 @@ def remember_app_prefs(updates: dict, root: Path | None = None) -> dict:
 
 # What a reset removes. Backups are never in this list: they are the only way back for a world.
 RESET_FILES = ("settings.json", "settings.backup.json", "settings.json.tmp", "settings.backup.json.tmp")
-RESET_DIRS = ("models", "scans", "jobs")
+# Review drafts hold manual translations, which are world text, so a reset removes them too.
+RESET_DIRS = ("models", "scans", "jobs", "review-drafts")
 
 
 def reset_user_data(root: Path | None = None) -> dict:
