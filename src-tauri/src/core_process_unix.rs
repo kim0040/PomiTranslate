@@ -1,7 +1,7 @@
 //! Linux/macOS: the core runs in its own process group so a force-stop reaches everything it
 //! started. Linux also asks the kernel to kill the core when the app dies; macOS has no such call
 //! and relies on the core noticing the end of its stdin.
-use std::{io, os::unix::process::ExitStatusExt, process::Stdio, sync::Mutex};
+use std::{io, os::unix::process::ExitStatusExt, process::Stdio, sync::Arc, sync::Mutex};
 
 use tokio::{
     io::AsyncWriteExt,
@@ -126,21 +126,26 @@ pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
     let stdin = child.stdin.take().ok_or_else(|| take("stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| take("stdout"))?;
     let stderr = child.stderr.take().ok_or_else(|| take("stderr"))?;
-    let killer = std::sync::Arc::new(ProcessGroup {
+    let killer = Arc::new(ProcessGroup {
         pgid: pid as libc::pid_t,
         reaped: Mutex::new(false),
     });
+    // Each call is one observation; `Child::wait` can be asked again after it failed.
+    let child = Arc::new(tokio::sync::Mutex::new(child));
     Ok(RawSpawn {
         pid,
         stdin: Stdin(stdin),
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
         killer,
-        wait: Box::pin(async move {
-            let status = child.wait().await?;
-            Ok(ExitInfo {
-                code: status.code(),
-                signal: status.signal(),
+        wait: Box::new(move || {
+            let child = Arc::clone(&child);
+            Box::pin(async move {
+                let status = child.lock().await.wait().await?;
+                Ok(ExitInfo {
+                    code: status.code(),
+                    signal: status.signal(),
+                })
             })
         }),
     })

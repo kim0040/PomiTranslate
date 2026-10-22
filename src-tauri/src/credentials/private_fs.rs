@@ -5,7 +5,7 @@
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{check, directory, open, Lock};
+pub use windows::{check, directory, open, pin_directory, DirPin, Lock};
 
 use std::{
     fs, io,
@@ -157,6 +157,57 @@ pub fn check(path: &Path, directory: bool) -> Result<(), FsError> {
     ));
     #[allow(unreachable_code)]
     Ok(())
+}
+
+/// A directory that was validated and is held by identity (device and inode) across a sensitive
+/// sequence; see the Windows twin for the purpose (H1). `confirm` before every rename below it.
+#[cfg(not(windows))]
+pub struct DirPin {
+    _handle: File,
+    #[cfg(unix)]
+    identity: (u64, u64),
+}
+
+#[cfg(not(windows))]
+pub fn pin_directory(path: &Path) -> Result<DirPin, FsError> {
+    check(path, true)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+    let handle = options
+        .open(path)
+        .map_err(|_| FsError::io("Cannot inspect credential directory"))?;
+    #[cfg(unix)]
+    {
+        let metadata = handle
+            .metadata()
+            .map_err(|_| FsError::io("Cannot inspect credential directory"))?;
+        Ok(DirPin {
+            _handle: handle,
+            identity: (metadata.dev(), metadata.ino()),
+        })
+    }
+    #[cfg(not(unix))]
+    Ok(DirPin { _handle: handle })
+}
+
+#[cfg(not(windows))]
+impl DirPin {
+    pub fn confirm(&self, path: &Path) -> Result<(), FsError> {
+        check(path, true)?;
+        #[cfg(unix)]
+        {
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|_| FsError::io("Cannot inspect credential directory"))?;
+            if (metadata.dev(), metadata.ino()) != self.identity {
+                return Err(FsError::permissions(
+                    "The credential directory was replaced while it was in use",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]

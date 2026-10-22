@@ -260,3 +260,212 @@ async fn killing_twice_or_after_the_end_is_harmless() {
     child.control.kill_tree();
     assert!(child.control.has_exited());
 }
+
+// --- a failed wait is not an exit (M4) ----------------------------------------------------------
+
+#[tokio::test]
+async fn a_failed_wait_is_not_an_exit_the_state_is_unknown_and_the_tree_is_stopped_again() {
+    fault::fail_waits(u32::MAX);
+    let mut child = spawn(&spec("sleep", &[])).unwrap();
+    let pid = child.pid;
+    let first = timeout(LONG, child.events.recv()).await.unwrap();
+    assert!(
+        matches!(first, Some(CoreEvent::Error(_))),
+        "the failure is reported: {first:?}"
+    );
+    assert!(child.control.is_unknown());
+    assert_eq!(child.control.state(), ProcessState::Unknown);
+    // The watcher stops the tree again, so the process really is gone ...
+    assert!(gone_within(pid, LONG).await);
+    // ... yet nobody claims to have seen it end: the slot would stay occupied.
+    assert!(child
+        .control
+        .wait_exit(Duration::from_millis(300))
+        .await
+        .is_none());
+    assert!(!child.control.has_exited());
+    assert_eq!(child.control.exit_info(), None);
+}
+
+#[tokio::test]
+async fn the_observation_is_retried_until_the_exit_is_seen() {
+    fault::fail_waits(3);
+    let mut child = spawn(&spec("sleep", &[])).unwrap();
+    let mut saw_error = false;
+    let exit = timeout(LONG, async {
+        while let Some(event) = child.events.recv().await {
+            match event {
+                CoreEvent::Error(_) => saw_error = true,
+                CoreEvent::Exited(info) => return Some(info),
+                _ => {}
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    assert!(saw_error, "the failed attempts were reported");
+    assert!(exit.is_some(), "the exit was finally seen");
+    assert!(child.control.has_exited());
+    assert!(gone_within(child.pid, LONG).await);
+}
+
+// --- the dev interpreter is found like a shell would (M2) ---------------------------------------
+
+/// The helper copied to `<dir>/<stem>` (with `.exe` on Windows), so a bare name finds it.
+fn helper_on_a_path(stem: &str) -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("pomi 개발 path ")
+        .tempdir()
+        .unwrap();
+    let name = if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_owned()
+    };
+    std::fs::copy(helper(), dir.path().join(name)).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_bare_program_name_is_found_through_path_and_really_starts() {
+    let dir = helper_on_a_path("pomi-dev-core");
+    let command = SpawnSpec {
+        program: PathBuf::from("pomi-dev-core"),
+        args: vec!["echo".into()],
+        env: vec![("PATH".into(), dir.path().as_os_str().to_owned())],
+        cwd: None,
+    };
+    let mut child = spawn(&command).unwrap();
+    read_until(&mut child.events, "system.hello").await;
+    drop(child.stdin);
+    let (_, _, exit) = collect(&mut child.events).await;
+    assert_eq!(exit.and_then(|info| info.code), Some(0));
+}
+
+#[tokio::test]
+async fn a_bare_name_that_is_nowhere_on_path_does_not_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = SpawnSpec {
+        program: PathBuf::from("pomi-no-such-core"),
+        args: vec![],
+        env: vec![("PATH".into(), dir.path().as_os_str().to_owned())],
+        cwd: None,
+    };
+    assert!(spawn(&command).is_err());
+}
+
+#[cfg(windows)]
+mod windows_launch {
+    use std::{ffi::OsString, path::Path};
+
+    use super::*;
+    use platform::{fault, resolve_in, Step};
+
+    fn paths(dirs: &[&Path]) -> OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    #[test]
+    fn a_name_without_an_extension_gets_one_from_pathext_and_the_first_directory_wins() {
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(second.path().join("tool.exe"), b"x").unwrap();
+        std::fs::write(second.path().join("tool.cmd"), b"x").unwrap();
+        let path_var = paths(&[first.path(), second.path()]);
+        let pathext = OsString::from(".COM;.EXE;.BAT;.CMD");
+        let found = resolve_in(Path::new("tool"), Some(&path_var), Some(&pathext)).unwrap();
+        assert_eq!(found, second.path().join("tool.exe"));
+        std::fs::write(first.path().join("tool.exe"), b"x").unwrap();
+        let found = resolve_in(Path::new("tool"), Some(&path_var), Some(&pathext)).unwrap();
+        assert_eq!(found, first.path().join("tool.exe"));
+    }
+
+    #[test]
+    fn scripts_are_not_programs_and_a_missing_name_is_an_error_not_a_guess() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("only.cmd"), b"x").unwrap();
+        let path_var = paths(&[dir.path()]);
+        let pathext = OsString::from(".COM;.EXE;.BAT;.CMD");
+        for name in ["only", "absent"] {
+            let error = resolve_in(Path::new(name), Some(&path_var), Some(&pathext)).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{name}");
+        }
+        assert!(resolve_in(Path::new("only"), None, None).is_err());
+    }
+
+    #[test]
+    fn a_directory_in_the_name_is_a_path_and_is_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("run.exe"), b"x").unwrap();
+        let given = dir.path().join("sub").join("run");
+        let found = resolve_in(&given, Some(&OsString::new()), None).unwrap();
+        assert_eq!(found, dir.path().join("sub").join("run.exe"));
+        // A name with a folder part never falls back to PATH.
+        let path_var = paths(&[dir.path().join("sub").as_path()]);
+        assert!(resolve_in(Path::new("other\\run"), Some(&path_var), None).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_real_python_of_this_machine_starts_when_there_is_one() {
+        let works = std::process::Command::new("python")
+            .args(["-c", "print(12345)"])
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("12345"));
+        if !works {
+            eprintln!("skipped: no working `python` on PATH");
+            return;
+        }
+        let command = SpawnSpec {
+            program: PathBuf::from("python"),
+            args: vec!["-c".into(), "print('dev-mode-ok')".into()],
+            env: vec![],
+            cwd: None,
+        };
+        let mut child = spawn(&command).unwrap();
+        read_until(&mut child.events, "dev-mode-ok").await;
+    }
+
+    /// A child that could not be put under supervision is terminated and gone, not left running.
+    async fn spawn_failing_at(step: Step) -> u32 {
+        fault::fail(step, 1);
+        assert!(spawn(&spec("sleep", &[])).is_err());
+        let pid = fault::last_pid();
+        assert_ne!(pid, 0);
+        pid
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_assignment_leaves_no_running_child() {
+        let pid = spawn_failing_at(Step::Assign).await;
+        assert!(gone_within(pid, LONG).await);
+    }
+
+    #[tokio::test]
+    async fn a_failed_resume_leaves_no_running_child() {
+        let pid = spawn_failing_at(Step::Resume).await;
+        assert!(gone_within(pid, LONG).await);
+    }
+
+    #[tokio::test]
+    async fn a_failed_termination_is_retried_until_it_works() {
+        fault::fail(Step::Terminate, 2);
+        let pid = spawn_failing_at(Step::Assign).await;
+        fault::fail(Step::Terminate, 0);
+        assert!(gone_within(pid, LONG).await);
+    }
+
+    #[tokio::test]
+    async fn a_termination_that_never_works_leaves_the_child_suspended_not_running() {
+        fault::fail(Step::Terminate, 1000);
+        let pid = spawn_failing_at(Step::Assign).await;
+        fault::fail(Step::Terminate, 0);
+        // It stays suspended (it never ran), and nobody pretends it is gone.
+        assert!(process_alive(pid), "the unsupervised child is still there");
+        // Clean up the stuck child.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
+        assert!(gone_within(pid, LONG).await);
+    }
+}

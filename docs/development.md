@@ -67,7 +67,9 @@ pnpm verify:local --only rust        # 한 묶음만: python | frontend | rust
 pnpm verify:local --skip python      # 일부 제외
 ```
 
-Python은 `POMI_PYTHON`(없으면 `python`)으로 실행합니다. 이 gate는 소스 검사이며 sidecar·installer 빌드, native, 실제 provider, release gate를 대신하지 않습니다.
+Python은 `POMI_PYTHON`(없으면 `python`)으로 실행합니다. `--only`/`--skip`을 조합해 선택된 단계가 하나도 없으면 PASS로 보이지 않도록 안내 메시지와 함께 종료 코드 2로 끝납니다. 이 gate는 소스 검사이며 sidecar·installer 빌드, native, 실제 provider, release gate를 대신하지 않습니다.
+
+Rust 테스트의 개발 모드 spawn 시험은 `PATH`에서 `python`을 찾을 수 있을 때만 실제 인터프리터를 시작하고, 없으면 건너뜁니다. 진단 내보내기 정책과 코어 stderr의 `[pomi] ` 접두사 계약은 [빌드·패키징 안내](build.md)를 따릅니다.
 
 현재 패키지는 서명된 정식 릴리스가 아닙니다. 코드 빌드와 실제 clean-machine 설치, 서명·notarization·updater 검증을 구분합니다. 의존성 목록과 notice/source 의무를 정리하기 전 바이너리를 공개 배포하지 않습니다. [라이선스 검토](legal/license-review.md)
 

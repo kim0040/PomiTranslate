@@ -169,7 +169,17 @@ command('rust', 'cargo test --lib', 'cargo', ['test', '--lib'], { cwd: tauriDir 
 
 const results = [];
 const started = Date.now();
-for (const step of steps.filter((candidate) => selected.includes(candidate.group))) {
+const planned = steps.filter((candidate) => selected.includes(candidate.group));
+if (planned.length === 0) {
+  // An empty plan must not look like a pass: --only/--skip left nothing to run.
+  process.stderr.write(
+    `No verification steps selected (groups: ${selected.join(', ') || 'none'}). ` +
+      `Check --only/--skip; the groups are: ${GROUPS.join(', ')}.
+`,
+  );
+  process.exit(2);
+}
+for (const step of planned) {
   const begin = Date.now();
   process.stdout.write(`... [${step.group}] ${step.name}\n`);
   let outcome;

@@ -247,19 +247,31 @@ fn the_core_ending_maps_to_stable_codes() {
 }
 
 #[test]
-fn core_stderr_reaches_the_redacted_ring_without_keys() {
+fn core_stderr_reaches_the_ring_only_as_known_shapes_without_keys() {
+    let _turn = diagnostics::serial();
     diagnostics::global().reset();
     let mut exchange = Exchange::new("r", "scan.start");
     exchange.on_event(CoreEvent::Stderr(
-        b"Traceback (most recent call last):\n  provider echoed Bearer sk-live-00112233445566778899aabb\n".to_vec(),
+        b"Traceback (most recent call last):
+  provider echoed Bearer sk-live-00112233445566778899aabb
+[pomi] using sk-live-00112233445566778899aabb
+"
+        .to_vec(),
     ));
-    let kept = diagnostics::global().stderr_lines().join("\n");
+    let kept = diagnostics::global().stderr_lines().join(
+        "
+",
+    );
     assert!(kept.contains("Traceback"));
+    assert!(kept.contains("[1 line omitted]"), "{kept}");
     assert!(!kept.contains("sk-live"), "{kept}");
+    assert!(!kept.contains("provider echoed"), "{kept}");
+    diagnostics::global().reset();
 }
 
 #[test]
 fn the_secret_in_a_request_is_wiped_when_the_guard_drops() {
+    wiped::take();
     let request = serde_json::json!({"v":1,"id":"x","type":"models.list","payload":{"apiKey":"fixture-key-1234567890"}});
     let line = request_line(&request).unwrap();
     assert!(String::from_utf8_lossy(&line).contains("fixture-key-1234567890"));
@@ -268,17 +280,12 @@ fn the_secret_in_a_request_is_wiped_when_the_guard_drops() {
         line.len(),
         "sized exactly, so no regrown copy is left behind"
     );
-    let mut guard = SecretRequest(request);
-    let key_ptr = guard.0["payload"]["apiKey"].as_str().unwrap().as_ptr();
-    // Zeroizing in place keeps the buffer, so the bytes it held are now zero.
-    if let Some(Value::String(key)) = guard.0["payload"]
-        .as_object_mut()
-        .and_then(|p| p.get_mut("apiKey"))
-    {
-        key.zeroize();
-    }
-    let _ = key_ptr;
-    assert!(guard.0["payload"]["apiKey"].as_str().unwrap().is_empty());
+    let guard = SecretRequest::new(request);
+    assert_eq!(guard["payload"]["apiKey"], "fixture-key-1234567890");
+    drop(guard);
+    let wipes = wiped::take();
+    assert_eq!(wipes.len(), 1, "{wipes:?}");
+    assert!(wipes[0].all_zero, "{wipes:?}");
 }
 
 #[test]
@@ -560,4 +567,323 @@ async fn a_core_that_cannot_be_started_is_a_spawn_error_and_leaves_no_slot() {
         .unwrap_err();
     assert_eq!(error.code, code::CORE_SPAWN_FAILED);
     assert!(!state.busy());
+}
+
+// --- H4: only a valid terminal reply ends an exchange -------------------------------------------
+
+#[test]
+fn a_same_id_event_that_is_not_a_reply_is_ignored_and_the_real_result_still_arrives() {
+    let mut exchange = Exchange::new("req-1", "translate.start");
+    feed(&mut exchange, HELLO);
+    for unexpected in [
+        // An unknown event type for this request.
+        &br#"{"v":1,"id":"req-1","type":"job.surprise","payload":{"text":"x"}}"#[..],
+        // A terminal type with an invalid envelope: no payload, wrong version, no error object.
+        br#"{"v":1,"id":"req-1","type":"response.ok"}"#,
+        br#"{"v":2,"id":"req-1","type":"response.ok","payload":{}}"#,
+        br#"{"v":1,"id":"req-1","type":"response.error"}"#,
+        br#"{"v":1,"id":"req-1","type":"response.error","error":"text"}"#,
+        br#"{"v":1,"id":"req-1","type":"response.ok","payload":null}"#,
+    ] {
+        let mut line = unexpected.to_vec();
+        line.push(b'\n');
+        assert!(
+            feed(&mut exchange, &line).is_empty(),
+            "{}",
+            String::from_utf8_lossy(unexpected)
+        );
+    }
+    let steps = feed(
+        &mut exchange,
+        b"{\"v\":1,\"id\":\"req-1\",\"type\":\"response.ok\",\"payload\":{\"saved\":3}}\n",
+    );
+    assert!(matches!(&steps[..], [Step::Done(Ok(reply))] if reply["payload"]["saved"] == 3));
+}
+
+#[test]
+fn a_valid_error_reply_and_a_reply_with_any_payload_type_still_end_the_exchange() {
+    for body in [
+        &br#"{"v":1,"id":"r","type":"response.error","error":{"code":"X","message":"m"}}"#[..],
+        br#"{"v":1,"id":"r","type":"response.ok","payload":"text"}"#,
+        br#"{"v":1,"id":"r","type":"response.ok","payload":[1,2]}"#,
+    ] {
+        let mut exchange = Exchange::new("r", "estimate.get");
+        feed(&mut exchange, HELLO);
+        let mut line = body.to_vec();
+        line.push(b'\n');
+        assert!(matches!(
+            &feed(&mut exchange, &line)[..],
+            [Step::Done(Ok(_))]
+        ));
+    }
+}
+
+#[test]
+fn an_unexpected_event_is_logged_by_type_name_only() {
+    let _turn = diagnostics::serial();
+    let dir = tempfile::tempdir().unwrap();
+    diagnostics::global().reset();
+    diagnostics::global().set_dir(dir.path().to_path_buf());
+    let mut exchange = Exchange::new("r", "translate.start");
+    feed(&mut exchange, HELLO);
+    feed(
+        &mut exchange,
+        br#"{"v":1,"id":"r","type":"job.surprise\u0000","payload":{"text":"WORLD-TEXT-IN-EVENT sk-or-v1-abcdef0123456789abcdef"}}
+"#,
+    );
+    let log = diagnostics::global().log_file_text();
+    assert!(log.contains("job.surprise"), "{log}");
+    assert!(!log.contains("WORLD-TEXT-IN-EVENT"), "{log}");
+    assert!(!log.contains("sk-or-v1"), "{log}");
+    diagnostics::global().reset();
+}
+
+#[tokio::test]
+async fn a_same_id_unknown_event_before_the_real_result_does_not_kill_the_child() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    // A writer: the old behaviour treated the first same-id message as the reply and ended the
+    // request, so the real result was lost and the core was killed.
+    let reply = run(
+        &launch("unknown-event", dir.path()),
+        &state,
+        request("w1", "translate.start"),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply["payload"]["done"], true);
+    assert!(!state.busy());
+}
+
+// --- H3: what the core writes on stderr ---------------------------------------------------------
+
+#[test]
+fn stderr_lines_are_classified_as_whole_lines_across_chunk_boundaries() {
+    let _turn = diagnostics::serial();
+    let dir = tempfile::tempdir().unwrap();
+    diagnostics::global().reset();
+    diagnostics::global().set_dir(dir.path().to_path_buf());
+    let mut sink = StderrSink::new();
+    // A secret split across three chunks, then a world-text line, then an unfinished last line.
+    sink.push(b"[pomi] key sk-or-v1-abcd");
+    sink.push(b"ef0123456789abc");
+    sink.push(b"def0123 done\nThe villagers of Oakhaven trade wheat.\n[pomi] last wo");
+    sink.finish();
+    let all = format!(
+        "{}\n{}",
+        diagnostics::global().snapshot(),
+        diagnostics::global().log_file_text()
+    );
+    for leaked in ["sk-or", "abcdef", "0123456789abc", "villagers", "Oakhaven"] {
+        assert!(!all.contains(leaked), "{leaked} leaked:\n{all}");
+    }
+    assert!(all.contains("[pomi] key [REDACTED] done"), "{all}");
+    assert!(
+        all.contains("[pomi] last wo"),
+        "the unfinished line is flushed:\n{all}"
+    );
+    assert!(all.contains("[1 line omitted]"), "{all}");
+    diagnostics::global().reset();
+}
+
+#[test]
+fn stray_stdout_is_never_logged_as_text() {
+    let _turn = diagnostics::serial();
+    let dir = tempfile::tempdir().unwrap();
+    diagnostics::global().reset();
+    diagnostics::global().set_dir(dir.path().to_path_buf());
+    let mut exchange = Exchange::new("r", "scan.start");
+    feed(&mut exchange, HELLO);
+    feed(
+        &mut exchange,
+        "한글 로그 줄 sk-or-v1-abcdef0123456789abcdef\n".as_bytes(),
+    );
+    feed(&mut exchange, b"DeprecationWarning: something noisy\n");
+    let log = diagnostics::global().log_file_text();
+    for leaked in ["한글", "sk-or", "noisy"] {
+        assert!(!log.contains(leaked), "{leaked} leaked:\n{log}");
+    }
+    diagnostics::global().reset();
+}
+
+// The turn is held across the run on purpose: the test reads the process-wide diagnostics, and its
+// runtime has a single thread.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_core_writing_every_kind_of_stderr_leaves_only_known_shapes_in_the_log_and_the_export() {
+    let _turn = diagnostics::serial();
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    let logs = tempfile::tempdir().unwrap();
+    diagnostics::global().reset();
+    diagnostics::global().set_dir(logs.path().to_path_buf());
+    run(
+        &launch("stderr-mix", dir.path()),
+        &state,
+        request("s1", "scan.start"),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    let all = format!(
+        "{}\n{}",
+        diagnostics::global().snapshot(),
+        diagnostics::global().log_file_text()
+    );
+    for leaked in [
+        "villagers",
+        "Oakhaven",
+        "Zq9xK2mP7vL4nR8tB3wY5cH1dF6gJ0aa",
+        "WORLD-TEXT-IN-SOURCE",
+        "WORLD-TEXT-IN-MESSAGE",
+        "someone",
+        "secret folder",
+        "sk-or-v1-ab",
+        "cdef0123456789",
+    ] {
+        assert!(!all.contains(leaked), "{leaked} leaked:\n{all}");
+    }
+    for kept in [
+        "Traceback (most recent call last):",
+        "File \"mwt/scan.py\", line 12, in run",
+        "ValueError: [message omitted]",
+        "[pomi] stage=scan files=3",
+        "request=scan.start",
+    ] {
+        assert!(all.contains(kept), "{kept} missing:\n{all}");
+    }
+    diagnostics::global().reset();
+}
+
+// --- M5: the key is wiped whatever happens before the core is started --------------------------
+
+fn request_with_key() -> Value {
+    serde_json::json!({
+        "v": 1, "id": "k1", "type": "models.list",
+        "payload": {"provider": "custom", "apiKey": "fixture-key-1234567890-abcdef"}
+    })
+}
+
+#[tokio::test]
+async fn a_launch_that_cannot_be_resolved_still_wipes_the_key_buffer() {
+    let state = ActiveSidecar::default();
+    wiped::take();
+    let error = exchange_with(
+        || Err(IpcError::new(code::CORE_SPAWN_FAILED, "no core here")),
+        &state,
+        request_with_key(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, code::CORE_SPAWN_FAILED);
+    let wipes = wiped::take();
+    assert_eq!(wipes.len(), 1, "{wipes:?}");
+    assert!(
+        wipes[0].all_zero,
+        "the whole capacity of the key buffer is zero: {wipes:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_key_buffer_is_wiped_after_a_normal_exchange_and_after_a_busy_refusal() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    wiped::take();
+    run(
+        &launch("echo", dir.path()),
+        &state,
+        request_with_key(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert!(wiped::take().iter().all(|wipe| wipe.all_zero));
+
+    // Refused because the slot is taken: the request is dropped without ever being serialized.
+    let spawned = core_process::spawn(&launch("sleep", dir.path()).spec()).unwrap();
+    *state.process() = Some(ActiveProcess {
+        control: Arc::clone(&spawned.control),
+        stdin: None,
+        cancel_path: dir.path().join("c"),
+        cancel_requested: None,
+        forced: Arc::new(AtomicBool::new(false)),
+    });
+    let error = run(
+        &launch("echo", dir.path()),
+        &state,
+        request_with_key(),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, code::BUSY);
+    let wipes = wiped::take();
+    assert_eq!(wipes.len(), 1, "{wipes:?}");
+    assert!(wipes[0].all_zero);
+    spawned.control.kill_tree();
+}
+
+// --- M4: a wait that fails is not an exit -------------------------------------------------------
+
+#[tokio::test]
+async fn a_failed_wait_keeps_the_slot_until_the_exit_is_finally_seen() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    core_process::fault::fail_waits(3);
+    let reply = run(
+        &launch("echo", dir.path()),
+        &state,
+        request("m1", "estimate.get"),
+        |_| {},
+    )
+    .await;
+    // The failed attempts stopped the core before it could answer, so the request fails - but the
+    // slot is released only because the exit was finally seen, never on a guess.
+    assert!(
+        matches!(&reply, Err(error) if matches!(error.code, code::CORE_STATE_UNKNOWN | code::CORE_STOPPED)),
+        "{reply:?}"
+    );
+    assert!(!state.busy(), "the exit was seen, so the slot was released");
+}
+
+#[tokio::test]
+async fn a_wait_that_keeps_failing_leaves_the_slot_occupied_and_says_why() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    core_process::fault::fail_waits(u32::MAX);
+    let start = launch("stall", dir.path());
+    let spawned = core_process::spawn(&start.spec()).unwrap();
+    let (pid, control) = (spawned.pid, Arc::clone(&spawned.control));
+    *state.process() = Some(ActiveProcess {
+        control: Arc::clone(&control),
+        stdin: None,
+        cancel_path: start.cancel_path.clone(),
+        cancel_requested: None,
+        forced: Arc::new(AtomicBool::new(false)),
+    });
+    // Let the first failure happen.
+    while !control.is_unknown() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    ActiveSidecar::clear(&state.process, pid);
+    assert!(state.busy(), "an unknown state keeps the slot");
+    state.request_cancel().unwrap();
+    let error = state.force_stop(Duration::ZERO).await.unwrap_err();
+    assert_eq!(error.code, code::CORE_STATE_UNKNOWN);
+    assert!(state.busy(), "still occupied after the refused force-stop");
+    assert!(gone_within(pid, Duration::from_secs(20)).await);
+    drop(spawned);
+}
+
+#[tokio::test]
+async fn a_run_whose_wait_fails_forever_reports_the_state_as_unknown_and_keeps_the_slot() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    core_process::fault::fail_waits(u32::MAX);
+    let outcome = run(
+        &launch("stall", dir.path()),
+        &state,
+        request("m2", "estimate.get"),
+        |_| {},
+    )
+    .await;
+    let error = outcome.unwrap_err();
+    assert_eq!(error.code, code::CORE_STATE_UNKNOWN, "{error:?}");
+    assert!(state.busy(), "nothing was released on a guess");
 }

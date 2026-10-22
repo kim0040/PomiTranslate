@@ -186,7 +186,7 @@ pub async fn install<R: Runtime>(
     if sidecar.busy() {
         return Err(IpcError::new(code::UPDATE_BUSY, "A job is running"));
     }
-    let _active = ActiveGuard::begin(control)?;
+    let active = ActiveGuard::begin(control)?;
     let updater = app
         .updater_builder()
         .timeout(CHECK_TIMEOUT)
@@ -275,6 +275,10 @@ pub async fn install<R: Runtime>(
         }
     };
 
+    // The restart is a way out of the app like a quit: it passes the same exit intent (M3). The
+    // download is over, so it no longer counts as an active operation while the person decides.
+    drop(active);
+    crate::exit_gate::authorize_update_restart(app).await?;
     // Installing replaces the program: hold the gate so no job can start halfway through.
     let _gate = sidecar.request_gate.try_lock().map_err(|_| {
         IpcError::new(

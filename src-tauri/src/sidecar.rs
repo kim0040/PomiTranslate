@@ -12,6 +12,7 @@
 use std::{
     ffi::OsString,
     fs,
+    ops::{Deref, DerefMut},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -71,13 +72,14 @@ const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How long the core may take to exit after its stdin is closed, before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// How long a killed core may take to be reported gone before the slot is kept occupied.
-const KILL_WAIT: Duration = Duration::from_secs(10);
+const KILL_WAIT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 10 });
 /// A request line that cannot be written in this time means the core is not reading.
 const REQUEST_WRITE_LIMIT: Duration = Duration::from_secs(20);
 /// The person may force-stop a job only this long after asking it to cancel.
 pub const FORCE_STOP_AFTER_CANCEL: Duration = Duration::from_secs(30);
-/// Kept per unparseable line in the log.
-const STRAY_LOG_CHARS: usize = 300;
+/// The most of a core output line that is looked at: lines are redacted and classified as complete
+/// lines up to this size (H3).
+const OUTPUT_LINE_BYTES: usize = 64 * 1024;
 
 /// Environment variables that could hand the core a provider key behind Rust's back. The core never
 /// reads them for the desktop app (Rust owns credentials), and they are blanked for the child anyway.
@@ -302,10 +304,17 @@ impl ActiveSidecar {
             control.wait_exit(KILL_WAIT).await;
         }
         if !control.has_exited() {
-            return Err(IpcError::new(
-                code::CORE_STOPPED,
-                "The translation core could not be stopped; it is still running",
-            ));
+            return Err(if control.is_unknown() {
+                IpcError::new(
+                    code::CORE_STATE_UNKNOWN,
+                    "The end of the translation core could not be observed; the operation slot stays occupied",
+                )
+            } else {
+                IpcError::new(
+                    code::CORE_STOPPED,
+                    "The translation core could not be stopped; it is still running",
+                )
+            });
         }
         Self::clear(&self.process, control.pid());
         Ok(ForceStopped {
@@ -423,11 +432,47 @@ pub enum Line {
     Hello,
     Progress(Value),
     Reply(Value),
-    /// Another request's message, or a type this shell does not act on.
+    /// Another request's message.
     Ignore,
-    /// Not protocol output (after the handshake): logged and skipped, never fatal.
+    /// This request's id with a type that does not end the exchange (an unknown event, or a
+    /// terminal reply whose envelope is not valid). Carries the type name only, sanitized.
+    Unexpected(String),
+    /// Not protocol output (after the handshake): classified by diagnostics and skipped, never
+    /// fatal. Carries the line, bounded.
     Stray(String),
     Fatal(IpcError),
+}
+
+/// A message type as it may appear in a log: identifier characters only, bounded.
+fn type_name(kind: &str) -> String {
+    let clean: String = kind
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        "?".to_owned()
+    } else {
+        clean
+    }
+}
+
+/// A terminal reply must carry the protocol version, and `response.ok` its payload or
+/// `response.error` its error object.
+fn valid_reply(message: &Value, kind: &str) -> bool {
+    message.get("v").and_then(Value::as_u64) == Some(1)
+        && match kind {
+            "response.ok" => message
+                .get("payload")
+                .is_some_and(|payload| !payload.is_null()),
+            _ => message.get("error").is_some_and(Value::is_object),
+        }
 }
 
 pub fn classify_line(line: &[u8], saw_hello: bool, id: &str) -> Line {
@@ -436,12 +481,8 @@ pub fn classify_line(line: &[u8], saw_hello: bool, id: &str) -> Line {
         .filter(|message| message.get("type").and_then(Value::as_str).is_some());
     let Some(message) = parsed else {
         return if saw_hello {
-            Line::Stray(
-                String::from_utf8_lossy(line)
-                    .chars()
-                    .take(STRAY_LOG_CHARS)
-                    .collect(),
-            )
+            let bounded = &line[..line.len().min(OUTPUT_LINE_BYTES)];
+            Line::Stray(String::from_utf8_lossy(bounded).into_owned())
         } else {
             Line::Fatal(IpcError::new(
                 code::CORE_PROTOCOL,
@@ -475,8 +516,11 @@ pub fn classify_line(line: &[u8], saw_hello: bool, id: &str) -> Line {
     }
     if kind.ends_with(".progress") {
         Line::Progress(message)
-    } else {
+    } else if matches!(kind, "response.ok" | "response.error") && valid_reply(&message, kind) {
+        // Only a valid terminal reply ends the exchange (H4).
         Line::Reply(message)
+    } else {
+        Line::Unexpected(type_name(kind))
     }
 }
 
@@ -507,6 +551,47 @@ pub enum Step {
     Done(Result<Value, IpcError>),
 }
 
+/// The core's stderr, cut into complete lines before diagnostics sees any of it: a chunk boundary
+/// can fall inside a secret, and classification needs the whole line (H3). The scanner keeps its
+/// state for as long as the sink lives, shutdown included.
+pub struct StderrSink {
+    scanner: LineScanner,
+}
+
+impl StderrSink {
+    pub fn new() -> Self {
+        Self {
+            scanner: LineScanner::new(OUTPUT_LINE_BYTES),
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        for scan in self.scanner.push(bytes) {
+            match scan {
+                Scan::Line(line) => {
+                    diagnostics::global().core_stderr(&String::from_utf8_lossy(&line));
+                }
+                // Too long to be a diagnostic line: counted as omitted, never kept.
+                Scan::Oversize { .. } => diagnostics::global().core_stderr_omitted(),
+            }
+        }
+    }
+
+    /// The stream ended: the unfinished last line is a line too.
+    pub fn finish(&mut self) {
+        if let Some(rest) = self.scanner.finish() {
+            diagnostics::global().core_stderr(&String::from_utf8_lossy(&rest));
+        }
+        diagnostics::global().end_core_output();
+    }
+}
+
+impl Default for StderrSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The reading side of one request, driven event by event.
 pub struct Exchange {
     id: String,
@@ -514,7 +599,7 @@ pub struct Exchange {
     lane: Lane,
     saw_hello: bool,
     scanner: LineScanner,
-    stderr: LineScanner,
+    stderr: StderrSink,
     /// Bytes of non-protocol output so far (stray lines, other requests' messages).
     stray_bytes: usize,
     /// Every stdout byte so far; bounds a short request as a whole.
@@ -531,7 +616,7 @@ impl Exchange {
             lane: lane(kind),
             saw_hello: false,
             scanner: LineScanner::new(MAX_LINE_BYTES),
-            stderr: LineScanner::new(64 * 1024),
+            stderr: StderrSink::new(),
             stray_bytes: 0,
             total_bytes: 0,
             pending_fault: None,
@@ -540,6 +625,11 @@ impl Exchange {
 
     pub fn saw_hello(&self) -> bool {
         self.saw_hello
+    }
+
+    /// The stderr sink, which shutdown keeps feeding after the exchange itself ended.
+    fn stderr_sink(&mut self) -> &mut StderrSink {
+        &mut self.stderr
     }
 
     /// True while a faulted world writer is being given time to stop.
@@ -557,25 +647,25 @@ impl Exchange {
         match event {
             CoreEvent::Stdout(bytes) => self.on_stdout(&bytes),
             CoreEvent::Stderr(bytes) => {
-                for scan in self.stderr.push(&bytes) {
-                    if let Scan::Line(line) = scan {
-                        diagnostics::global().core_stderr(&String::from_utf8_lossy(&line));
-                    }
-                }
+                self.stderr.push(&bytes);
                 vec![]
             }
             CoreEvent::Exited(info) => {
-                if let Some(rest) = self.stderr.finish() {
-                    diagnostics::global().core_stderr(&String::from_utf8_lossy(&rest));
-                }
+                self.stderr.finish();
                 vec![Step::Done(Err(self.pending_fault.clone().unwrap_or_else(
                     || termination_error(info.code, info.signal),
                 )))]
             }
             CoreEvent::Error(message) => {
+                // Waiting on the process failed: it may still be running. Not "stopped".
                 diagnostics::global().log("ERROR", "core", &message);
                 vec![Step::Done(Err(self.pending_fault.clone().unwrap_or_else(
-                    || IpcError::new(code::CORE_STOPPED, "The translation core connection failed"),
+                    || {
+                        IpcError::new(
+                            code::CORE_STATE_UNKNOWN,
+                            "The end of the translation core could not be observed",
+                        )
+                    },
                 )))]
             }
         }
@@ -636,12 +726,19 @@ impl Exchange {
                             return steps;
                         }
                     }
-                    Line::Stray(snippet) => {
+                    Line::Unexpected(name) => {
+                        // Type name only: the message itself is never logged.
                         diagnostics::global().log(
                             "WARN",
                             "core",
-                            &format!("ignored non-protocol stdout: {snippet}"),
+                            &format!("ignored a {name} message that does not end the request"),
                         );
+                        if self.over_stray_budget(line.len(), &mut steps) {
+                            return steps;
+                        }
+                    }
+                    Line::Stray(text) => {
+                        diagnostics::global().core_stray_stdout(&text);
                         if self.over_stray_budget(line.len(), &mut steps) {
                             return steps;
                         }
@@ -681,8 +778,40 @@ fn oversize_fault(message_type: Option<&str>) -> IpcError {
 
 // --- process control --------------------------------------------------------------------------
 
-/// Request bytes with the key in them, wiped on every exit path (CR-9).
-struct SecretRequest(Value);
+/// A request that may carry the API key, wiped on every exit path (CR-9). The key is wrapped the
+/// moment it is injected, before anything that can fail (launch resolution, serialization), and the
+/// same guard travels all the way into the serialized line (M5).
+pub struct SecretRequest(Value);
+
+impl SecretRequest {
+    pub fn new(request: Value) -> Self {
+        Self(request)
+    }
+
+    /// The request without the guard (for requests that never hold a key).
+    pub fn into_value(mut self) -> Value {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl From<Value> for SecretRequest {
+    fn from(request: Value) -> Self {
+        Self(request)
+    }
+}
+
+impl Deref for SecretRequest {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl DerefMut for SecretRequest {
+    fn deref_mut(&mut self) -> &mut Value {
+        &mut self.0
+    }
+}
 
 impl Drop for SecretRequest {
     fn drop(&mut self) {
@@ -693,7 +822,43 @@ impl Drop for SecretRequest {
             .and_then(|payload| payload.get_mut("apiKey"))
         {
             key.zeroize();
+            #[cfg(test)]
+            wiped::record(key);
         }
+    }
+}
+
+/// Test-only: what the guard saw of the key buffer right after wiping it.
+#[cfg(test)]
+pub(crate) mod wiped {
+    use std::cell::RefCell;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct Wipe {
+        /// Address of the key's heap buffer.
+        pub address: usize,
+        /// Every byte of the buffer's capacity is zero.
+        pub all_zero: bool,
+    }
+
+    thread_local! {
+        static WIPES: RefCell<Vec<Wipe>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(key: &String) {
+        // SAFETY: the buffer is still allocated (the String was only cleared) and `zeroize` set
+        // its whole capacity, spare bytes included, to zero.
+        let bytes = unsafe { std::slice::from_raw_parts(key.as_ptr(), key.capacity()) };
+        WIPES.with(|wipes| {
+            wipes.borrow_mut().push(Wipe {
+                address: key.as_ptr() as usize,
+                all_zero: key.is_empty() && bytes.iter().all(|byte| *byte == 0),
+            })
+        });
+    }
+
+    pub fn take() -> Vec<Wipe> {
+        WIPES.with(|wipes| std::mem::take(&mut *wipes.borrow_mut()))
     }
 }
 
@@ -723,37 +888,53 @@ fn request_line(request: &Value) -> Result<Zeroizing<Vec<u8>>, IpcError> {
 pub async fn exchange(
     app: &AppHandle,
     state: &ActiveSidecar,
-    request: Value,
+    request: impl Into<SecretRequest>,
 ) -> Result<Value, IpcError> {
-    let launch = launch_for(app)?;
-    run(&launch, state, request, |message| {
-        let _ = app.emit("pomi-progress", message);
-    })
+    exchange_with(
+        || launch_for(app),
+        state,
+        request,
+        |message| {
+            let _ = app.emit("pomi-progress", message);
+        },
+    )
     .await
+}
+
+/// [`exchange`] with the launch resolved by `resolve`. The request is taken into its wiping guard
+/// first, so a failure to find the core cannot strand a plain copy of the key (M5).
+async fn exchange_with(
+    resolve: impl FnOnce() -> Result<Launch, IpcError>,
+    state: &ActiveSidecar,
+    request: impl Into<SecretRequest>,
+    on_progress: impl Fn(&Value),
+) -> Result<Value, IpcError> {
+    let request = request.into();
+    let launch = resolve()?;
+    run(&launch, state, request, on_progress).await
 }
 
 /// [`exchange`] without the app: the core to start and the progress sink are passed in.
 pub async fn run(
     launch: &Launch,
     state: &ActiveSidecar,
-    request: Value,
+    request: impl Into<SecretRequest>,
     on_progress: impl Fn(&Value),
 ) -> Result<Value, IpcError> {
-    let request = SecretRequest(request);
+    let started = std::time::Instant::now();
+    let request: SecretRequest = request.into();
     let kind = request
-        .0
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
     let id = request
-        .0
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| IpcError::new(code::INVALID_REQUEST, "Missing request id"))?
         .to_owned();
     let deadlines = startup::StartupDeadlines::new(&kind);
-    let line = request_line(&request.0)?;
+    let line = request_line(&request)?;
     // The key now lives only in the line that is written; the Value copy is wiped.
     drop(request);
 
@@ -805,11 +986,18 @@ pub async fn run(
     let sent = timeout(REQUEST_WRITE_LIMIT, stdin.send(line)).await;
     if !matches!(sent, Ok(Ok(()))) {
         control.kill_tree();
-        shutdown(state, &control, &mut receiver).await;
-        return Err(IpcError::new(
-            code::CORE_STOPPED,
-            "Could not send the request to the translation core",
-        ));
+        shutdown(state, &control, &mut receiver, &mut StderrSink::new()).await;
+        return Err(if control.is_unknown() {
+            IpcError::new(
+                code::CORE_STATE_UNKNOWN,
+                "The end of the translation core could not be observed",
+            )
+        } else {
+            IpcError::new(
+                code::CORE_STOPPED,
+                "Could not send the request to the translation core",
+            )
+        });
     }
     {
         // Held by the slot from here on, so a force-stop can close it.
@@ -864,7 +1052,7 @@ pub async fn run(
         }
     };
 
-    shutdown(state, &control, &mut receiver).await;
+    shutdown(state, &control, &mut receiver, session.stderr_sink()).await;
     let result = match result {
         Err(error)
             if forced.load(Ordering::SeqCst)
@@ -877,34 +1065,41 @@ pub async fn run(
         }
         other => other,
     };
+    let exit = control.exit_info();
+    diagnostics::global().core_run(&diagnostics::RunRecord {
+        request: &kind,
+        duration_ms: started.elapsed().as_millis(),
+        error: result.as_ref().err().map(|error| error.code),
+        exit_code: exit.and_then(|info| info.code),
+        signal: exit.and_then(|info| info.signal),
+    });
     if let Err(error) = &result {
         diagnostics::global().log_error(&format!("core:{kind}"), error);
     }
     result
 }
 
-/// Send what the core wrote to stderr in its last moments to the diagnostics.
-fn drain_stderr(receiver: &mut mpsc::Receiver<CoreEvent>) {
+/// Send what the core wrote to stderr in its last moments to the diagnostics, through the same
+/// line scanner as the rest of the request (a line can span the last chunks).
+fn drain_stderr(receiver: &mut mpsc::Receiver<CoreEvent>, sink: &mut StderrSink) {
     while let Ok(event) = receiver.try_recv() {
         if let CoreEvent::Stderr(bytes) = event {
-            for line in String::from_utf8_lossy(&bytes).lines() {
-                diagnostics::global().core_stderr(line);
-            }
+            sink.push(&bytes);
         }
     }
 }
 
 /// Wait for the end-of-process event (collecting stderr on the way), but at most `limit`. Whether the
 /// core is gone is decided by `ProcessControl`, not by this wait.
-async fn wait_for_end(receiver: &mut mpsc::Receiver<CoreEvent>, limit: Duration) {
+async fn wait_for_end(
+    receiver: &mut mpsc::Receiver<CoreEvent>,
+    limit: Duration,
+    sink: &mut StderrSink,
+) {
     let deadline = Instant::now() + limit;
     loop {
         match timeout_at(deadline, receiver.recv()).await {
-            Ok(Some(CoreEvent::Stderr(bytes))) => {
-                for line in String::from_utf8_lossy(&bytes).lines() {
-                    diagnostics::global().core_stderr(line);
-                }
-            }
+            Ok(Some(CoreEvent::Stderr(bytes))) => sink.push(&bytes),
             Ok(Some(CoreEvent::Stdout(_))) => {}
             Ok(Some(CoreEvent::Exited(_) | CoreEvent::Error(_)) | None) | Err(_) => return,
         }
@@ -913,11 +1108,13 @@ async fn wait_for_end(receiver: &mut mpsc::Receiver<CoreEvent>, limit: Duration)
 
 /// Release the core: close its stdin so it can exit by itself, wait briefly, then kill the whole
 /// tree. The slot is freed once the exit was observed. A core whose exit cannot be observed keeps
-/// the slot (the world may still be being written) until it is.
+/// the slot (the world may still be being written) until it is. Everything it wrote to stderr goes
+/// through `sink`, whose unfinished line is flushed at the end.
 async fn shutdown(
     state: &ActiveSidecar,
     control: &Arc<ProcessControl>,
     receiver: &mut mpsc::Receiver<CoreEvent>,
+    sink: &mut StderrSink,
 ) {
     let stdin = state
         .process()
@@ -925,13 +1122,14 @@ async fn shutdown(
         .and_then(|active| active.stdin.take());
     drop(stdin);
     if !control.has_exited() {
-        wait_for_end(receiver, EXIT_GRACE).await;
+        wait_for_end(receiver, EXIT_GRACE, sink).await;
     }
     if !control.has_exited() {
         control.kill_tree();
-        wait_for_end(receiver, KILL_WAIT).await;
+        wait_for_end(receiver, KILL_WAIT, sink).await;
     }
-    drain_stderr(receiver);
+    drain_stderr(receiver, sink);
+    sink.finish();
     if control.has_exited() {
         ActiveSidecar::clear(&state.process, control.pid());
         return;
@@ -939,7 +1137,11 @@ async fn shutdown(
     diagnostics::global().log(
         "ERROR",
         "core",
-        &format!("the translation core (pid {}) did not end after being killed; the job slot stays occupied", control.pid()),
+        &format!(
+            "the translation core (pid {}) was not seen to end after being killed{}; the job slot stays occupied",
+            control.pid(),
+            if control.is_unknown() { " (waiting on it failed)" } else { "" }
+        ),
     );
     let (slot, control) = (Arc::clone(&state.process), Arc::clone(control));
     tokio::spawn(async move {

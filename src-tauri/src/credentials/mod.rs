@@ -1,5 +1,6 @@
 mod keychain;
 mod keychain_transaction;
+mod ledger;
 mod private_fs;
 
 use ring::{
@@ -10,7 +11,7 @@ use ring::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -22,6 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{code, IpcError};
 pub use keychain::{KeychainStore, OsKeychain};
+use ledger::Ledger;
 use private_fs::{FsError, FsErrorKind};
 
 pub const PROVIDERS: &[&str] = &[
@@ -196,6 +198,13 @@ impl Default for Credentials {
     }
 }
 
+/// What a vault operation holds while it works: the cross-process lock and the vault directory,
+/// pinned so it cannot be swapped for a link underneath the operation (H1).
+struct Held {
+    _lock: private_fs::Lock,
+    _pin: private_fs::DirPin,
+}
+
 struct Vault {
     root: PathBuf,
     key_dir: PathBuf,
@@ -215,11 +224,23 @@ impl Vault {
             .map_err(|_| io_error("Cannot inspect credential storage"))
     }
 
-    fn connection(&self, create: bool) -> Result<Option<(Connection, private_fs::Lock)>, IpcError> {
-        if !Self::exists(&self.root)? && !create {
+    /// Something is at `path`, a link included (never followed).
+    fn present(path: &Path) -> Result<bool, IpcError> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(io_error("Cannot inspect credential storage")),
+        }
+    }
+
+    fn connection(&self, create: bool) -> Result<Option<(Connection, Held)>, IpcError> {
+        if !Self::present(&self.root)? && !create {
             return Ok(None);
         }
+        // The directory is validated (not a link, owned by the user, user-only) and held before
+        // the lock file or anything else below it is touched.
         private_fs::directory(&self.root)?;
+        let pin = private_fs::pin_directory(&self.root)?;
         let lock = private_fs::Lock::acquire(&self.root.join("vault.lock"), private_fs::LOCK_WAIT)?;
         self.discard_unfinished_database()?;
         let exists = Self::exists(&self.db)?;
@@ -273,7 +294,13 @@ impl Vault {
             ));
         }
         Self::ensure_endpoint_column(&conn)?;
-        Ok(Some((conn, lock)))
+        Ok(Some((
+            conn,
+            Held {
+                _lock: lock,
+                _pin: pin,
+            },
+        )))
     }
 
     /// A zero-byte database is a creation that never finished (an older build made the file before
@@ -375,10 +402,18 @@ impl Vault {
     /// the vault holds no credentials yet.
     fn master(&self, conn: &Connection, create: bool) -> Result<Zeroizing<Vec<u8>>, IpcError> {
         let path = self.key_dir.join("master.key");
-        if !Self::exists(&self.key_dir)? || !Self::exists(&path)? {
-            self.recover_or_create_key(conn, &path, create)?;
-        }
-        private_fs::check(&self.key_dir, true)?;
+        // The key directory is validated and pinned before anything below it is read, promoted or
+        // set aside: a link in its place (or a swap during the work) is refused first (H1).
+        let existing = if Self::present(&self.key_dir)? {
+            Some(private_fs::pin_directory(&self.key_dir)?)
+        } else {
+            None
+        };
+        let pin = match existing {
+            Some(pin) if Self::present(&path)? => pin,
+            existing => self.recover_or_create_key(conn, &path, create, existing)?,
+        };
+        pin.confirm(&self.key_dir)?;
         let file = private_fs::open(&path, false)?;
         let mut key = Zeroizing::new(Vec::new());
         file.take(49)
@@ -396,12 +431,15 @@ impl Vault {
     /// `master.key` is missing. A `master.new` left by an interrupted creation is promoted only when
     /// it is exactly 48 bytes and no stored credential was encrypted under a different key;
     /// otherwise it is set aside (never overwritten or deleted) and, when allowed, a fresh key is made.
+    /// `existing` is the already validated key directory, if there is one. Returns the pinned
+    /// directory the key now lives in.
     fn recover_or_create_key(
         &self,
         conn: &Connection,
         path: &Path,
         create: bool,
-    ) -> Result<(), IpcError> {
+        existing: Option<private_fs::DirPin>,
+    ) -> Result<private_fs::DirPin, IpcError> {
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM credentials", [], |row| row.get(0))
             .map_err(|error| {
@@ -412,23 +450,39 @@ impl Vault {
                 )
             })?;
         let leftover = self.key_dir.join("master.new");
-        if Self::exists(&self.key_dir)? && fs::symlink_metadata(&leftover).is_ok() {
-            if self.leftover_is_promotable(conn, &leftover) {
-                private_fs::rename(&leftover, path)
-                    .map_err(|_| io_error("Cannot commit credential master key"))?;
-                private_fs::sync_directory(&self.key_dir)
-                    .map_err(|_| io_error("Cannot flush the credential key directory"))?;
-                return Ok(());
-            }
-            self.set_aside(&leftover)?;
-        }
-        if !create || rows > 0 {
-            return Err(IpcError::new(
+        let missing = || {
+            IpcError::new(
                 code::VAULT_KEY_MISSING,
                 "Credential master key is missing; re-enter the API key after recovering or clearing the damaged vault",
-            ));
-        }
-        private_fs::directory(&self.key_dir)?;
+            )
+        };
+        let pin = match existing {
+            Some(pin) => {
+                if fs::symlink_metadata(&leftover).is_ok() {
+                    if self.leftover_is_promotable(conn, &leftover) {
+                        pin.confirm(&self.key_dir)?;
+                        private_fs::rename(&leftover, path)
+                            .map_err(|_| io_error("Cannot commit credential master key"))?;
+                        private_fs::sync_directory(&self.key_dir)
+                            .map_err(|_| io_error("Cannot flush the credential key directory"))?;
+                        return Ok(pin);
+                    }
+                    pin.confirm(&self.key_dir)?;
+                    self.set_aside(&leftover)?;
+                }
+                if !create || rows > 0 {
+                    return Err(missing());
+                }
+                pin
+            }
+            None => {
+                if !create || rows > 0 {
+                    return Err(missing());
+                }
+                private_fs::directory(&self.key_dir)?;
+                private_fs::pin_directory(&self.key_dir)?
+            }
+        };
         let mut key = Zeroizing::new(vec![0u8; 48]);
         SystemRandom::new()
             .fill(&mut key)
@@ -441,11 +495,12 @@ impl Vault {
                 .and_then(|_| file.sync_all())
                 .map_err(|_| io_error("Cannot save credential master key"))?;
         }
+        pin.confirm(&self.key_dir)?;
         private_fs::rename(&leftover, path)
             .map_err(|_| io_error("Cannot commit credential master key"))?;
         private_fs::sync_directory(&self.key_dir)
             .map_err(|_| io_error("Cannot flush the credential key directory"))?;
-        Ok(())
+        Ok(pin)
     }
 
     fn leftover_is_promotable(&self, conn: &Connection, leftover: &Path) -> bool {
@@ -633,7 +688,7 @@ impl Credentials {
         validate_provider(provider)?;
         let sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
-        let Some((conn, _lock)) = vault.connection(false)? else {
+        let Some((conn, _held)) = vault.connection(false)? else {
             return Ok(Status {
                 mode: Mode::Local,
                 stored: false,
@@ -672,7 +727,7 @@ impl Credentials {
         validate_provider(provider)?;
         let sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
-        let Some((conn, _lock)) = vault.connection(false)? else {
+        let Some((conn, _held)) = vault.connection(false)? else {
             return Ok(None);
         };
         let mode = mode_of(&conn, provider)?;
@@ -690,8 +745,9 @@ impl Credentials {
         Ok(secret)
     }
 
-    /// A key saved before the binding existed has no recorded endpoint; it is bound to the first
-    /// endpoint it is used with, which is the one the person configured.
+    /// The Custom key goes only to the endpoint it was saved for. A key saved before endpoints were
+    /// recorded has none, and a request cannot establish where it was meant to go: it stays unusable
+    /// until the person re-enters it or confirms the current endpoint (`confirm_endpoint`) (H5).
     fn check_endpoint(
         conn: &Connection,
         provider: &str,
@@ -701,19 +757,87 @@ impl Credentials {
         let (_, stored) = account_flags(conn, provider)?;
         match (stored, wanted) {
             (Some(stored), Some(wanted)) if stored == wanted => Ok(()),
-            (None, Some(wanted)) => {
-                conn.execute(
-                    "UPDATE accounts SET endpoint_hash=?2 WHERE provider=?1",
-                    params![provider, wanted],
-                )
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot save the endpoint binding"))?;
-                Ok(())
-            }
+            (None, _) => Err(IpcError::new(
+                code::CREDENTIAL_ENDPOINT_UNBOUND,
+                "The stored API key has no recorded endpoint; re-enter it or confirm the current endpoint",
+            )),
             _ => Err(IpcError::new(
                 code::CREDENTIAL_ENDPOINT_MISMATCH,
                 "The stored API key was saved for a different endpoint",
             )),
         }
+    }
+
+    /// The person confirms that the Custom key stored without an endpoint belongs to `endpoint`
+    /// (the one currently configured). Only an unbound key is bound; a key that already has an
+    /// endpoint is never retargeted this way.
+    pub fn confirm_endpoint(
+        &self,
+        root: &Path,
+        provider: &str,
+        endpoint: Option<&str>,
+    ) -> Result<Status, IpcError> {
+        validate_provider(provider)?;
+        if provider != BOUND_PROVIDER {
+            return Err(IpcError::new(
+                code::CREDENTIAL_PROVIDER_INVALID,
+                "Only the Custom provider has an endpoint to confirm",
+            ));
+        }
+        let endpoint = endpoint.ok_or_else(|| {
+            IpcError::new(
+                code::CUSTOM_ENDPOINT_REQUIRED,
+                "Custom provider requires an explicit endpoint",
+            )
+        })?;
+        let sessions = lock_wait(&self.sessions)?;
+        let vault = Vault::new(root);
+        let Some((conn, _held)) = vault.connection(false)? else {
+            return Ok(Status {
+                mode: Mode::Local,
+                stored: false,
+            });
+        };
+        let mode = mode_of(&conn, provider)?;
+        let (known_keychain, current) = account_flags(&conn, provider)?;
+        let stored = match mode {
+            Mode::Local => conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE provider=?1)",
+                    [provider],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    sql(
+                        error,
+                        code::VAULT_CORRUPT,
+                        "Cannot inspect credential metadata",
+                    )
+                })?,
+            Mode::Session => sessions.contains_key(provider),
+            Mode::Keychain => known_keychain,
+        };
+        if !stored {
+            return Ok(Status { mode, stored });
+        }
+        let wanted = endpoint_hash(endpoint);
+        match current {
+            Some(bound) if bound == wanted => {}
+            Some(_) => {
+                return Err(IpcError::new(
+                    code::CREDENTIAL_ENDPOINT_MISMATCH,
+                    "The stored API key was saved for a different endpoint",
+                ))
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,?2,?3,?4) ON CONFLICT(provider) DO UPDATE SET endpoint_hash=excluded.endpoint_hash",
+                    params![provider, mode.label(), known_keychain, wanted],
+                )
+                .map_err(|error| sql(error, code::VAULT_IO, "Cannot save the endpoint binding"))?;
+            }
+        }
+        Ok(Status { mode, stored })
     }
 
     pub fn save(
@@ -727,9 +851,11 @@ impl Credentials {
         validate_provider(provider)?;
         let mut sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
-        let (mut conn, _lock) = vault
+        let (mut conn, _held) = vault
             .connection(true)?
             .ok_or_else(|| io_error("Cannot initialize credential storage"))?;
+        let ledger = Ledger::new(root);
+        Self::start_ledger(&conn, &ledger)?;
         let previous = mode_of(&conn, provider)?;
         let (was_known_keychain, existing_hash) = account_flags(&conn, provider)?;
         let secret = if !supplied.is_empty() {
@@ -830,6 +956,10 @@ impl Credentials {
         };
         if let Some(action) = keychain_action {
             let previous_key = self.keychain.get(provider)?;
+            if action.is_some() {
+                // Recorded before the OS entry exists, so a crash in between cannot lose it (M1).
+                ledger.add(provider_name(provider))?;
+            }
             keychain_transaction::commit(
                 || match action {
                     Some(value) => self.keychain.set(provider, value),
@@ -854,6 +984,9 @@ impl Credentials {
                 )
             })?;
         }
+        if matches!(keychain_action, Some(None)) {
+            Self::forget(&ledger, provider);
+        }
         if mode == Mode::Session {
             if let Some(secret) = secret {
                 sessions.insert(provider.to_owned(), secret);
@@ -863,6 +996,22 @@ impl Credentials {
         }
         self.remember(provider, mode);
         Ok(Status { mode, stored })
+    }
+
+    /// Installs from before the ownership record start it from what the vault says it wrote.
+    fn start_ledger(conn: &Connection, ledger: &Ledger) -> Result<(), IpcError> {
+        if ledger.exists() {
+            return Ok(());
+        }
+        ledger.ensure(vault_owned_providers(conn)?)
+    }
+
+    /// The OS entry is confirmed gone; the record forgets it. A failure here only leaves a name in
+    /// the record, which a later delete of a missing entry clears.
+    fn forget(ledger: &Ledger, provider: &str) {
+        if let Err(error) = ledger.remove(provider) {
+            crate::diagnostics::global().log_error("credentials:ledger", &error);
+        }
     }
 
     pub fn import_keychain(
@@ -889,9 +1038,14 @@ impl Credentials {
         validate_provider(provider)?;
         let mut sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
-        let (mut conn, _lock) = match vault.connection(false) {
+        let ledger = Ledger::new(root);
+        let (mut conn, _held) = match vault.connection(false) {
             Ok(Some(open)) => open,
             Ok(None) => {
+                if ledger.contains(provider) {
+                    self.keychain.delete(provider)?;
+                    Self::forget(&ledger, provider);
+                }
                 sessions.remove(provider);
                 return Ok(());
             }
@@ -901,6 +1055,11 @@ impl Credentials {
                     code::VAULT_PERMISSIONS | code::VAULT_SCHEMA | code::VAULT_CORRUPT
                 ) =>
             {
+                // The vault cannot say what it wrote; the record outside it can.
+                if ledger.contains(provider) {
+                    self.keychain.delete(provider)?;
+                    Self::forget(&ledger, provider);
+                }
                 self.reset_locked(&mut sessions, root)?;
                 return Ok(());
             }
@@ -910,7 +1069,7 @@ impl Credentials {
             .transaction()
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot begin credential transaction"))?;
         let (known, _) = account_flags(&tx, provider)?;
-        if known || mode_of(&tx, provider)? == Mode::Keychain {
+        if known || mode_of(&tx, provider)? == Mode::Keychain || ledger.contains(provider) {
             self.keychain.delete(provider)?;
         }
         tx.execute(
@@ -923,13 +1082,15 @@ impl Credentials {
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot delete encrypted credential"))?;
         tx.commit()
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot commit credential deletion"))?;
+        Self::forget(&ledger, provider);
         sessions.remove(provider);
         Ok(())
     }
 
     /// Set the vault and its key directory aside (`*.broken-<ms>`, links are never followed) and make
     /// fresh empty ones. Nothing is read or decrypted, so it works whatever is wrong with them. The
-    /// OS keychain is not touched.
+    /// OS keychain is not touched, but what the vault says it wrote there is first copied into the
+    /// ownership record that lives outside the directories being set aside (M1).
     pub fn reset_storage(&self, root: &Path) -> Result<(), IpcError> {
         let mut sessions = lock_wait(&self.sessions)?;
         self.reset_locked(&mut sessions, root)
@@ -941,6 +1102,18 @@ impl Credentials {
         root: &Path,
     ) -> Result<(), IpcError> {
         let vault = Vault::new(root);
+        let ledger = Ledger::new(root);
+        // Best effort: a vault that cannot be read has nothing more to tell.
+        if let Ok(Some((conn, held))) = vault.connection(false) {
+            let owned = vault_owned_providers(&conn).unwrap_or_default();
+            drop(conn);
+            drop(held);
+            for provider in owned {
+                if let Err(error) = ledger.add(provider) {
+                    crate::diagnostics::global().log_error("credentials:ledger", &error);
+                }
+            }
+        }
         let stamp = now_millis();
         for dir in [&vault.root, &vault.key_dir] {
             match fs::symlink_metadata(dir) {
@@ -960,48 +1133,172 @@ impl Credentials {
         Ok(())
     }
 
-    /// App reset with "delete keys": remove the app's own keychain entries (only when the vault says
-    /// it wrote them), then the vault, the key directory and every set-aside copy. Stops before any
-    /// file is removed if a keychain entry cannot be deleted, so a retry finds the same state.
-    pub fn purge(&self, root: &Path) -> Result<(), IpcError> {
+    /// App reset with "delete keys": delete the OS entries this app created (the ownership record,
+    /// plus what a readable vault says it wrote, for installs from before the record), then the
+    /// vault, the key directory and every set-aside copy. A step that fails does not stop the
+    /// others: the answer says what is gone and what could not be confirmed. An entry whose deletion
+    /// failed stays in the record, so a retry finds it. No other keychain entry is ever touched.
+    pub fn purge(&self, root: &Path) -> Result<Purged, IpcError> {
         let mut sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
-        // An unreadable vault cannot say which keychain entries are ours, and the keychain is
-        // never touched by guesswork.
-        if let Ok(Some((conn, lock))) = vault.connection(false) {
-            for provider in PROVIDERS {
-                let (known, _) = account_flags(&conn, provider)?;
-                if known || mode_of(&conn, provider)? == Mode::Keychain {
-                    self.keychain.delete(provider)?;
+        let ledger = Ledger::new(root);
+        let mut outcome = Purged::default();
+
+        let mut owned: BTreeSet<&'static str> = BTreeSet::new();
+        let mut ledger_known = ledger.exists();
+        match ledger.providers() {
+            Ok(list) => owned.extend(list),
+            Err(error) => {
+                ledger_known = false;
+                outcome.errors.push(error.code);
+            }
+        }
+        match vault.connection(false) {
+            Ok(Some((conn, held))) => {
+                let listed = vault_owned_providers(&conn);
+                // Close the database before its directory is removed.
+                drop(conn);
+                drop(held);
+                match listed {
+                    Ok(list) => owned.extend(list),
+                    Err(_) if ledger_known => {}
+                    // The database opened but cannot say what it holds.
+                    Err(_) => outcome.keychain_unverified = true,
                 }
             }
-            // Close the database before its directory is removed.
-            drop(conn);
-            drop(lock);
+            Ok(None) => {}
+            Err(_) if ledger_known => {}
+            // Neither the record nor the vault can say what the keychain holds.
+            Err(_) => outcome.keychain_unverified = true,
         }
-        let mut targets = vec![vault.root.clone(), vault.key_dir.clone()];
-        if let Some(parent) = vault.root.parent() {
-            if let Ok(entries) = fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("credentials.broken-")
-                        || name.starts_with("credential-key.broken-")
-                    {
-                        targets.push(entry.path());
+        for provider in owned {
+            match self.keychain.delete(provider) {
+                Ok(()) => {
+                    outcome.keychain_deleted.push(provider);
+                    if let Err(error) = ledger.remove(provider) {
+                        outcome.errors.push(error.code);
                     }
                 }
+                Err(error) => outcome.keychain_failed.push((provider, error.code)),
             }
         }
+
+        let mut targets = vec![vault.root.clone(), vault.key_dir.clone()];
+        let mut listed = true;
+        if let Some(parent) = vault.root.parent() {
+            match fs::read_dir(parent) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let Ok(entry) = entry else {
+                            listed = false;
+                            continue;
+                        };
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("credentials.broken-")
+                            || name.starts_with("credential-key.broken-")
+                        {
+                            targets.push(entry.path());
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => listed = false,
+            }
+        }
+        outcome.files_removed = listed;
+        if !listed {
+            outcome.errors.push(code::VAULT_IO);
+        }
         for target in targets {
-            remove_path(&target)?;
+            if let Err(error) = remove_path(&target) {
+                outcome.files_removed = false;
+                outcome.errors.push(error.code);
+            }
+        }
+        // The record goes with the keys only when every entry it listed is gone.
+        if outcome.keychain_failed.is_empty() && !outcome.keychain_unverified {
+            if let Err(error) = ledger.remove_files() {
+                outcome.errors.push(error.code);
+            }
         }
         sessions.clear();
         if let Ok(mut known) = lock_wait(&self.known_modes) {
             known.clear();
         }
-        Ok(())
+        outcome.errors.dedup();
+        Ok(outcome)
     }
+}
+
+/// What a purge removed and what it could not confirm.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Purged {
+    /// OS credential entries confirmed deleted.
+    pub keychain_deleted: Vec<&'static str>,
+    /// Entries whose deletion failed, with the reason; they stay in the ownership record.
+    pub keychain_failed: Vec<(&'static str, &'static str)>,
+    /// Neither the ownership record nor the vault could say which OS entries exist, so none could
+    /// be checked.
+    pub keychain_unverified: bool,
+    /// The vault, the key directory and every set-aside copy are gone.
+    pub files_removed: bool,
+    /// Codes of failures other than a failed entry deletion.
+    pub errors: Vec<&'static str>,
+}
+
+impl Purged {
+    /// Every store was emptied and confirmed.
+    pub fn complete(&self) -> bool {
+        self.keychain_failed.is_empty()
+            && !self.keychain_unverified
+            && self.files_removed
+            && self.errors.is_empty()
+    }
+}
+
+/// The providers whose OS entry the vault says this app wrote. A vault that cannot be read is an
+/// error, never an empty answer.
+fn vault_owned_providers(conn: &Connection) -> Result<Vec<&'static str>, IpcError> {
+    let mut owned = Vec::new();
+    for provider in PROVIDERS.iter().copied() {
+        let (known, _) = account_flags(conn, provider)?;
+        if known || mode_of(conn, provider)? == Mode::Keychain {
+            owned.push(provider);
+        }
+    }
+    Ok(owned)
+}
+
+/// The static name of a provider that passed `validate_provider`.
+fn provider_name(provider: &str) -> &'static str {
+    PROVIDERS
+        .iter()
+        .copied()
+        .find(|known| *known == provider)
+        .unwrap_or("")
+}
+
+/// Test-only: credentials on an in-memory keychain that the test can look into and make fail.
+#[cfg(test)]
+pub(crate) fn with_fake_keychain() -> (Credentials, std::sync::Arc<keychain::fake::FakeKeychain>) {
+    struct Shared(std::sync::Arc<keychain::fake::FakeKeychain>);
+    impl KeychainStore for Shared {
+        fn get(&self, provider: &str) -> Result<Option<Zeroizing<String>>, IpcError> {
+            self.0.get(provider)
+        }
+        fn set(&self, provider: &str, secret: &str) -> Result<(), IpcError> {
+            self.0.set(provider, secret)
+        }
+        fn delete(&self, provider: &str) -> Result<(), IpcError> {
+            self.0.delete(provider)
+        }
+    }
+    let fake = std::sync::Arc::new(keychain::fake::FakeKeychain::default());
+    (
+        Credentials::with_keychain(Box::new(Shared(fake.clone()))),
+        fake,
+    )
 }
 
 #[cfg(test)]
