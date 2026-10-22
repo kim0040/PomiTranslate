@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from mwt import backup_admin, safety  # noqa: E402
+from mwt import backup_admin, journal as journal_module, safety  # noqa: E402
 from mwt.backup_admin import BackupAdminError, backup_usage, delete_backup, last_copy_ids, plan_prune, prune_backups  # noqa: E402
 from mwt.locking import MinecraftSessionLocks, WorldWriteLock  # noqa: E402
 from mwt.safety import BackupSet, backup_store, legacy_backup_store, list_backup_sets  # noqa: E402
@@ -78,22 +78,12 @@ def request(world: Path, backup_id: str, **extra) -> dict:
     return {"worldDir": str(world), "backupSetId": backup_id, **extra}
 
 
-@contextmanager
-def journal(states: dict[str, object]):
-    """Make list_backup_sets report journalState, the way the journal change will."""
-    original = safety.list_backup_sets
-
-    def wrapped(world_dir, stores=None):
-        rows = original(world_dir, stores)
-        for row in rows:
-            row["journalState"] = states.get(row["backupSetId"])
-        return rows
-
-    safety.list_backup_sets = wrapped
-    try:
-        yield
-    finally:
-        safety.list_backup_sets = original
+def write_journal(world: Path, store: Path, backup_id: str, state: str, *, settled: bool | None = None) -> Path:
+    """A real recovery record inside a backup set (the set id is the job id), in the given state."""
+    path = store / backup_id / journal_module.JOURNAL_NAME
+    record = journal_module.Journal.create(path, job_id=backup_id, kind="translate", world_dir=world)
+    record.set_state(state, settled=settled)
+    return path
 
 
 def listing(*rows: tuple[str, str, str, object]) -> list[dict]:
@@ -273,25 +263,53 @@ def test_last_copy_refused_then_acknowledged(tmp: Path) -> None:
     assert ids(store) == {old, recovery}
 
 
-def test_journal_protected_set(tmp: Path) -> None:
+def test_unsettled_journal_protects_the_set(tmp: Path) -> None:
     world, data = make_world(tmp, "journal")
     store = backup_store(world, data)
     needed = make_set(world, store, "translation", 1)
     done = make_set(world, store, "translation", 2)
-    middle = make_set(world, store, "translation", 3)
+    kept = make_set(world, store, "translation", 3)
     newest = make_set(world, store, "translation", 4)
-    states = {needed: "restoring", done: "completed", middle: "kept", newest: "rolled_back"}
-    with journal(states):
-        exc = raises(BackupAdminError, delete_backup, request(world, needed, acknowledgeLastCopy=True), data)
-        assert exc.code == "BACKUP_NEEDED_FOR_RECOVERY"
-        result = prune_backups({"worldDir": str(world), "keepLatest": 1}, data)
-        assert result["deleted"] == [middle, done]
-        assert result["skipped"] == [{"backupSetId": needed, "reason": "recovery-needed"}]
-        assert result["kept"] == 2 and result["failed"] == []
-        assert ids(store) == {needed, newest}
+    write_journal(world, store, needed, "committing")
+    write_journal(world, store, done, "committed")
+    write_journal(world, store, kept, "partial", settled=True)  # closed by "keep what was written"
+    write_journal(world, store, newest, "rolled_back")
+    assert journal_module.journal_state_of_set(store / needed) == "committing"
+    exc = raises(BackupAdminError, delete_backup, request(world, needed, acknowledgeLastCopy=True), data)
+    assert exc.code == "BACKUP_IN_USE_BY_RECOVERY"
+    assert needed in ids(store)
+    result = prune_backups({"worldDir": str(world), "keepLatest": 1}, data)
+    assert result["deleted"] == [kept, done]
+    assert result["skipped"] == [{"backupSetId": needed, "reason": "recovery-needed"}]
+    assert result["kept"] == 2 and result["failed"] == []
+    assert ids(store) == {needed, newest}
+    # A job continued later reopens its record: it is protected again.
+    write_journal(world, store, newest, "partial")
+    assert raises(BackupAdminError, delete_backup, request(world, newest, acknowledgeLastCopy=True), data).code == "BACKUP_IN_USE_BY_RECOVERY"
     # Once the journal says it finished, it can go.
-    with journal({needed: "completed"}):
-        assert delete_backup(request(world, needed), data)["deleted"] is True
+    write_journal(world, store, needed, "committed")
+    assert delete_backup(request(world, needed), data)["deleted"] is True
+
+
+def test_damaged_journal_is_never_deleted(tmp: Path) -> None:
+    world, data = make_world(tmp, "damaged")
+    store = backup_store(world, data)
+    first = make_set(world, store, "translation", 1)
+    second = make_set(world, store, "translation", 2)
+    (store / first / journal_module.JOURNAL_NAME).write_text("{ not json", encoding="utf-8")
+    assert journal_module.journal_state_of_set(store / first) == "invalid"
+    exc = raises(BackupAdminError, delete_backup, request(world, first, acknowledgeLastCopy=True), data)
+    assert exc.code == "BACKUP_IN_USE_BY_RECOVERY"
+    result = prune_backups({"worldDir": str(world), "keepLatest": 1}, data)
+    assert result["deleted"] == [] and ids(store) == {first, second}
+
+
+def test_without_a_journal_module_the_listing_state_decides(tmp: Path) -> None:
+    rows = listing(("a", "translation", "2026-01-01", "committing"), ("b", "translation", "2026-01-02", "committed"))
+    assert backup_admin._protected(rows, None) == {"a": "recovery-needed"}
+    assert backup_admin._protected(rows, set()) == {}  # the journal module is authoritative when present
+    assert backup_admin._protected(rows, {"b"}) == {"b": "recovery-needed"}
+    assert plan_prune(rows, 1, {"a"}) == ([], [{"backupSetId": "a", "reason": "recovery-needed"}])
 
 
 def test_prune(tmp: Path) -> None:
@@ -425,7 +443,7 @@ def test_usage(tmp: Path) -> None:
 
 def test_error_codes(tmp: Path) -> None:
     assert set(backup_admin.ERROR_CODES) == {
-        "BACKUP_NOT_FOUND", "WORLD_LOCKED", "BACKUP_NEEDED_FOR_RECOVERY", "BACKUP_LAST_COPY", "BACKUP_DELETE_FAILED"}
+        "BACKUP_NOT_FOUND", "WORLD_LOCKED", "BACKUP_IN_USE_BY_RECOVERY", "BACKUP_LAST_COPY", "BACKUP_DELETE_FAILED"}
     error = BackupAdminError("BACKUP_NOT_FOUND", "gone")
     assert (error.code, error.message, error.recoverable) == ("BACKUP_NOT_FOUND", "gone", True)
 
@@ -437,7 +455,9 @@ TESTS = [
     test_odd_ids_rejected,
     test_world_lock_blocks_delete,
     test_last_copy_refused_then_acknowledged,
-    test_journal_protected_set,
+    test_unsettled_journal_protects_the_set,
+    test_damaged_journal_is_never_deleted,
+    test_without_a_journal_module_the_listing_state_decides,
     test_prune,
     test_latest_pointer,
     test_stale_deleting_dirs_are_swept,

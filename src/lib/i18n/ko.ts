@@ -1002,7 +1002,6 @@ export const ko = {
   "error.PLAN_NOT_FOUND": "이 스캔 기록을 찾을 수 없습니다. 월드를 다시 스캔해 주세요.",
   "error.BACKUP_NOT_FOUND": "백업을 찾을 수 없습니다. 백업 목록을 새로 불러와 주세요.",
   "error.BACKUP_LAST_COPY": "이 백업은 월드의 마지막 복구용 사본입니다. 삭제하려면 확인란에 동의해 주세요.",
-  "error.BACKUP_NEEDED_FOR_RECOVERY": "중단된 작업의 복구에 필요한 백업이라 삭제할 수 없습니다. 먼저 월드 화면에서 중단된 작업을 처리해 주세요.",
   "error.BACKUP_DELETE_FAILED": "백업을 삭제하지 못했습니다. 파일이 다른 프로그램에서 열려 있지 않은지 확인해 주세요.",
   "result.toInterrupted": "중단된 작업 확인",
   "error.RECOVERY_REQUIRED": "이 월드에 끝나지 않은 작업이 있어 번역을 시작하지 않았습니다. 월드 화면의 ‘중단된 작업’에서 되돌릴지 유지할지 먼저 정해 주세요.",

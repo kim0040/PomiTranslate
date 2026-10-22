@@ -1001,7 +1001,6 @@ export const ja: Record<MessageKey, string> = {
   "error.PLAN_NOT_FOUND": "このスキャン記録が見つかりません。ワールドを再スキャンしてください。",
   "error.BACKUP_NOT_FOUND": "バックアップが見つかりません。バックアップ一覧を再読み込みしてください。",
   "error.BACKUP_LAST_COPY": "このバックアップはワールド最後の復旧用コピーです。削除するには確認欄にチェックを入れてください。",
-  "error.BACKUP_NEEDED_FOR_RECOVERY": "中断された作業の復旧に必要なバックアップのため削除できません。先にワールド画面で中断された作業に対応してください。",
   "error.BACKUP_DELETE_FAILED": "バックアップを削除できませんでした。ほかのプログラムでファイルが開かれていないか確認してください。",
   "result.toInterrupted": "中断された作業を確認",
   "error.RECOVERY_REQUIRED": "このワールドには未完了の作業があるため、翻訳を開始しませんでした。ワールド画面の「中断された作業」で、元に戻すか維持するかを先に決めてください。",

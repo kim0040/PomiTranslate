@@ -1001,7 +1001,6 @@ export const en: Record<MessageKey, string> = {
   "error.PLAN_NOT_FOUND": "This scan record was not found. Scan the world again.",
   "error.BACKUP_NOT_FOUND": "The backup was not found. Reload the backup list.",
   "error.BACKUP_LAST_COPY": "This backup is the last recovery copy of the world. To delete it, tick the confirmation box.",
-  "error.BACKUP_NEEDED_FOR_RECOVERY": "This backup is needed to recover interrupted work, so it cannot be deleted. Handle the interrupted work on the World screen first.",
   "error.BACKUP_DELETE_FAILED": "The backup could not be deleted. Check that no other program has the files open.",
   "result.toInterrupted": "Review interrupted work",
   "error.RECOVERY_REQUIRED": "This world has unfinished work, so translation did not start. On the World screen, open “Interrupted work” and decide whether to undo or keep it first.",

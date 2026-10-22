@@ -261,7 +261,7 @@
       const index = backups.findIndex((item) => item.backupSetId === body.backupSetId);
       const fail = (code) => ({ v: 1, id: request.id, type: 'response.error', error: { code, message: 'raw core message' } });
       if (index < 0) return fail('BACKUP_NOT_FOUND');
-      if (backups[index].journalState === 'unfinished') return fail('BACKUP_NEEDED_FOR_RECOVERY');
+      if (backups[index].journalState === 'unfinished') return fail('BACKUP_IN_USE_BY_RECOVERY');
       if (lastCopyIds().includes(body.backupSetId) && !body.acknowledgeLastCopy) return fail('BACKUP_LAST_COPY');
       const [gone] = backups.splice(index, 1);
       (window.__pomiDeleted ||= []).push(gone.backupSetId);

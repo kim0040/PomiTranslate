@@ -11,10 +11,11 @@ Backups are the only way back for a world, so everything here is conservative:
 * The last copy rule: the newest "translation" set with no newer "recovery" set is the only way
   back to the pre-translation world. Deleting it needs ``acknowledgeLastCopy``; prune never
   deletes it.
-* Assumption (the journal change adds it, names to be aligned at merge): ``list_backup_sets``
-  rows may carry ``journalState`` (None or missing for legacy sets). A set with a state other
-  than completed / rolled_back / kept belongs to an unfinished job or restore and is never
-  deleted or pruned.
+* A set whose journal is unsettled belongs to an unfinished job or restore and is never deleted
+  or pruned (``BACKUP_IN_USE_BY_RECOVERY``). The authority is ``mwt.journal.unsettled_for_world``
+  (a job's backup set has the job's id); a damaged journal (``journalState == "invalid"``) is
+  treated as unsettled. Without ``mwt.journal`` (a core older than the journal change) the
+  ``journalState`` of the listing rows decides: anything but committed / rolled_back is in use.
 
 A delete renames ``<id>`` to ``<id>.deleting-<hex>`` first and removes that folder second, so a
 crash or a locked file never leaves half a set that still looks usable. Leftover ``*.deleting-*``
@@ -42,13 +43,13 @@ from mwt.locking import WorldWriteLock, WorldWriteLocked
 ERROR_CODES = (
     "BACKUP_NOT_FOUND",
     "WORLD_LOCKED",
-    "BACKUP_NEEDED_FOR_RECOVERY",
+    "BACKUP_IN_USE_BY_RECOVERY",
     "BACKUP_LAST_COPY",
     "BACKUP_DELETE_FAILED",
 )
 
 LOCATIONS = ("app", "world")
-JOURNAL_FINISHED_STATES = frozenset({"completed", "rolled_back", "kept"})
+JOURNAL_FINISHED_STATES = frozenset({"committed", "rolled_back", "completed", "kept"})
 MAX_KEEP_LATEST = 1000
 MAX_USAGE_MANIFESTS = 5000
 MAX_USAGE_MANIFEST_BYTES = 64 * 1024 * 1024
@@ -89,20 +90,47 @@ def last_copy_ids(listed: list[dict]) -> set[str]:
     return {str(newest["backupSetId"])}
 
 
-def _protected(listed: list[dict]) -> dict[str, str]:
-    """Set id -> reason, for sets an unfinished job or restore may still need."""
+def _protected(listed: list[dict], unsettled: "set[str] | None" = None) -> dict[str, str]:
+    """Set id -> reason, for sets an unfinished job or restore may still need.
+
+    ``unsettled`` is the set of job ids the journal module reports as unsettled; None means the
+    module is not there and the listing's ``journalState`` decides.
+    """
     result: dict[str, str] = {}
     for item in listed:
+        backup_id = item.get("backupSetId")
+        if not backup_id:
+            continue
         state = item.get("journalState")
-        if state is not None and state not in JOURNAL_FINISHED_STATES and item.get("backupSetId"):
-            result[str(item["backupSetId"])] = "recovery-needed"
+        if state == "invalid":
+            result[str(backup_id)] = "recovery-needed"
+        elif unsettled is not None:
+            if str(backup_id) in unsettled:
+                result[str(backup_id)] = "recovery-needed"
+        elif state is not None and state not in JOURNAL_FINISHED_STATES:
+            result[str(backup_id)] = "recovery-needed"
     return result
 
 
-def plan_prune(listed: list[dict], keep_latest: int) -> tuple[list[str], list[dict]]:
+def _unsettled_jobs(world: Path, store: Path) -> "set[str] | None":
+    """Ids of the world's unsettled jobs, or None when this core has no journal module."""
+    try:
+        from mwt.journal import unsettled_for_world
+    except ImportError:
+        return None
+    try:
+        return {str(item["jobId"]) for item in unsettled_for_world(world, [store])}
+    except OSError as exc:
+        # Not knowing is not permission: refuse rather than delete a set a recovery may need.
+        raise BackupAdminError(
+            "BACKUP_IN_USE_BY_RECOVERY", f"The recovery records could not be read, so nothing was deleted: {exc.strerror or exc}"
+        ) from exc
+
+
+def plan_prune(listed: list[dict], keep_latest: int, unsettled: "set[str] | None" = None) -> tuple[list[str], list[dict]]:
     """(ids to delete, skipped rows) for a prune that keeps the newest ``keep_latest`` sets."""
     ordered = sorted(listed, key=_order_key, reverse=True)
-    protected = _protected(listed)
+    protected = _protected(listed, unsettled)
     last_copies = last_copy_ids(listed)
     doomed: list[str] = []
     skipped: list[dict] = []
@@ -279,10 +307,10 @@ def delete_backup(payload: dict, data_dir: Path) -> dict:
         _set_dir(store, backup_id)  # not found before anything else is decided
         _sweep_stale(store)
         listed = _listed(world, store)
-        protected = _protected(listed)
+        protected = _protected(listed, _unsettled_jobs(world, store))
         if backup_id in protected:
             raise BackupAdminError(
-                "BACKUP_NEEDED_FOR_RECOVERY",
+                "BACKUP_IN_USE_BY_RECOVERY",
                 "This backup belongs to an unfinished translation or restore and is needed to recover the world.",
             )
         if backup_id in last_copy_ids(listed) and not acknowledged:
@@ -308,7 +336,7 @@ def prune_backups(payload: dict, data_dir: Path) -> dict:
     with _world_guard(world):
         _sweep_stale(store)
         listed = _listed(world, store)
-        doomed, skipped = plan_prune(listed, keep)
+        doomed, skipped = plan_prune(listed, keep, _unsettled_jobs(world, store))
         for backup_id in doomed:
             try:
                 freed += _delete_core(store, backup_id, listed)
