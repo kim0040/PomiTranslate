@@ -58,6 +58,8 @@ const PYTHON_TESTS = [
   ['Review follow-ups for write reporting, layout gate, locks and diagnostics', 'tests/test_review_a_followups.py'],
   ['Review drafts survive restarts and stay bounded', 'tests/test_review_drafts.py'],
   ['Backup deletion and pruning respect locks, last copies and open recoveries', 'tests/test_backup_admin.py'],
+  ['Journal review fixes: one reconciliation gate, verify-only keep, identity checks', 'tests/test_journal_review.py'],
+  ['Real process kills at every write and recovery boundary', 'tests/test_journal_kill.py'],
 ];
 
 const GROUPS = ['python', 'frontend', 'rust'];

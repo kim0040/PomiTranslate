@@ -78,11 +78,11 @@ def request(world: Path, backup_id: str, **extra) -> dict:
     return {"worldDir": str(world), "backupSetId": backup_id, **extra}
 
 
-def write_journal(world: Path, store: Path, backup_id: str, state: str, *, settled: bool | None = None) -> Path:
+def write_journal(world: Path, store: Path, backup_id: str, state: str) -> Path:
     """A real recovery record inside a backup set (the set id is the job id), in the given state."""
     path = store / backup_id / journal_module.JOURNAL_NAME
     record = journal_module.Journal.create(path, job_id=backup_id, kind="translate", world_dir=world)
-    record.set_state(state, settled=settled)
+    record.set_state(state)
     return path
 
 
@@ -274,7 +274,7 @@ def test_unsettled_journal_protects_the_set(tmp: Path) -> None:
     newest = make_set(world, store, "translation", 4)
     write_journal(world, store, needed, "committing")
     write_journal(world, store, done, "committed")
-    write_journal(world, store, kept, "partial", settled=True)  # closed by "keep what was written"
+    write_journal(world, store, kept, "kept")  # closed by "keep what was written"
     write_journal(world, store, newest, "rolled_back")
     assert journal_module.journal_state_of_set(store / needed) == "committing"
     exc = raises(BackupAdminError, delete_backup, request(world, needed, acknowledgeLastCopy=True), data)
