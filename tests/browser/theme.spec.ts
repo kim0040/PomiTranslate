@@ -99,6 +99,9 @@ test('every screen passes contrast checks in dark mode', async ({ page }) => {
     await page.getByRole('button', { name, exact: true }).click();
     expect((await new AxeBuilder({ page }).analyze()).violations, name).toEqual([]);
   }
-  // One lockup in both themes (it used to be a different, smaller text mark in dark).
-  await expect(page.getByRole('img', { name: 'PomiTranslate' }).first()).toBeVisible();
+  // The About hero's lockup is an SVG that recolours with the theme: its ink must be light on the dark surface.
+  const lockup = page.locator('.about .hero h1 svg');
+  await expect(lockup).toBeVisible();
+  const ink = await lockup.evaluate((el) => getComputedStyle(el).color.match(/\d+/g)!.slice(0, 3).map(Number));
+  expect(Math.min(...ink)).toBeGreaterThan(180);
 });
