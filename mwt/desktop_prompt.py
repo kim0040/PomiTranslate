@@ -16,7 +16,7 @@ MAX_TARGET_LANGUAGE_CHARS = 256
 MAX_STYLE_PROMPT_CHARS = 8_000
 MAX_CUSTOM_SYSTEM_PROMPT_CHARS = 8_000
 
-_EMPTY_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "cost_reported": False}
+_EMPTY_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "cost_reported": False, "requests": 0}
 
 
 def _draft_string(body: dict[str, Any], key: str, maximum: int, *, required: bool = False) -> str:
