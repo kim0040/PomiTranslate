@@ -1,7 +1,11 @@
 import type { ProgressEvent } from './api';
 
+/** The last few sentences a run translated, newest last, for the live feed on the run screen. */
+export const SAMPLE_LIMIT = 5;
+export type ProgressSample = { source: string; translated: string };
+
 export type JobProgress = {
-  phase: 'idle' | 'collect' | 'translate' | 'write';
+  phase: 'idle' | 'collect' | 'translate' | 'write' | 'recovery';
   fileIndex: number;
   fileTotal: number;
   done: number;
@@ -11,20 +15,35 @@ export type JobProgress = {
   batches: number;
   requests: number;
   requestsEstimate: number;
-  retry: { attempt: number; max: number } | null;
+  retry: { attempt: number; max: number; code?: string } | null;
   startedAt: number;
+  /** When sentences started going to the provider; the ETA is measured from here. */
+  translateStartedAt: number;
+  /** The file being read or written right now, as the core named it. */
+  currentFile: string;
+  samples: ProgressSample[];
+  /** Money spent so far, when the core reports it. */
+  cost: number | null;
 };
 
 export function emptyProgress(): JobProgress {
   return {
     phase: 'idle', fileIndex: 0, fileTotal: 0, done: 0, total: 0, failed: 0, batch: 0, batches: 0,
-    requests: 0, requestsEstimate: 0, retry: null, startedAt: 0
+    requests: 0, requestsEstimate: 0, retry: null, startedAt: 0,
+    translateStartedAt: 0, currentFile: '', samples: [], cost: null
   };
 }
 
 /** Convert sidecar event names into the small set of phases the interface explains to people. */
-export function reduceProgress(current: JobProgress, event: ProgressEvent): JobProgress {
+export function reduceProgress(current: JobProgress, event: ProgressEvent, now: number = Date.now()): JobProgress {
   const next = { ...current };
+  // A recovery run reports {phase: 'recovery', done, total} under whatever event name the core chose.
+  if (event.phase === 'recovery') {
+    next.phase = 'recovery';
+    next.done = event.done ?? event.completed ?? next.done;
+    next.total = event.total ?? next.total;
+    return next;
+  }
   switch (event.event) {
     case 'scan_start':
       next.phase = 'collect';
@@ -36,10 +55,12 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent): JobP
       else if (next.phase === 'idle') next.phase = 'collect';
       next.fileIndex = event.index ?? next.fileIndex;
       next.fileTotal = event.total ?? next.fileTotal;
+      if (event.file) next.currentFile = event.file;
       break;
     case 'phase_start':
       if (event.phase === 'translate') {
         next.phase = 'translate';
+        next.translateStartedAt = now;
         next.total = event.total ?? 0;
         next.done = 0;
         next.requestsEstimate = event.requests_estimate ?? 0;
@@ -58,9 +79,17 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent): JobP
       next.batches = event.batches ?? next.batches;
       next.requests = event.requests ?? next.requests;
       next.retry = null;
+      if (!next.translateStartedAt) next.translateStartedAt = now;
+      if (typeof event.cost === 'number' && Number.isFinite(event.cost) && event.cost >= 0) next.cost = event.cost;
+      if (event.samples?.length) {
+        const fresh = event.samples.filter((item) => typeof item?.source === 'string' && typeof item?.translated === 'string');
+        next.samples = [...next.samples, ...fresh].slice(-SAMPLE_LIMIT);
+      } else if (typeof event.source === 'string' && typeof event.translated === 'string') {
+        next.samples = [...next.samples, { source: event.source, translated: event.translated }].slice(-SAMPLE_LIMIT);
+      }
       break;
     case 'translation_batch_error':
-      next.retry = { attempt: event.attempt ?? 1, max: event.max_attempts ?? 1 };
+      next.retry = { attempt: event.attempt ?? 1, max: event.max_attempts ?? 1, code: event.failure ?? event.code };
       break;
     case 'translation_batch_done':
       next.retry = null;
@@ -92,4 +121,27 @@ export function resultPresentation(status: string): ResultPresentation {
     default:
       return { status: 'failed', tone: 'danger', showReason: true };
   }
+}
+
+/** Share of the work done, 0-100, or null when the total is not known yet. */
+export function percentDone(progress: JobProgress): number | null {
+  if (progress.phase === 'translate' || progress.phase === 'recovery') return progress.total > 0 ? (progress.done / progress.total) * 100 : null;
+  return progress.fileTotal > 0 ? (progress.fileIndex / progress.fileTotal) * 100 : null;
+}
+
+/**
+ * Seconds left, from the pace of the sentences finished so far. Silent until 5% is done: before
+ * that the pace is mostly the first request's latency and the guess would swing wildly.
+ */
+export function remainingSeconds(progress: JobProgress, now: number): number | null {
+  if (progress.phase !== 'translate' || progress.total <= 0 || !progress.translateStartedAt) return null;
+  if (progress.done / progress.total <= 0.05 || progress.done >= progress.total) return null;
+  const elapsed = (now - progress.translateStartedAt) / 1000;
+  if (elapsed <= 0) return null;
+  return (elapsed / progress.done) * (progress.total - progress.done);
+}
+
+/** The announcement tier: 0, 10, 20 ... so a screen reader hears milestones, not every sentence. */
+export function milestone(percent: number | null): number | null {
+  return percent === null ? null : Math.min(100, Math.floor(percent / 10) * 10);
 }

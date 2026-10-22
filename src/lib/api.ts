@@ -79,6 +79,61 @@ export type BackupSummary = {
   kind?: 'translation' | 'recovery';
   sizeBytes?: number;
   inWorldFolder?: boolean;
+  /** State of the write journal that belongs to this set; null for sets made before journals existed. */
+  journalState?: string | null;
+  /** True for sets made before journals existed: their integrity was never recorded. */
+  legacy?: boolean;
+};
+
+/** How much disk the app's backups use. Optional: an older core does not send it. */
+export type BackupUsage = {
+  worldBytes: number;
+  worldCount: number;
+  appBytes: number;
+  appBytesApproximate?: boolean;
+  /** Sets that are the only way back for a translation that was never restored. */
+  lastCopyIds?: string[];
+};
+
+export type BackupsListPayload = { backups: BackupSummary[]; usage?: BackupUsage };
+export type BackupLocation = 'app' | 'world';
+
+/** A review in progress: who is excluded and what was typed by hand. Kept per scan plan. */
+export type ReviewDraft = {
+  scanPlanId: string;
+  exists: boolean;
+  savedAt: number;
+  excludedCandidateIds: string[];
+  candidateOverrides: Record<string, string>;
+};
+
+/** Work a previous run left half done, found when the app starts. */
+export type InterruptedJob = {
+  jobId: string;
+  kind: 'translate' | 'restore' | 'recovery';
+  worldPath: string;
+  worldName: string;
+  createdAt: string;
+  unitsTotal: number;
+  unitsVerified: number;
+  unitsUnknown: number;
+  needsAttention: boolean;
+  legacy: false;
+  /** Where the job stopped. `partial` means some files were written and some failed. */
+  state?: 'preparing' | 'prepared' | 'committing' | 'partial' | 'recovery_conflict' | 'recovering' | 'failed' | string;
+  /** True while this job holds back new translations and restores of its world. */
+  blocking?: boolean;
+};
+
+export type RecoveryConflict = { path: string; rootKind: 'world' | 'external_pack'; code: 'RECOVERY_CONFLICT' | 'MISSING' | 'UNREADABLE' | 'UNIT_INCONSISTENT' | string };
+export type RecoveryResult = {
+  jobId: string;
+  mode: 'rollback' | 'keep';
+  state: 'rolled_back' | 'kept' | 'recovery_conflict' | 'partial' | string;
+  restoredFiles: number;
+  keptFiles: number;
+  conflicts: RecoveryConflict[];
+  quarantineDir: string | null;
 };
 
 export type CandidateLocation = {
@@ -152,6 +207,10 @@ export type CandidateQuery = {
   overrideCandidateIds?: string[];
 };
 
+/** Why one sentence could not be translated; the raw provider text stays in the exported report only. */
+export type FailureCode = 'timeout' | 'auth' | 'rate_limit' | 'quota' | 'bad_request' | 'unsupported_model' |
+  'format_mismatch' | 'provider_unavailable' | 'cancelled' | 'other';
+
 export type TranslationStats = { unique: number; translated: number; failed: number; kept_original: number; unchanged: number };
 
 export type TranslationResult = {
@@ -163,10 +222,11 @@ export type TranslationResult = {
   errors?: { scope?: string; code?: string; message?: string; file?: string }[];
   warnings?: BackendWarning[];
   translation?: Partial<TranslationStats>;
-  translationFailures?: { source: string; reason: string }[];
+  translationFailures?: { source: string; reason: string; code?: FailureCode }[];
+  translationFailureCodes?: Partial<Record<FailureCode, number>>;
   translationSamples?: { source: string; translated: string }[];
   keptOriginalSamples?: string[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean };
+  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean; adapted_parameters?: string[] };
 };
 
 export type ResumeStatus = {
@@ -208,6 +268,8 @@ export type BootstrapPayload = {
   worldInspection: WorldInspection | null;
   backups: BackupSummary[];
   resume: ResumeStatus;
+  /** Absent from an older core: treated as none. */
+  interruptedJobs?: InterruptedJob[];
 };
 
 export type ProviderUsage = {
@@ -227,7 +289,14 @@ export type ModelInfo = {
 
 export type ProgressEvent = {
   event: string;
-  phase?: 'collect' | 'translate' | 'write';
+  phase?: 'collect' | 'translate' | 'write' | 'recovery';
+  done?: number;
+  /** A translated sentence, for the live sample list. */
+  source?: string;
+  translated?: string;
+  samples?: { source: string; translated: string }[];
+  failure?: string;
+  cost?: number;
   index?: number;
   total?: number;
   total_files?: number;
@@ -294,7 +363,36 @@ let serial = 0;
 // cannot race the cleanup of the preceding sidecar process.
 let backendQueue: Promise<void> = Promise.resolve();
 
-export function callBackend<T>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
+/**
+ * How long a read-only call may take before the page gives up on it. Long jobs (scan, translate,
+ * restore, recovery) have no limit here: the shell and the job's own cancel own those. A call that
+ * hits its limit rejects with DEADLINE and stops holding the queue, so one hung request (a model
+ * list from a black-holed endpoint) cannot freeze paging, estimates and backups behind it.
+ */
+export const CALL_DEADLINES_MS: Record<string, number> = {
+  'models.list': 60_000,
+  'estimate.get': 30_000,
+  'candidates.page': 30_000,
+  'backups.list': 30_000,
+  'worlds.discover': 30_000,
+  'world.inspect': 30_000,
+  'resume.status': 30_000,
+  'review.draft.get': 20_000,
+  'review.draft.set': 20_000,
+  'review.draft.clear': 20_000
+};
+
+function withDeadline<T>(call: Promise<T>, limitMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new BackendError('The translation core did not answer in time.', 'DEADLINE', '', 'shell')), limitMs);
+    call.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (cause) => { clearTimeout(timer); reject(cause); }
+    );
+  });
+}
+
+export function callBackend<T>(type: string, payload: Record<string, unknown> = {}, options: { timeoutMs?: number } = {}): Promise<T> {
   const run = async (): Promise<T> => {
     serial += 1;
     const id = `ui-${Date.now()}-${serial}`;
@@ -319,7 +417,9 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
     return response.payload;
   };
 
-  const result = backendQueue.then(run);
+  const limit = options.timeoutMs ?? CALL_DEADLINES_MS[type] ?? 0;
+  // The deadline starts when the call reaches the front of the queue, not when it was asked for.
+  const result = backendQueue.then(() => (limit > 0 ? withDeadline(run(), limit) : run()));
   backendQueue = result.then(() => undefined, () => undefined);
   return result;
 }

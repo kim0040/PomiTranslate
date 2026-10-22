@@ -23,14 +23,19 @@ export class CandidateSource {
   version = $state(0);
 
   private pages = new Map<number, Candidate[]>();
+  /** Rows from before the last refresh, shown until their fresh page arrives so the list never empties. */
+  private stale = new Map<number, Candidate[]>();
   private inflight = new Map<number, Promise<void>>();
   private token = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private scanPlanId = '';
   private ids: () => { excluded: string[]; manual: string[] };
+  private describe: (cause: unknown) => string;
 
-  constructor(ids: () => { excluded: string[]; manual: string[] }) {
+  /** `describe` turns a failure into text in the display language; the raw message is never kept. */
+  constructor(ids: () => { excluded: string[]; manual: string[] }, describe: (cause: unknown) => string = () => '') {
     this.ids = ids;
+    this.describe = describe;
   }
 
   get filtered(): boolean {
@@ -42,6 +47,7 @@ export class CandidateSource {
     this.scanPlanId = scanPlanId;
     this.token += 1;
     this.pages.clear();
+    this.stale.clear();
     this.inflight.clear();
     this.error = '';
     this.kinds = {};
@@ -56,10 +62,25 @@ export class CandidateSource {
     this.ensure(0, Math.min(PAGE_SIZE, Math.max(this.total, 1)), !!seed);
   }
 
+  /**
+   * Reload what is on screen without emptying it. Rows and the total stay until the fresh pages
+   * arrive, so toggling a sentence in a filtered list does not collapse the list or move the scroll.
+   */
+  refresh(): void {
+    if (!this.scanPlanId) return;
+    this.token += 1;
+    this.inflight.clear();
+    this.error = '';
+    const shown = [...this.pages.keys()];
+    for (const [page, rows] of this.pages) this.stale.set(page, rows);
+    this.pages.clear();
+    for (const page of shown.length ? shown : [0]) this.ensure(page * PAGE_SIZE, page * PAGE_SIZE + 1, true);
+  }
+
   /** Re-run the query after a short pause, so typing does not send a request per key. */
   refetchSoon(delay = 200): void {
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.reset(), delay);
+    this.timer = setTimeout(() => this.refresh(), delay);
   }
 
   rowAt(index: number): Candidate | undefined {
@@ -70,7 +91,7 @@ export class CandidateSource {
       this.pages.delete(page);
       this.pages.set(page, rows); // most recently used, without creating reactive row copies
     }
-    return rows?.[index % PAGE_SIZE];
+    return (rows ?? this.stale.get(page))?.[index % PAGE_SIZE];
   }
 
   /** Return a row after its page has loaded. Used by keyboard navigation across page boundaries. */
@@ -116,13 +137,17 @@ export class CandidateSource {
       });
       if (token !== this.token) return; // the filters changed while this was in flight
       this.pages.delete(page);
+      this.stale.delete(page);
       this.pages.set(page, response.candidates);
       while (this.pages.size > MAX_CACHED_PAGES) this.pages.delete(this.pages.keys().next().value!);
       this.total = response.total;
       this.kinds = response.kinds;
       this.version += 1;
     } catch (cause) {
-      if (token === this.token) this.error = cause instanceof Error ? cause.message : String(cause);
+      if (token === this.token) {
+        this.error = this.describe(cause) || 'error';
+        this.stale.clear();
+      }
     }
   }
 
