@@ -50,9 +50,15 @@ pub mod code {
     pub const CORE_STOPPED: &str = "CORE_STOPPED";
     pub const CORE_CRASHED: &str = "CORE_CRASHED";
     pub const CORE_PROTOCOL: &str = "CORE_PROTOCOL";
+    /// The core's end could not be observed (waiting on the process failed); it may still run, so
+    /// the operation slot stays occupied.
+    pub const CORE_STATE_UNKNOWN: &str = "CORE_STATE_UNKNOWN";
 
     pub const CREDENTIAL_UNAVAILABLE: &str = "CREDENTIAL_UNAVAILABLE";
     pub const CREDENTIAL_ENDPOINT_MISMATCH: &str = "CREDENTIAL_ENDPOINT_MISMATCH";
+    /// A Custom key saved before endpoints were recorded: it is never sent until the person
+    /// re-enters it or confirms the current endpoint (`credentials.confirmEndpoint`).
+    pub const CREDENTIAL_ENDPOINT_UNBOUND: &str = "CREDENTIAL_ENDPOINT_UNBOUND";
     pub const CREDENTIAL_PROVIDER_INVALID: &str = "CREDENTIAL_PROVIDER_INVALID";
     pub const CREDENTIAL_SAVE_FAILED: &str = "CREDENTIAL_SAVE_FAILED";
     pub const CREDENTIAL_SAVE_UNCERTAIN: &str = "CREDENTIAL_SAVE_UNCERTAIN";
@@ -69,6 +75,7 @@ pub mod code {
     pub const KEYCHAIN_UNAVAILABLE: &str = "KEYCHAIN_UNAVAILABLE";
     pub const KEYCHAIN_FAILED: &str = "KEYCHAIN_FAILED";
     pub const KEYCHAIN_EMPTY: &str = "KEYCHAIN_EMPTY";
+    pub const KEYCHAIN_UNCONFIRMED: &str = "KEYCHAIN_UNCONFIRMED";
 
     pub const PROVIDER_ENDPOINT_MISMATCH: &str = "PROVIDER_ENDPOINT_MISMATCH";
     pub const CUSTOM_ENDPOINT_REQUIRED: &str = "CUSTOM_ENDPOINT_REQUIRED";
@@ -111,8 +118,10 @@ pub const ERROR_CODES: &[&str] = &[
     code::CORE_STOPPED,
     code::CORE_CRASHED,
     code::CORE_PROTOCOL,
+    code::CORE_STATE_UNKNOWN,
     code::CREDENTIAL_UNAVAILABLE,
     code::CREDENTIAL_ENDPOINT_MISMATCH,
+    code::CREDENTIAL_ENDPOINT_UNBOUND,
     code::CREDENTIAL_PROVIDER_INVALID,
     code::CREDENTIAL_SAVE_FAILED,
     code::CREDENTIAL_SAVE_UNCERTAIN,
@@ -127,6 +136,7 @@ pub const ERROR_CODES: &[&str] = &[
     code::KEYCHAIN_UNAVAILABLE,
     code::KEYCHAIN_FAILED,
     code::KEYCHAIN_EMPTY,
+    code::KEYCHAIN_UNCONFIRMED,
     code::PROVIDER_ENDPOINT_MISMATCH,
     code::CUSTOM_ENDPOINT_REQUIRED,
     code::CUSTOM_ENDPOINT_INVALID,

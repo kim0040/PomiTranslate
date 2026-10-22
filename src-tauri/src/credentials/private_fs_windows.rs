@@ -366,6 +366,69 @@ pub fn check(path: &Path, directory: bool) -> Result<(), FsError> {
     inspect_handle(handle.0, directory).map_err(FsError::permissions)
 }
 
+/// A directory that was validated (not a link, owned by the user, protected user-only access list)
+/// and is kept open without delete sharing. While the pin lives the directory cannot be renamed,
+/// replaced by a junction or deleted, so everything done below it by name still refers to the
+/// directory that was checked (H1).
+pub struct DirPin {
+    _handle: OwnedHandle,
+    volume: u32,
+    index: (u32, u32),
+}
+
+fn identity(handle: HANDLE) -> Result<(u32, (u32, u32)), String> {
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
+        return Err("Cannot inspect credential directory".into());
+    }
+    Ok((
+        information.dwVolumeSerialNumber,
+        (information.nFileIndexHigh, information.nFileIndexLow),
+    ))
+}
+
+pub fn pin_directory(path: &Path) -> Result<DirPin, FsError> {
+    let path_wide = wide_path(path);
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            FILE_READ_ATTRIBUTES | READ_CONTROL,
+            // No FILE_SHARE_DELETE: nobody can rename or remove the directory while it is pinned.
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle == 0 {
+        return Err(FsError::io("Cannot inspect credential directory"));
+    }
+    let handle = OwnedHandle(handle);
+    inspect_handle(handle.0, true).map_err(FsError::permissions)?;
+    let (volume, index) = identity(handle.0).map_err(FsError::io)?;
+    Ok(DirPin {
+        _handle: handle,
+        volume,
+        index,
+    })
+}
+
+impl DirPin {
+    /// `path` still names the pinned directory and still passes the checks.
+    pub fn confirm(&self, path: &Path) -> Result<(), FsError> {
+        let handle = open_inspection_handle(path, true).map_err(FsError::io)?;
+        inspect_handle(handle.0, true).map_err(FsError::permissions)?;
+        let (volume, index) = identity(handle.0).map_err(FsError::io)?;
+        if (volume, index) != (self.volume, self.index) {
+            return Err(FsError::permissions(
+                "The credential directory was replaced while it was in use",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn directory(path: &Path) -> Result<(), FsError> {
     if !path
         .try_exists()
