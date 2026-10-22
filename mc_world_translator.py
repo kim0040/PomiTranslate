@@ -45,6 +45,7 @@ from mwt.journal import (
     DiskFull,
     Journal,
     JournalError,
+    JournalWriteFailed,
     TargetSpec,
     UnitResult,
     UnitSpec,
@@ -55,6 +56,7 @@ from mwt.journal import (
     check_resume,
     clear_staging,
     is_disk_full,
+    reconcile_continuations,
     staging_dir,
     supersede,
 )
@@ -1923,6 +1925,9 @@ class WorldTranslator(TextExtractionMixin):
         superseded by this run's own record once that record's intent is on disk.
         """
         stores, own = self._world_stores(world_dir)
+        # A continuation that was cut off before it wrote anything is settled first, so the job it
+        # continued is open again and nothing stale blocks this run.
+        reconcile_continuations(world_dir, stores, authorized=self._resume_authorized())
         old = self._resume_job_id
         blockers = [item["jobId"] for item in blocking_journals(world_dir, stores, own=own, ignore=[old] if old else [])]
         if blockers:
@@ -1995,7 +2000,14 @@ class WorldTranslator(TextExtractionMixin):
             clear_staging(self._run_backup.root)
 
     def _commit_units(self, units: list[UnitSpec], *, on_unit_done: Any = None, stop_on_error: bool = False) -> Any:
-        journal, backup = self._job()
+        try:
+            journal, backup = self._job()
+        except JournalWriteFailed as exc:
+            # The per-world counter could not be made durable, so no record was accepted: nothing was
+            # backed up or written. A full disk is the retryable case the run already knows.
+            if exc.code == "DISK_FULL":
+                raise DiskFull("The disk is full: the recovery record could not be started") from exc
+            raise
         self.report["backup_set_id"] = backup.backup_id
         self.report["job_id"] = backup.backup_id
         transaction = WriteTransaction(
@@ -2058,6 +2070,14 @@ class WorldTranslator(TextExtractionMixin):
             except DiskFull as exc:
                 # Stopped before the first publish (the backup or staging did not fit): nothing changed.
                 entry = {"scope": "write", "code": "DISK_FULL", "message": str(exc)[:300]}
+                self.report["errors"].append(entry)
+                self.file_errors.append(entry)
+                self.stopped_status = "needs_retry"
+                return
+            except JournalWriteFailed:
+                # The recovery record could not be started (see ``_commit_units``): nothing changed.
+                entry = {"scope": "write", "code": "JOURNAL_WRITE_FAILED",
+                         "message": "The recovery record could not be saved, so nothing was written."}
                 self.report["errors"].append(entry)
                 self.file_errors.append(entry)
                 self.stopped_status = "needs_retry"

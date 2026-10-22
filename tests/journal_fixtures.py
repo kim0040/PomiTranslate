@@ -118,13 +118,44 @@ def leftovers(world: Path, pack: Path | None = None) -> list[str]:
 
 
 def world_is_readable(world: Path) -> None:
-    """Every region parses and every .mcc it points at exists: a world the game can open."""
-    for path in (world / "region").glob("*.mca"):
+    """A world the game can open: every region parses, every chunk it holds decompresses with its own
+    compression (an external chunk from its ``.mcc``) and is valid NBT, and no ``.mcc`` is orphaned."""
+    from mwt import nbtio
+    from mwt.region import external_chunk_path
+
+    referenced: set[Path] = set()
+    for path in sorted((world / "region").glob("*.mca")):
         region = RegionFile.read(path)
         assert not region.layout_unsafe, path
         for chunk in region.chunks:
+            if chunk.empty:
+                continue
+            assert not chunk.malformed, f"{path.name}[{chunk.index}]: a region points at a missing, empty or undecodable chunk"
+            assert not chunk.unsupported and chunk.raw_nbt is not None, f"{path.name}[{chunk.index}]: not decodable"
+            nbtio.parse(chunk.raw_nbt)  # raises on anything that is not NBT
             if chunk.external:
-                assert not chunk.malformed, f"{path.name}: a region points at a missing or empty .mcc"
+                referenced.add(external_chunk_path(path, chunk.index))
+    for mcc in (world / "region").glob("c.*.mcc"):
+        assert mcc in referenced, f"{mcc.name} is not referenced by any region"
+
+
+def partial_job(world: Path, root: Path, pack: Path | None) -> dict:
+    """A translation cancelled after its first written file: a consistent ``partial`` job with a checkpoint."""
+    cancelled = {"now": False}
+
+    def progress(event: dict) -> None:
+        if event.get("event") == "file_done" and event.get("phase") == "write":
+            cancelled["now"] = True
+
+    report = WorldTranslator(config_for(world, root, pack, **checkpoint_runtime(root)),
+                             progress_callback=progress, cancel_check=lambda: cancelled["now"]).run()
+    assert report["status"] == "cancelled", report["status"]
+    return report
+
+
+def checkpoint_runtime(root: Path, *, resume: bool = False) -> dict:
+    return dict(checkpoint_enabled=True, checkpoint_path=str(root / "job.checkpoint.json"), scan_plan_id="a" * 64,
+                **({"resume_from_checkpoint": True} if resume else {}))
 
 
 def journal_files(root: Path) -> list[Path]:

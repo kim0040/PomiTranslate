@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 
 # Errors that mean "this filesystem cannot do that", as opposed to a real I/O failure.
 _UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.ENOTTY, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
@@ -87,11 +88,32 @@ def mkdir_durable(path: Path) -> None:
         fsync_dir(created.parent)
 
 
+_fault_hook: Callable[[str, dict], None] | None = None
+
+
+def set_fault_hook(hook: Callable[[str, dict], None] | None) -> Callable[[str, dict], None] | None:
+    """Install a callback run at the two cuts inside every durable replace (tests only): the new file
+    is complete and flushed beside its target but not yet in place (``durable_before_replace``), and the
+    rename has returned but the directory entry is not flushed yet (``durable_after_replace``). A test
+    makes it ``os._exit`` to leave exactly what a power cut there leaves. Returns the previous hook."""
+    global _fault_hook
+    previous, _fault_hook = _fault_hook, hook
+    return previous
+
+
+def _fault(name: str, source: Path, destination: Path) -> None:
+    hook = _fault_hook
+    if hook is not None:
+        hook(name, {"source": str(source), "destination": str(destination)})
+
+
 def replace(source: Path, destination: Path) -> None:
     """``os.replace`` with a short bounded retry for transient Windows sharing violations only."""
+    _fault("durable_before_replace", source, destination)
     for attempt in range(1, _REPLACE_ATTEMPTS + 1):
         try:
             os.replace(source, destination)
+            _fault("durable_after_replace", source, destination)
             return
         except PermissionError as exc:
             transient = sys.platform == "win32" and getattr(exc, "winerror", None) in _TRANSIENT_WINERRORS

@@ -389,6 +389,10 @@ class BackupSet:
 
         known, own = journal_module.default_stores(self.world_dir, recovery_store or self.store)
         known = [*(stores or []), self.store, *known]
+        # A resume that was cut off before it wrote anything is settled first (the job it continued comes
+        # back), so it neither blocks this restore nor hides the job that still needs a decision.
+        journal_module.reconcile_continuations(
+            self.world_dir, known, authorized={str(Path(path).resolve(strict=False)) for path in self.external_files})
         # Restoring a job's own backup set is how that job is undone, so its record is not a blocker.
         own_record = self.root / journal_module.JOURNAL_NAME
         own_id = ""

@@ -112,7 +112,9 @@ jobs:
         run: python tests/test_backup_admin.py
       - name: Journal review fixes - one reconciliation gate, verify-only keep, identity checks
         run: python tests/test_journal_review.py
-      - name: Real process kills at every write and recovery boundary
+      - name: Interrupted resume reconciled, keep quarantines every conflict, per-world generation counter
+        run: python tests/test_journal_reconcile.py
+      - name: Real process kills at every write, durable replace and recovery boundary
         run: python tests/test_journal_kill.py
       - name: The core cancels and exits when the shell closes its stdin
         run: python tests/test_eof_shutdown.py
