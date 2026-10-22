@@ -8,6 +8,7 @@ import {
   type CredentialState,
   type CredentialStoreError,
   diagnosticsSnapshot,
+  fromShellError,
   nativeReset,
   resetCredentialStorage,
   onZoomFailed,
@@ -33,7 +34,7 @@ import {
   type WorldInspection
 } from './api';
 import {
-  appVersion, cancelUpdate, checkForUpdate, confirmExit, dataLocations, forceExit, installUpdate, onExitConfirm, onExitStuck, onExitWaiting,
+  appVersion, cancelExit, cancelUpdate, checkForUpdate, confirmExit, dataLocations, forceExit, installUpdate, isGoneQuestion, keepWaiting, onExitConfirm, onExitStuck, onExitWaiting,
   onOpenWorld, onUpdateProgress, openExternal, revealPath, type MenuAction, type UpdateInfo
 } from './native';
 import { expectedLogFolder, formatDiagnostics, newDiagnosticId } from './diagnostics';
@@ -42,6 +43,7 @@ import { notificationsAvailable, requestNotificationPermission, sendNotification
 import { cleanOverrides } from './review';
 import { LISTABLE_PROVIDERS } from './recommended-models';
 import { resourcePackOptions } from './resource-pack';
+import { assessReset, type ResetShortfall } from './reset';
 import { CandidateSource } from './candidates.svelte';
 import { detectLocale, hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
 import { applyTheme, type ThemeChoice } from './theme';
@@ -65,7 +67,7 @@ const DRAFT_SAVE_DELAY = 800;
 const ESTIMATE_DELAY = 400;
 const PREFS_RETRY_LIMIT = 5;
 /** Backend calls whose type the core does not know yet (an older core) fail with these codes. */
-const UNKNOWN_COMMAND_CODES = ['UNSUPPORTED_REQUEST', 'UNKNOWN_REQUEST'];
+const UNKNOWN_COMMAND_CODES = ['UNSUPPORTED_REQUEST', 'UNKNOWN_REQUEST', 'UNKNOWN_MESSAGE'];
 
 /** An error whose message is already shown text in the display language (made by this file). */
 class LocalizedError extends Error {}
@@ -125,16 +127,27 @@ export class AppState {
   updateState = $state<UpdateState>('idle');
   updateError = $state('');
   updateProgress = $state<{ downloaded: number; total: number | null } | null>(null);
-  banner = $state<{ tone: 'error' | 'warning'; message: string } | null>(null);
+  banner = $state<{ tone: 'error' | 'warning'; message: string; action?: 'enter-key' } | null>(null);
+  /**
+   * The saved Custom key predates address binding and is never sent (CREDENTIAL_ENDPOINT_UNBOUND).
+   * Settings then explains it and opens the key field; saving a new key clears it.
+   */
+  keyReentry = $state(false);
+  /** Set when the person is taken to the key field; Settings clears it once the field has focus. */
+  focusKeyField = $state(false);
   toasts = $state<Toast[]>([]);
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
   /**
    * The question the shell asked when the window was closed or Quit was chosen: a running job, unsaved
-   * settings, or both. `waiting` follows "cancel and quit"; `stuck` means the job did not stop in time.
+   * settings, or both. `reason: 'update'` is the same question raised by an update that restarts the app.
+   * `intent` names the question; every answer carries it. `waiting` follows "cancel and quit"; `stuck`
+   * means the job did not stop in time.
    */
-  exitPrompt = $state<{ job: boolean; dirty: boolean; phase: 'ask' | 'waiting' | 'stuck' } | null>(null);
+  exitPrompt = $state<{ job: boolean; dirty: boolean; reason: 'quit' | 'update'; intent: number; phase: 'ask' | 'waiting' | 'stuck' } | null>(null);
+  /** What an incomplete reset left behind; the reset dialog shows it and offers a retry. */
+  resetShortfall = $state<ResetShortfall | null>(null);
   /** Set by the settings screen: saves its draft and says whether that worked. */
   saveDraft: (() => Promise<boolean>) | null = null;
   /** A move away from settings that waits until the user saves or drops the changes there. */
@@ -352,8 +365,12 @@ export class AppState {
     if (cause instanceof LocalizedError) return cause.message;
     const code = cause instanceof BackendError ? cause.code : '';
     if (cause instanceof BackendError) {
-      const key = `error.${cause.code}`;
+      // The update codes keep their own catalog section.
+      const key = cause.code.startsWith('UPDATE_') ? `update.error.${cause.code}` : `error.${cause.code}`;
       if (cause.code === 'BUSY') return t('error.busy');
+      // A Custom key saved before keys were tied to an address: the fix is entering it again, so
+      // Settings is told to take the person to that field.
+      if (cause.code === 'CREDENTIAL_ENDPOINT_UNBOUND') this.keyReentry = true;
       if (hasMessage(key)) {
         // A storage failure also says which step repairs it.
         const why = cause.detail ? `error.${cause.detail}` : '';
@@ -403,7 +420,7 @@ export class AppState {
 
   fail(cause: unknown): void {
     const message = this.describe(cause);
-    this.banner = { tone: 'error', message };
+    this.banner = { tone: 'error', message, ...(cause instanceof BackendError && cause.code === 'CREDENTIAL_ENDPOINT_UNBOUND' ? { action: 'enter-key' as const } : {}) };
     if (this.dialogDepth > 0) this.dialogError = message;
   }
 
@@ -421,8 +438,8 @@ export class AppState {
       for (const listening of [
         onProgress((event) => this.handleProgress(event)),
         onExitConfirm((prompt) => { this.exitPrompt = { ...prompt, phase: 'ask' }; }),
-        onExitWaiting(() => { this.exitPrompt = { job: true, dirty: false, ...this.exitPrompt, phase: 'waiting' }; }),
-        onExitStuck(() => { this.exitPrompt = { job: true, dirty: false, ...this.exitPrompt, phase: 'stuck' }; }),
+        onExitWaiting(() => { this.exitPrompt = { job: true, dirty: false, reason: 'quit', intent: 0, ...this.exitPrompt, phase: 'waiting' }; }),
+        onExitStuck(() => { this.exitPrompt = { job: true, dirty: false, reason: 'quit', intent: 0, ...this.exitPrompt, phase: 'stuck' }; }),
         onOpenWorld((path) => { void this.openDropped(path); }),
         onZoomFailed(() => { this.notify(t('app.zoomFailed'), 'error'); })
       ]) {
@@ -636,6 +653,8 @@ export class AppState {
       this.updateError = cause instanceof Error ? cause.message : String(cause);
     } finally {
       stop?.();
+      // However the install ended, a question it was waiting on is moot.
+      if (this.exitPrompt?.reason === 'update') this.exitPrompt = null;
     }
   }
 
@@ -651,12 +670,18 @@ export class AppState {
    */
   async resetApp(clearKeys: boolean): Promise<boolean> {
     if (this.isBusy) return false;
-    // The shell's half goes first (saved keys when asked, then the run reports). If it fails, the
-    // core's data is untouched and nothing was half reset; if the core's half fails afterwards, the
-    // message says that the keys are already gone.
+    this.resetShortfall = null;
+    // The shell's half goes first (saved keys when asked, then the run reports). The core's data is
+    // reset only when that half fully worked, so a failed step can simply be tried again. If the
+    // core's half fails afterwards, the message says that the keys are already gone.
     let nativeDone = false;
     try {
-      await nativeReset(clearKeys);
+      const shortfall = assessReset(await nativeReset(clearKeys), clearKeys);
+      if (shortfall) {
+        this.resetShortfall = shortfall;
+        this.banner = { tone: 'error', message: this.resetShortfallLines(shortfall).join(' ') };
+        return false;
+      }
       nativeDone = true;
       await callBackend('app.reset', { confirm: 'reset' });
       try {
@@ -666,9 +691,25 @@ export class AppState {
       return true;
     } catch (cause) {
       const partial = nativeDone ? ` ${t(clearKeys ? 'reset.partialKeys' : 'reset.partial')}` : '';
-      this.banner = { tone: 'error', message: `${this.describe(cause)}${partial}` };
+      const message = `${this.describe(cause)}${partial}`;
+      this.banner = { tone: 'error', message };
+      // The reset question is a modal: an error behind it would not be seen.
+      if (this.dialogDepth > 0) this.dialogError = message;
       return false;
     }
+  }
+
+  /** What is left after an incomplete reset, one sentence each, in the display language. */
+  resetShortfallLines(shortfall: ResetShortfall): string[] {
+    const lines = [t('reset.incomplete')];
+    if (shortfall.keys) lines.push(t(shortfall.keysPartial ? 'reset.left.keysPartial' : 'reset.left.keys'));
+    if (shortfall.reports) lines.push(t('reset.left.reports'));
+    for (const code of shortfall.errors) {
+      const key = `error.${code}`;
+      if (hasMessage(key)) lines.push(t(key as MessageKey));
+    }
+    lines.push(t('reset.left.retry'));
+    return lines;
   }
 
   /** Set a damaged key store aside and start an empty one. */
@@ -689,26 +730,48 @@ export class AppState {
 
   // --- leaving the app ---------------------------------------------------------------------
 
-  /** Stay: dismiss the question. */
+  /**
+   * Stay: dismiss the question and tell the shell, which calls off an update that waits for the
+   * answer. If the shell no longer has the question, there is nothing more to do.
+   */
   exitStay(): void {
+    const prompt = this.exitPrompt;
     this.exitPrompt = null;
+    if (prompt?.phase === 'ask' && prompt.intent > 0) void cancelExit(prompt.intent).catch(() => {});
   }
 
-  /** Quit. The shell cancels a running job first and quits when it has stopped. */
+  /**
+   * Go on with the question on screen. A quit cancels a running job first and ends when it has
+   * stopped; an update question closes here and the install carries on. An answer the shell refuses
+   * because the question is gone (it timed out or was replaced) closes the dialog and does nothing else.
+   */
   async exitQuit(): Promise<void> {
+    const prompt = this.exitPrompt;
     try {
-      await confirmExit();
+      await confirmExit(prompt?.intent ?? 0);
+      if (prompt?.reason === 'update') this.exitPrompt = null;
     } catch (cause) {
       this.exitPrompt = null;
-      this.fail(cause);
+      if (!isGoneQuestion(cause)) this.fail(fromShellError(cause));
     }
   }
 
-  /** Save the settings draft, then quit. A failed save keeps the app open. */
+  /** Save the settings draft, then go on. A failed save keeps the app open. */
   async exitSaveAndQuit(): Promise<void> {
     const saved = this.saveDraft ? await this.saveDraft() : false;
     if (saved) await this.exitQuit();
     else this.notify(t('exit.saveFailed'), 'error', 8000);
+  }
+
+  /** "Keep waiting" after the job did not stop in time: the shell repeats the cancel and waits again. */
+  async exitKeepWaiting(): Promise<void> {
+    try {
+      await keepWaiting();
+      if (this.exitPrompt) this.exitPrompt = { ...this.exitPrompt, phase: 'waiting' };
+    } catch (cause) {
+      this.exitPrompt = null;
+      this.fail(fromShellError(cause));
+    }
   }
 
   /** "Quit now": the job did not stop, so the shell ends the core. */
@@ -717,7 +780,7 @@ export class AppState {
       await forceExit();
     } catch (cause) {
       this.exitPrompt = null;
-      this.fail(cause);
+      this.fail(fromShellError(cause));
     }
   }
 
@@ -771,6 +834,13 @@ export class AppState {
     if (this.busy === 'settings') return;
     this.returnStep = this.page === 'workspace' ? step : null;
     this.goto('settings');
+  }
+
+  /** Take the person to the key field of the Custom provider (see `keyReentry`). */
+  enterKeyAgain(): void {
+    this.focusKeyField = true;
+    if (this.page === 'settings') return;
+    this.openSettingsFor();
   }
 
   /** Back to the step that opened settings. */
@@ -1381,6 +1451,8 @@ export class AppState {
       this.recoveryResult = { job, result };
       // A decided job no longer needs attention; one that is partial or in conflict stays listed.
       if (result.state !== 'partial' && result.state !== 'recovery_conflict') this.interruptedJobs = this.interruptedJobs.filter((item) => item.jobId !== job.jobId);
+      // Undoing an unpublished resume puts the earlier job back in the list: the core knows, not this page.
+      if (result.settledBy === 'unpublished_continuation') await this.refreshInterruptedJobs();
       if (samePath(job.worldPath, this.worldDir)) {
         this.resetJob();
         this.step = 'world';
@@ -1397,15 +1469,20 @@ export class AppState {
     return result;
   }
 
+  /** Ask the core which jobs are still open; the list stays as it was when the core cannot answer. */
+  private async refreshInterruptedJobs(): Promise<void> {
+    try {
+      const boot = await callBackend<BootstrapPayload>('app.bootstrap');
+      this.interruptedJobs = Array.isArray(boot.interruptedJobs) ? boot.interruptedJobs : this.interruptedJobs;
+    } catch { /* the list stays as it was */ }
+  }
+
   /** The blocking job to point at after a request was refused with RECOVERY_REQUIRED. */
   highlightedJobId = $state('');
 
   /** Reload the interrupted jobs (the list only changes at start-up and after a decision) and show them. */
   async openInterrupted(): Promise<void> {
-    try {
-      const boot = await callBackend<BootstrapPayload>('app.bootstrap');
-      this.interruptedJobs = Array.isArray(boot.interruptedJobs) ? boot.interruptedJobs : this.interruptedJobs;
-    } catch { /* the list stays as it was */ }
+    await this.refreshInterruptedJobs();
     const here = this.interruptedHere;
     this.highlightedJobId = (here.find((job) => job.blocking) ?? here[0])?.jobId ?? '';
     this.step = 'world';
@@ -1532,6 +1609,8 @@ export class AppState {
     this.applyCredentialState(saved.credentialState);
     this.settingsRecoveryRequired = false;
     this.credentialRecovery.delete(s.provider);
+    // The key just saved is tied to this address, so the old unbound one is gone.
+    if (apiKey && s.provider === 'custom') this.keyReentry = false;
   }
 
   /** Reload authoritative preferences after a write whose rollback could not be verified. */
@@ -1683,6 +1762,7 @@ export class AppState {
         this.credentialMode = 'local';
       }
       this.credentialRecovery.delete(provider);
+      if (provider === 'custom') this.keyReentry = false;
       this.notify(t('settings.apiKey.deleted'), 'success');
       return true;
     } catch (cause) {

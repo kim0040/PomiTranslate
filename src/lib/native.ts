@@ -222,11 +222,23 @@ export async function onOpenWorld(handler: (path: string) => void): Promise<Unsu
 
 // --- leaving the app ------------------------------------------------------------------------
 
-/** What the shell asks about when the window is closed or Quit is chosen. */
-export type ExitPrompt = { job: boolean; dirty: boolean };
+/**
+ * What the shell asks about when the window is closed, Quit is chosen or an update needs the app
+ * to restart. `intent` names this question: every answer carries it, so a dialog that outlived its
+ * question (it timed out or was replaced) cannot answer for a newer one.
+ */
+export type ExitPrompt = { job: boolean; dirty: boolean; reason: 'quit' | 'update'; intent: number };
 
 export async function onExitConfirm(handler: (prompt: ExitPrompt) => void): Promise<Unsubscribe> {
-  return listen<ExitPrompt>('pomi-exit-confirm', ({ payload }) => handler(payload));
+  return listen<Partial<ExitPrompt>>('pomi-exit-confirm', ({ payload }) => {
+    // An older shell sends no reason or intent; the answer then goes without one and the shell decides.
+    handler({
+      job: !!payload?.job,
+      dirty: !!payload?.dirty,
+      reason: payload?.reason === 'update' ? 'update' : 'quit',
+      intent: typeof payload?.intent === 'number' ? payload.intent : 0
+    });
+  });
 }
 
 /** The core was asked to stop; the shell quits when it has. */
@@ -244,9 +256,25 @@ export async function setSettingsDirty(dirty: boolean): Promise<void> {
   await quietly(() => invoke('exit_set_settings_dirty', { dirty }));
 }
 
-/** Quit. A running job is cancelled first. */
-export async function confirmExit(): Promise<void> {
-  await invoke('exit_confirm');
+/** True when the shell says the question we answered is no longer open (it expired or was replaced). */
+export function isGoneQuestion(cause: unknown): boolean {
+  const code = fromShellError(cause).code;
+  return code === 'UPDATE_CANCELLED' || code === 'INVALID_REQUEST';
+}
+
+/** Go on with the question `intent`: quit (a running job is cancelled first) or let the update install. */
+export async function confirmExit(intent: number): Promise<void> {
+  await invoke('exit_confirm', { intent });
+}
+
+/** Stay in the app: closes the question, and calls off an update install that waits for the answer. */
+export async function cancelExit(intent: number): Promise<void> {
+  await invoke('exit_cancel', { intent });
+}
+
+/** The job did not stop in time and the person chose to wait again; the shell repeats the cancel. */
+export async function keepWaiting(): Promise<void> {
+  await invoke('exit_keep_waiting');
 }
 
 /** Quit now, ending the core if it did not stop. */
