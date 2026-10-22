@@ -432,8 +432,8 @@ class RegionFile:
             if not chunk.modified and chunk.slot is not None and self.original_bytes:
                 # Never repack what was not edited: a malformed or odd slot keeps every sector.
                 first, count = chunk.slot
+                # The layout gate guarantees every sector of the slot exists; none is invented here.
                 raw = self.original_bytes[first * SECTOR : (first + count) * SECTOR]
-                raw += b"\x00" * (count * SECTOR - len(raw))
                 locations[chunk.index * 4 : chunk.index * 4 + 3] = cursor.to_bytes(3, "big")
                 locations[chunk.index * 4 + 3] = count
                 timestamps[chunk.index * 4 : chunk.index * 4 + 4] = int(chunk.timestamp).to_bytes(4, "big")
@@ -465,17 +465,23 @@ class RegionFile:
 
 
 def _layout_problem(locations: bytes, file_size: int) -> str:
-    """Empty string when every declared slot is inside the file and none overlap."""
-    total_sectors = -(-file_size // SECTOR)
+    """Empty string when every location is either empty or a complete, in-file, non-overlapping slot.
+
+    A slot counts as in the file only if all its sectors are physically there: a final slot that
+    stops short is damage, and rewriting the file around it would invent the missing bytes. An
+    entry with only one of offset/count set is damage too, not an empty slot.
+    """
     slots: list[tuple[int, int]] = []
     for index in range(1024):
         offset = int.from_bytes(locations[index * 4 : index * 4 + 3], "big")
         count = locations[index * 4 + 3]
-        if offset == 0 or count == 0:
+        if offset == 0 and count == 0:
             continue
+        if offset == 0 or count == 0:
+            return f"chunk {index} has an incomplete location entry"
         if offset < HEADER_SECTORS:
             return f"chunk {index} slot overlaps the region header"
-        if offset + count > total_sectors:
+        if (offset + count) * SECTOR > file_size:
             return f"chunk {index} slot extends past the end of the file"
         slots.append((offset, count))
     slots.sort()

@@ -803,6 +803,68 @@ def prepare_stdio() -> None:
             pass
 
 
+# Credentials of the request being handled. Diagnostics (tracebacks, stray prints) are written
+# through ``redact_diagnostic`` so none of them reaches stderr in the clear.
+_REQUEST_SECRETS: list[str] = []
+_SECRET_KEY_WORDS = ("key", "token", "secret", "password", "authorization", "credential")
+
+
+def _secrets_in(message: object) -> list[str]:
+    """String values the request carries under credential-looking names."""
+    found: list[str] = []
+
+    def walk(value: object, named: bool) -> None:
+        if isinstance(value, dict):
+            for name, item in value.items():
+                walk(item, any(word in str(name).lower() for word in _SECRET_KEY_WORDS))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, named)
+        elif named and isinstance(value, str) and len(value) >= 8:
+            found.append(value)
+
+    walk(message, False)
+    return found
+
+
+def redact_diagnostic(text: str) -> str:
+    """Hide the active request's credentials and common key shapes in a diagnostic text."""
+    from mwt.secrets import redact_log
+
+    for secret in list(_REQUEST_SECRETS):
+        text = redact_log(text, secret)
+    return redact_log(text, "")
+
+
+class _RedactingStdout:
+    """Replaces ``sys.stdout`` in the sidecar: stray prints go to stderr, redacted."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def write(self, text: str) -> int:
+        try:
+            sys.stderr.write(redact_diagnostic(str(text)))
+        except (OSError, ValueError):
+            pass
+        return len(text)
+
+    def flush(self) -> None:
+        try:
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        return 1  # points at stderr after isolate_protocol_streams
+
+    def writable(self) -> bool:
+        return True
+
+
 def isolate_protocol_streams() -> None:
     """Keep protocol lines on a private copy of stdout; point stdout itself at stderr.
 
@@ -827,6 +889,9 @@ def isolate_protocol_streams() -> None:
         os.dup2(2, 1)
     except OSError:
         os.dup2(os.open(os.devnull, os.O_WRONLY), 1)  # no stderr either: drop stray output
+    # Prints from Python code are redacted on the way; bytes that native code writes straight to
+    # fd 1 reach stderr as they are.
+    sys.stdout = _RedactingStdout()  # type: ignore[assignment]
 
 
 def _plain(value: object, flags: set[str]):
@@ -1768,6 +1833,7 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
                 raise ValueError("Protocol message must be an object")
             if message.get("v") != 1:
                 raise ValueError("Unsupported protocol version")
+            _REQUEST_SECRETS[:] = _secrets_in(message)
             handle(message, report_dir, data_dir, cancel_path)
         except JournalError as exc:
             _reply_error(request_id, exc.code, str(exc))
@@ -1779,13 +1845,20 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
         except (BrokenPipeError, ConnectionError):
             return  # the shell is gone; nobody is left to answer
         except Exception as exc:
-            traceback.print_exc(file=sys.stderr)  # diagnostics go to stderr, never into the protocol
+            # Diagnostics go to stderr, never into the protocol, and never with a credential in them.
+            try:
+                sys.stderr.write(redact_diagnostic(traceback.format_exc()))
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
             try:
                 _reply_error(request_id, "OPERATION_FAILED",
                              "The operation failed. The world was not marked as completed.",
                              detail=type(exc).__name__)
             except (OSError, ValueError):
                 return
+        finally:
+            _REQUEST_SECRETS.clear()
 
 
 def main(argv: list[str] | None = None) -> None:

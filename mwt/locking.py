@@ -186,12 +186,35 @@ class WorldWriteLock:
             if any(key in _HELD for key in _identity_keys(self.path)):
                 raise WorldWriteLocked(self._contended_message())
             descriptor = self._open_and_lock()
-            self._descriptor = descriptor
-            self._keys = _identity_keys(self.path)
-            for key in self._keys:
-                _HELD[key] = self
-            self.acquired = True
+            try:
+                self._descriptor = descriptor
+                self._keys = _identity_keys(self.path)
+                for key in self._keys:
+                    _HELD[key] = self
+                self.acquired = True
+            except BaseException:
+                self._abandon_acquire()  # the kernel lock is ours: never leave it held by a half-built object
+                raise
+        # Who holds the lock is a courtesy to other programs' messages. Nothing about it may fail the acquire.
         self._publish_owner()
+
+    def _abandon_acquire(self) -> None:
+        self.acquired = False
+        descriptor, self._descriptor = self._descriptor, None
+        if descriptor is not None:
+            try:
+                _unlock(descriptor)
+            except OSError:
+                pass
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        with _HELD_GUARD:
+            for key in self._keys:
+                if _HELD.get(key) is self:
+                    del _HELD[key]
+        self._keys = []
 
     def _contended_message(self) -> str:
         owner = read_lock_owner(self.world_dir)
@@ -247,21 +270,25 @@ class WorldWriteLock:
         os.ftruncate(descriptor, 0)
 
     def _publish_owner(self) -> None:
-        document = {
-            "version": 2,
-            "pid": os.getpid(),
-            "host": socket.gethostname(),
-            "appVersion": _app_version(),
-            "startedAt": time.time(),
-            "purpose": self.purpose,
-            "token": self.token,
-        }
+        """Write the owner note, entirely best effort: the lock is already ours whatever happens here."""
         temporary = self.owner_path.with_name(f"{_OWNER_NAME}.{self.token[:8]}.tmp")
         try:
+            document = {
+                "version": 2,
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "appVersion": _app_version(),
+                "startedAt": time.time(),
+                "purpose": self.purpose,
+                "token": self.token,
+            }
             temporary.write_text(json.dumps(document), encoding="utf-8")
             os.replace(temporary, self.owner_path)
-        except OSError:
-            temporary.unlink(missing_ok=True)  # informational only: the lock is already ours
+        except Exception:
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass  # a leftover temporary file is harmless; a failed cleanup must not leak the lock
 
     def release(self) -> None:
         if not self.acquired:
@@ -520,8 +547,8 @@ def hold_world(
     session_locks = MinecraftSessionLocks(world_dir)
     targets = list(external_targets or [])
     target_locks = ExternalTargetLocks(targets, lock_dir or (target_lock_dir() if targets else Path(".")))
-    write_lock.acquire()
     try:
+        write_lock.acquire()
         session_locks.acquire()
         target_locks.acquire(target_timeout)
         yield

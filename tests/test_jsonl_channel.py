@@ -34,6 +34,10 @@ def handle(message, report_dir, data_dir, cancel_path=None):
                 "payload": {"cost": float("nan"), "rate": float("inf"), "nested": [float("-inf"), 1.5], "text": "ok\udc80"}})
     elif kind == "t.boom":
         raise RuntimeError("provider said sk-SECRET-KEY-123 and 한국어")
+    elif kind == "t.leak":
+        key = message["payload"]["apiKey"]
+        print("diagnostic with", key)           # a stray print that carries the request's credential
+        raise RuntimeError("upstream echoed " + key + " in its error")
     else:
         d.emit({"v": 1, "id": message.get("id", ""), "type": "response.ok", "payload": {"echo": kind}})
 
@@ -161,6 +165,21 @@ def test_unexpected_exception_is_contained(tmp: Path) -> None:
     finally:
         stderr = side.close()
     assert "Traceback" in stderr and "RuntimeError" in stderr
+    assert "sk-SECRET-KEY-123" not in stderr, "a key-shaped secret in an exception never reaches stderr"
+
+
+def test_request_credentials_are_redacted_from_stderr(tmp: Path) -> None:
+    secret = "opaque-credential-0123456789"  # no recognizable key shape: only the request tells us
+    side = Sidecar(tmp, encoding="cp949", misbehaving=True)
+    try:
+        reply = side.ask({"v": 1, "id": "l", "type": "t.leak", "payload": {"apiKey": secret}})
+        assert reply["error"]["code"] == "OPERATION_FAILED" and secret not in json.dumps(reply)
+        assert side.ask({"v": 1, "id": "next", "type": "t.x"})["id"] == "next"
+    finally:
+        stderr = side.close()
+    assert "Traceback" in stderr and "RuntimeError" in stderr and "diagnostic with" in stderr
+    assert secret not in stderr, "the request's own credential must not appear in stderr"
+    assert "[redacted]" in stderr
 
 
 def test_wrong_shaped_persisted_files_do_not_abort_bootstrap(tmp: Path) -> None:
@@ -199,6 +218,7 @@ def main() -> None:
             test_stray_output_cannot_corrupt_the_protocol,
             test_non_finite_numbers_never_crash_emit,
             test_unexpected_exception_is_contained,
+            test_request_credentials_are_redacted_from_stderr,
             test_wrong_shaped_persisted_files_do_not_abort_bootstrap,
         ]
         for test in tests:
