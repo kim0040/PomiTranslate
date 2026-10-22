@@ -171,7 +171,27 @@ export type Estimate = {
   cost: { low: number; high: number } | null;
 };
 
-export type BackendWarning = { code: string; file?: string; count?: number; message?: string; compression?: number[] };
+export type BackendWarning = { code: string; file?: string; count?: number; message?: string; compression?: number[]; dropped_translations?: number };
+
+/** Where a glossary lives: for every world, or for the world that is open. */
+export type GlossaryScope = 'global' | 'world';
+export type GlossaryMode = 'translate' | 'keep';
+export type GlossaryEntry = {
+  id: string;
+  source: string;
+  target: string;
+  mode: GlossaryMode;
+  caseSensitive: boolean;
+  note: string;
+};
+export type GlossaryDocument = { scope: GlossaryScope; revision: number; updatedAt: string | null; entries: GlossaryEntry[] };
+export type GlossarySkip = { row: number; reason: string; source: string };
+export type GlossaryImportResult = GlossaryDocument & {
+  added: number; updated: number; unchanged: number; removed: number; skipped: GlossarySkip[]; skippedCount: number;
+};
+export type GlossaryExportResult = { scope: GlossaryScope; format: 'csv' | 'tsv'; revision: number; count: number; text: string };
+/** One sentence whose translation did not honour the glossary or left a format code behind. */
+export type TranslationWarningSample = { code: string; entryId?: string; source: string; translated: string };
 
 export type ScanResult = {
   status: string;
@@ -230,6 +250,9 @@ export type TranslationResult = {
   translationFailureCodes?: Partial<Record<FailureCode, number>>;
   translationSamples?: { source: string; translated: string }[];
   keptOriginalSamples?: string[];
+  /** Per-string quality warnings by code (glossary_mismatch, format_residue). Absent from an older core. */
+  translationWarnings?: Record<string, number>;
+  translationWarningSamples?: TranslationWarningSample[];
   usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean; adapted_parameters?: string[] };
 };
 
@@ -320,6 +343,10 @@ export type ProgressEvent = {
   message?: string;
   file?: string;
   candidate_text_count?: number;
+  /** Running count of quality warnings by code, on translation_progress. */
+  warnings?: Record<string, number>;
+  /** On checkpoint_glossary_changed: how many saved translations were dropped. */
+  dropped_translations?: number;
 };
 
 export class BackendError extends Error {
@@ -386,7 +413,11 @@ export const CALL_DEADLINES_MS: Record<string, number> = {
   'resume.status': 30_000,
   'review.draft.get': 20_000,
   'review.draft.set': 20_000,
-  'review.draft.clear': 20_000
+  'review.draft.clear': 20_000,
+  'glossary.get': 20_000,
+  'glossary.set': 20_000,
+  'glossary.import': 30_000,
+  'glossary.export': 30_000
 };
 
 function withDeadline<T>(call: Promise<T>, limitMs: number): Promise<T> {

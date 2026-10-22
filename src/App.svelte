@@ -22,6 +22,7 @@
   import ResultScreen from './screens/ResultScreen.svelte';
   import BackupsScreen from './screens/BackupsScreen.svelte';
   import SettingsScreen from './screens/SettingsScreen.svelte';
+  import GlossaryScreen from './screens/GlossaryScreen.svelte';
   import AboutScreen from './screens/AboutScreen.svelte';
   import HelpScreen from './screens/HelpScreen.svelte';
   import Tour from './components/Tour.svelte';
@@ -130,8 +131,8 @@
     });
   });
 
-  // The shell holds a window close or Quit while settings are unsaved, so it must know.
-  $effect(() => { void setSettingsDirty(app.settingsDirty); });
+  // The shell holds a window close or Quit while settings or glossary edits are unsaved, so it must know.
+  $effect(() => { void setSettingsDirty(app.settingsDirty || app.glossaryDirty); });
 
 </script>
 
@@ -212,6 +213,8 @@
           {:else}<ResultScreen />{/if}
         {:else if app.page === 'backups'}
           <BackupsScreen />
+        {:else if app.page === 'glossary'}
+          <GlossaryScreen />
         {:else if app.page === 'settings'}
           <SettingsScreen />
         {:else if app.page === 'help'}

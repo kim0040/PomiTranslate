@@ -27,13 +27,27 @@ export type JobProgress = {
   samples: ProgressSample[];
   /** Money spent so far, when the core reports it. */
   cost: number | null;
+  /** Sentences so far whose translation missed a glossary term or left a format code behind, by code. */
+  warnings: Record<string, number>;
+  /** Set when a resumed run dropped saved translations because the glossary changed; the count dropped. */
+  glossaryDropped: number | null;
 };
+
+/** Counts per warning code as the core sent them: whole, non-negative numbers only. */
+export function cleanWarningCounts(value: unknown): Record<string, number> {
+  const counts: Record<string, number> = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return counts;
+  for (const [code, count] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof count === 'number' && Number.isFinite(count) && count > 0) counts[code] = Math.floor(count);
+  }
+  return counts;
+}
 
 export function emptyProgress(): JobProgress {
   return {
     phase: 'idle', fileIndex: 0, fileTotal: 0, done: 0, total: 0, failed: 0, batch: 0, batches: 0,
     requests: 0, requestsEstimate: 0, retry: null, startedAt: 0,
-    translateStartedAt: 0, currentFile: '', samples: [], cost: null
+    translateStartedAt: 0, currentFile: '', samples: [], cost: null, warnings: {}, glossaryDropped: null
   };
 }
 
@@ -85,6 +99,7 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
       if (!next.translateStartedAt) next.translateStartedAt = now;
       // null means the provider reported no cost: nothing is shown, and it never turns into 0.
       if (typeof event.cost === 'number' && Number.isFinite(event.cost) && event.cost >= 0) next.cost = event.cost;
+      if (event.warnings) next.warnings = cleanWarningCounts(event.warnings);
       if (Array.isArray(event.samples) && event.samples.length) {
         const fresh = event.samples
           .filter((item) => typeof item?.source === 'string' && typeof item?.translated === 'string')
@@ -100,6 +115,9 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
       break;
     case 'translation_batch_done':
       next.retry = null;
+      break;
+    case 'checkpoint_glossary_changed':
+      next.glossaryDropped = typeof event.dropped_translations === 'number' && event.dropped_translations >= 0 ? Math.floor(event.dropped_translations) : 0;
       break;
     default:
       return current;
