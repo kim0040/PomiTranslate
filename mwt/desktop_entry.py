@@ -1921,9 +1921,11 @@ def _cancel_requested(cancel_path: Path | None) -> bool:
 
 
 def _shell_gone() -> None:
+    if _SHELL_GONE.is_set():
+        return
     _SHELL_GONE.set()
     try:
-        sys.stderr.write("stdin closed while a request was running; cancelling\n")
+        sys.stderr.write("stdin closed while a request was running; cancelling" + chr(10))
         sys.stderr.flush()
     except (OSError, ValueError):
         pass
@@ -1935,28 +1937,55 @@ def _shell_gone() -> None:
     threading.Thread(target=hard_exit, name="pomi-eof-exit", daemon=True).start()
 
 
-def _queued_requests(busy: threading.Event):
-    """Request lines read on a thread, so the end of stdin is noticed while a request runs."""
-    lines: queue.Queue = queue.Queue()
+class _Connection:
+    """Request lines read on a thread, so the end of stdin is noticed while a request runs.
 
-    def reader() -> None:
+    The shell keeps stdin open until it has the reply, so the end of stdin means nobody will read
+    one. From then on no request is started, even one already queued, and a request that is
+    running is cancelled (see ``_shell_gone``). Starting a request and noticing the end of stdin
+    take the same lock, so the end cannot slip in between the check and the start.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._lines: queue.Queue = queue.Queue()
+        self._closed = False
+        self._running = False
+        threading.Thread(target=self._read, name="pomi-stdin", daemon=True).start()
+
+    def _read(self) -> None:
         try:
             for item in _read_requests():
-                lines.put(item)
+                self._lines.put(item)
         finally:
-            lines.put(None)
-            if busy.is_set():
+            with self._lock:
+                self._closed = True
+                running = self._running
+            self._lines.put(None)
+            if running:
                 _shell_gone()
 
-    threading.Thread(target=reader, name="pomi-stdin", daemon=True).start()
-    while (item := lines.get()) is not None:
-        yield item
+    def requests(self):
+        while (item := self._lines.get()) is not None:
+            yield item
+
+    def start(self) -> bool:
+        """Mark a request as running; False once stdin has ended."""
+        with self._lock:
+            if self._closed:
+                return False
+            self._running = True
+            return True
+
+    def finish(self) -> None:
+        with self._lock:
+            self._running = False
 
 
 def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
     hello()
-    busy = threading.Event()
-    for line, decode_error in _queued_requests(busy):
+    connection = _Connection()
+    for line, decode_error in connection.requests():
         if decode_error is not None:
             _reply_error("", "INVALID_REQUEST", "Request was not valid UTF-8")
             continue
@@ -1971,7 +2000,8 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
             if message.get("v") != 1:
                 raise ValueError("Unsupported protocol version")
             _REQUEST_SECRETS[:] = _secrets_in(message)
-            busy.set()
+            if not connection.start():
+                return  # stdin ended: the shell is gone and nobody would read the answer
             handle(message, report_dir, data_dir, cancel_path)
         except JournalError as exc:
             _reply_error(request_id, exc.code, str(exc), **({"jobIds": exc.job_ids} if exc.job_ids else {}))
@@ -1996,7 +2026,7 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
             except (OSError, ValueError):
                 return
         finally:
-            busy.clear()
+            connection.finish()
             _REQUEST_SECRETS.clear()
 
 
