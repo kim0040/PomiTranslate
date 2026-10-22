@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { app } from '../lib/app.svelte';
   import { t } from '../lib/i18n/index.svelte';
   import Dialog from './Dialog.svelte';
@@ -11,6 +12,11 @@
   let stage = $state<'explain' | 'confirm'>('explain');
   let clearKeys = $state(true);
   let working = $state(false);
+
+  // A reset that stopped half way shows what is left and offers the same button again as a retry.
+  const shortfall = $derived(app.resetShortfall);
+  const lines = $derived(shortfall ? app.resetShortfallLines(shortfall) : []);
+  onMount(() => { app.resetShortfall = null; });
 
   async function reset(): Promise<void> {
     working = true;
@@ -50,9 +56,15 @@
 {:else}
   <Dialog showClose={false} title={t('reset.confirmTitle')} tone="danger" {onClose}>
     <div class="warn"><Icon name="alert-triangle" size={22} /><p>{t('reset.confirmBody')}{#if clearKeys} <strong>{t('reset.confirmKeys')}</strong>{/if}</p></div>
+    {#if shortfall}
+      <div class="left" role="alert">
+        <p class="left-title">{lines[0]}</p>
+        <ul>{#each lines.slice(1) as line, index (index)}<li>{line}</li>{/each}</ul>
+      </div>
+    {/if}
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" data-autofocus disabled={working} onclick={onClose}>{t('common.cancel')}</button>
-      <button type="button" class="btn btn-danger-solid" disabled={working || app.isBusy} onclick={reset}>{t('reset.confirm')}</button>
+      <button type="button" class="btn btn-danger-solid" disabled={working || app.isBusy} onclick={reset}>{t(shortfall ? 'reset.retry' : 'reset.confirm')}</button>
     {/snippet}
   </Dialog>
 {/if}
@@ -75,5 +87,9 @@
   .warn { display: grid; grid-template-columns: auto 1fr; gap: var(--space-3); align-items: start; }
   .warn :global(.icon) { color: var(--danger-text); }
   .warn strong { color: var(--text); }
+  .left { padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); border: 1px solid var(--danger-border); color: var(--danger-text); font-size: var(--text-sm); display: grid; gap: 6px; }
+  .left-title { margin: 0; font-weight: 650; }
+  .left ul { list-style: disc; padding-inline-start: 18px; display: grid; gap: 4px; }
+  .left li { display: list-item; }
   @media (max-width: 520px) { .lists { grid-template-columns: 1fr; } }
 </style>

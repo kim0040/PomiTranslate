@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resultPresentation, emptyProgress, reduceProgress } from '../../src/lib/workflow';
+import { resultPresentation, emptyProgress, reduceProgress, SAMPLE_CHARS, SAMPLE_LIMIT } from '../../src/lib/workflow';
 import { LOCALES, translate, type MessageKey } from '../../src/lib/i18n/index.svelte';
 
 describe('workflow progress mapping', () => {
@@ -74,5 +74,38 @@ describe('result status presentation', () => {
         expect(title, `${locale}.${status}`).not.toBe('');
       }
     }
+  });
+});
+
+describe('live samples and cost from translation_progress', () => {
+  const event = { event: 'translation_progress', completed: 1, total: 9 };
+
+  it('keeps the list bounded: three per event, each side clipped, five on screen', () => {
+    let progress = emptyProgress();
+    const long = 'x'.repeat(SAMPLE_CHARS + 50);
+    for (let round = 0; round < 4; round += 1) {
+      const samples = Array.from({ length: 6 }, (_, index) => ({ source: `${round}-${index}`, translated: long }));
+      progress = reduceProgress(progress, { ...event, samples });
+    }
+    expect(progress.samples).toHaveLength(SAMPLE_LIMIT);
+    expect(progress.samples.every((item) => item.translated.length === SAMPLE_CHARS)).toBe(true);
+    // Only the first three of each event count, and the newest stay.
+    expect(progress.samples.map((item) => item.source)).toEqual(['2-1', '2-2', '3-0', '3-1', '3-2']);
+  });
+
+  it('ignores samples that are not text', () => {
+    const progress = reduceProgress(emptyProgress(), { ...event, samples: [{ source: 1, translated: 'x' }, null, { source: 'a', translated: 'b' }] as never });
+    expect(progress.samples).toEqual([{ source: 'a', translated: 'b' }]);
+  });
+
+  it('shows a reported cost and never turns "not reported" into 0', () => {
+    let progress = reduceProgress(emptyProgress(), { ...event, cost: null });
+    expect(progress.cost).toBeNull();
+    progress = reduceProgress(progress, { ...event, cost: 0.0123 });
+    expect(progress.cost).toBe(0.0123);
+    // A later event without a cost leaves what was reported; the running total is not reset.
+    progress = reduceProgress(progress, { ...event, cost: null });
+    expect(progress.cost).toBe(0.0123);
+    expect(reduceProgress(emptyProgress(), { ...event, cost: Number.NaN }).cost).toBeNull();
   });
 });

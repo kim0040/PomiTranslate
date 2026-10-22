@@ -22,6 +22,11 @@
   const stateKey = (result: RecoveryResult): MessageKey => (
     hasMessage(`interrupted.state.${result.state}`) ? `interrupted.state.${result.state}` : 'interrupted.state.partial'
   ) as MessageKey;
+  // Undoing an unfinished resume is not something the person asked for in these words, so it is told in its own.
+  const undoneResume = (result: RecoveryResult): boolean => result.state === 'rolled_back' && result.settledBy === 'unpublished_continuation';
+  const titleKey = (result: RecoveryResult): MessageKey => (undoneResume(result) ? 'interrupted.unpublishedTitle' : stateKey(result));
+  // Moving conflicting files into the quarantine folder can fail (full disk, no permission); say which, and that nothing was overwritten.
+  const failureText = (code: string): string => (hasMessage(`error.${code}`) ? t(`error.${code}` as MessageKey) : '');
   const conflictKey = (code: string): MessageKey => (
     hasMessage(`interrupted.conflict.${code}`) ? `interrupted.conflict.${code}` : 'interrupted.conflict.UNREADABLE'
   ) as MessageKey;
@@ -113,7 +118,9 @@
 
 {#if outcome}
   {@const result = outcome.result}
-  <Callout tone={result.state === 'rolled_back' || result.state === 'kept' ? 'success' : 'warning'} title={t(stateKey(result))} role="status">
+  <Callout tone={(result.state === 'rolled_back' || result.state === 'kept') && !result.errorCode ? 'success' : 'warning'} title={t(titleKey(result))} role="status">
+    {#if undoneResume(result)}<p>{t('interrupted.unpublishedBody')}</p>{/if}
+    {#if result.errorCode}<p>{t('interrupted.quarantineFailed')} {failureText(result.errorCode)}</p>{/if}
     <p class="num">{t('interrupted.result', { restored: formatNumber(result.restoredFiles, app.locale), kept: formatNumber(result.keptFiles, app.locale) })}</p>
     {#if result.conflicts.length}
       <p>{t('interrupted.conflicts', { count: formatNumber(result.conflicts.length, app.locale) })}</p>

@@ -134,6 +134,10 @@ export type RecoveryResult = {
   keptFiles: number;
   conflicts: RecoveryConflict[];
   quarantineDir: string | null;
+  /** Why a job ended up decided without the person's choice, when it did (e.g. an unpublished resume was undone). */
+  settledBy?: 'unpublished_continuation' | string;
+  /** Set with `recovery_conflict` when the quarantine step itself failed (DISK_FULL, RECOVERY_FAILED). */
+  errorCode?: string;
 };
 
 export type CandidateLocation = {
@@ -298,7 +302,8 @@ export type ProgressEvent = {
   translated?: string;
   samples?: { source: string; translated: string }[];
   failure?: string;
-  cost?: number;
+  /** Money spent so far; null means the provider reported none, which is not the same as 0. */
+  cost?: number | null;
   index?: number;
   total?: number;
   total_files?: number;
@@ -452,9 +457,29 @@ export async function resetCredentialStorage(): Promise<void> {
   await shell<void>('credential_reset_storage');
 }
 
+/**
+ * What the shell's half of the reset did. Every step runs even when an earlier one failed, so this
+ * says exactly which ones worked. `keysDeleted` is also false when keys were not asked for.
+ */
+export type NativeResetOutcome = {
+  keysDeleted: boolean;
+  /** Some key stores were emptied and some could not be confirmed; a retry finishes the job. */
+  keysPartiallyDeleted?: boolean;
+  reportsCleared: boolean;
+  /** Stable codes of what failed (KEYCHAIN_UNCONFIRMED, VAULT_IO, RESET_FAILED, ...). */
+  errors: string[];
+};
+
 /** The shell's half of "reset the app": saved keys (when asked) and the run reports. */
-export async function nativeReset(deleteKeys: boolean): Promise<void> {
-  await shell<void>('native_reset', { deleteKeys });
+export async function nativeReset(deleteKeys: boolean): Promise<NativeResetOutcome> {
+  const outcome = await shell<Partial<NativeResetOutcome> | null | undefined>('native_reset', { deleteKeys });
+  // Anything that is not clearly "true" counts as not done: an answer the page cannot read is not a success.
+  return {
+    keysDeleted: outcome?.keysDeleted === true,
+    keysPartiallyDeleted: outcome?.keysPartiallyDeleted === true,
+    reportsCleared: outcome?.reportsCleared === true,
+    errors: Array.isArray(outcome?.errors) ? outcome.errors.filter((code): code is string => typeof code === 'string') : []
+  };
 }
 
 /** Versions, platform, recent events and the core's last output, with secrets and paths removed. */

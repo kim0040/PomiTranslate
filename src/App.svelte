@@ -195,6 +195,9 @@
             <Callout tone={app.banner.tone === 'error' ? 'danger' : 'warning'} title={t('error.title')} role="alert">
               {app.banner.message}
               {#snippet actions()}
+                {#if app.banner?.action === 'enter-key'}
+                  <button type="button" class="btn btn-secondary btn-sm" onclick={() => { app.banner = null; app.enterKeyAgain(); }}>{t('error.enterKeyAgain')}</button>
+                {/if}
                 <button type="button" class="btn btn-quiet btn-sm" onclick={() => (app.banner = null)}>{t('error.dismiss')}</button>
               {/snippet}
             </Callout>
