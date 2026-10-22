@@ -3,7 +3,7 @@
   import { app } from './lib/app.svelte';
   import { t, type MessageKey } from './lib/i18n/index.svelte';
   import { applyTheme, storedTheme, watchSystemTheme } from './lib/theme';
-  import { inShell, isMac, onDropPath, onMenu, openExternal, requestAttention, setMenuLabels, setTaskProgress, setWindowTitle } from './lib/native';
+  import { inShell, isMac, onDropPath, onMenu, openExternal, requestAttention, setMenuLabels, setSettingsDirty, setTaskProgress, setWindowTitle } from './lib/native';
   import { baseName } from './lib/format';
   import Sidebar from './components/Sidebar.svelte';
   import Stepper from './components/Stepper.svelte';
@@ -22,6 +22,7 @@
   import HelpScreen from './screens/HelpScreen.svelte';
   import Tour from './components/Tour.svelte';
   import LicensesDialog from './components/LicensesDialog.svelte';
+  import ExitDialog from './components/ExitDialog.svelte';
 
   let pane: HTMLElement | undefined = $state();
   let dropping = $state(false);
@@ -106,9 +107,18 @@
       help: t('menu.help'), tour: t('menu.tour'), shortcuts: t('menu.shortcuts'),
       licenses: t('menu.licenses'), report: t('menu.report'), updates: t('menu.updates'),
       appearance: t('menu.appearance'), themeSystem: t('settings.theme.systemShort'),
-      themeLight: t('settings.theme.lightShort'), themeDark: t('settings.theme.darkShort')
+      themeLight: t('settings.theme.lightShort'), themeDark: t('settings.theme.darkShort'),
+      quitItem: t('menu.quit'), fileMenu: t('menu.fileMenu'), editMenu: t('menu.editMenu'), viewMenu: t('menu.viewMenu'),
+      windowMenu: t('menu.windowMenu'), helpMenu: t('menu.helpMenu'), undo: t('menu.undo'), redo: t('menu.redo'),
+      cut: t('menu.cut'), copy: t('menu.copy'), paste: t('menu.paste'), selectAll: t('menu.selectAll'),
+      minimize: t('menu.minimize'), maximize: t('menu.maximize'), closeWindow: t('menu.closeWindow'),
+      about: t('menu.about'), services: t('menu.services'), hide: t('menu.hide'), hideOthers: t('menu.hideOthers'),
+      showAll: t('menu.showAll'), fullscreen: t('menu.fullscreen')
     });
   });
+
+  // The shell holds a window close or Quit while settings are unsaved, so it must know.
+  $effect(() => { void setSettingsDirty(app.settingsDirty); });
 
   const pageTitles: Record<string, MessageKey> = { backups: 'nav.backups', settings: 'nav.settings', about: 'nav.about', help: 'nav.help' };
 </script>
@@ -185,6 +195,8 @@
     </main>
   </div>
 </div>
+
+<ExitDialog />
 
 {#if app.showNotice && app.notices}
   <Dialog title={t('notice.title')} dismissible={false} onClose={() => {}}>

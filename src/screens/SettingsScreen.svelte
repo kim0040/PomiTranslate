@@ -13,6 +13,7 @@
   import { exportDocument } from '../lib/document-export';
   import { app, defaultSettings } from '../lib/app.svelte';
   import { callBackend, credentialStatus, importCredential, type CredentialMode, type Settings, type ProviderUsage } from '../lib/api';
+  import CredentialStoreNotice from '../components/CredentialStoreNotice.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import type { ThemeChoice } from '../lib/theme';
   import { REASONING_PROVIDERS, defaultReasoningLabel, effortLabel, reasoningMode, supportedEfforts, supportsReasoning } from '../lib/reasoning';
@@ -240,11 +241,15 @@
     try {
       const status = await credentialStatus(provider);
       if (credentialProvider === provider) {
-        credentialState = status.stored;
-        credentialMode = status.mode;
-        savedCredentialMode = status.mode;
+        app.credentialStoreError = status.error ?? null;
+        // A store that cannot be opened is "unknown", never "no key saved".
+        credentialState = status.error ? null : (status.stored ?? false);
+        if (status.mode) {
+          credentialMode = status.mode;
+          savedCredentialMode = status.mode;
+        }
         // This is only a boolean status. The key itself is never read from the store.
-        if (app.settings.provider === provider) app.apiKeyStored = status.stored;
+        if (app.settings.provider === provider && !status.error) app.apiKeyStored = status.stored ?? false;
       }
     } catch (cause) {
       if (credentialProvider === provider) credentialError = app.describe(cause);
@@ -311,6 +316,11 @@
 
   // Leaving with unsaved changes asks first (AppState holds the move until it is answered).
   $effect(() => { app.settingsDirty = dirty; });
+  // "Save and quit" in the exit dialog saves this draft.
+  $effect(() => {
+    app.saveDraft = saveSettings;
+    return () => { app.saveDraft = null; };
+  });
   $effect(() => () => {
     app.settingsDirty = false;
     app.pendingLeave = null;
@@ -389,7 +399,7 @@
     importing = true;
     credentialError = '';
     try {
-      const status = await importCredential(draft.provider);
+      const status = await importCredential(draft.provider, draft.provider === 'custom' ? draft.base_url : undefined);
       app.credentialRecovery.delete(draft.provider);
       credentialMode = status.mode;
       savedCredentialMode = status.mode;
@@ -552,6 +562,7 @@
           {/if}
           {#if credentialError}<p class="field-error" role="alert">{credentialError}</p>{/if}
         </div>
+        <CredentialStoreNotice />
         <details class="field full key-management" id="key-management">
           <summary>{t('settings.vault.manage')}</summary>
           <div class="field">

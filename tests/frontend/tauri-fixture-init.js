@@ -75,6 +75,11 @@
     ]
   };
 
+  // ?vault=corrupt: the credential store cannot be opened until "reset credential storage" runs.
+  function vaultBroken() {
+    return new URLSearchParams(location.search).get('vault') === 'corrupt' && sessionStorage.getItem('pomi.fixture.vaultReset') !== 'true';
+  }
+
   function scenario() {
     return new URLSearchParams(location.search).get('scenario') || 'selected';
   }
@@ -165,7 +170,7 @@
         await new Promise((resolve) => setTimeout(resolve, 100));
         throw current === 'startup-handshake' ? 'CORE_HANDSHAKE_TIMEOUT'
           : current === 'startup-bootstrap' ? 'BOOTSTRAP_TIMEOUT'
-          : 'Translation core stopped before it returned a result';
+          : { code: 'CORE_STOPPED', message: 'Translation core stopped before it returned a result' };
       }
       if (current === 'startup-delay') await new Promise((resolve) => setTimeout(resolve, 500));
       const empty = current === 'empty';
@@ -175,7 +180,9 @@
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
         ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
-        apiKeyStored: !fresh || freshKeySaved, credentialMode: 'local', worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
+        apiKeyStored: vaultBroken() ? false : !fresh || freshKeySaved, credentialMode: 'local',
+        ...(vaultBroken() ? { credentialState: { mode: 'local', error: 'VAULT_CORRUPT' } } : {}),
+        worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
         worldInspection: empty ? null : inspection, backups: empty ? [] : backups,
         resume: resumed || resultScenarios.includes(current) ? resumePayload() : { available: false }
       });
@@ -282,6 +289,26 @@
       }
       if (command === 'plugin:event|unlisten') { listeners.delete(args.eventId); return null; }
       if (command === 'plugin:dialog|open') return window.__pomiDialogFiles ?? null;
+      if (command === 'credential_status' && vaultBroken()) return { mode: 'local', error: 'VAULT_CORRUPT' };
+      if (command === 'credential_reset_storage') { sessionStorage.setItem('pomi.fixture.vaultReset', 'true'); (window.__pomiShell ||= []).push('credential_reset_storage'); return null; }
+      if (command === 'native_reset') {
+        (window.__pomiShell ||= []).push(`native_reset:${args.deleteKeys}`);
+        if (args.deleteKeys) sessionStorage.setItem('pomi.fixture.cleared', JSON.stringify(['openai', 'gemini', 'anthropic', 'openrouter', 'comet', 'custom']));
+        return null;
+      }
+      if (command === 'diagnostics_snapshot') return 'PomiTranslate diagnostics\nversion 0.1.0\nevents: none';
+      if (command === 'exit_set_settings_dirty') { window.__pomiDirty = args.dirty; return null; }
+      if (command === 'exit_confirm') {
+        (window.__pomiShell ||= []).push('exit_confirm');
+        // ?exit=stuck: the job ignores the cancel, so the shell reports it after its wait.
+        if (new URLSearchParams(location.search).get('exit') === 'stuck') {
+          setTimeout(() => emit('pomi-exit-waiting', null), 20);
+          setTimeout(() => emit('pomi-exit-stuck', null), 150);
+        }
+        return null;
+      }
+      if (command === 'exit_force') { (window.__pomiShell ||= []).push('exit_force'); return null; }
+      if (command === 'update_cancel') { (window.__pomiShell ||= []).push('update_cancel'); return null; }
       if (command === 'credential_status') return { stored: new URLSearchParams(location.search).get('missingKey') !== '1' && (!fresh || freshKeySaved), mode: credentialModes.get(args.provider) || 'local' };
       if (command === 'credential_import') return { stored: true, mode: 'local' };
       if (command === 'operation_active') return false;
