@@ -22,11 +22,17 @@ const KEEP_FILES: usize = 5;
 /// Last core stderr lines kept in memory and offered with "copy diagnostics".
 pub const STDERR_RING_LINES: usize = 200;
 const EVENT_RING_LINES: usize = 100;
+/// Error codes (with when and where they happened) kept for the diagnostics bundle.
+const ERROR_RING_LINES: usize = 100;
+/// How much of the rotated log files the bundle carries (the newest part).
+const LOG_TAIL_LINES: usize = 200;
 /// A single kept line never exceeds this many characters.
 const MAX_LINE_CHARS: usize = 2000;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Default)]
@@ -34,6 +40,7 @@ pub struct Diagnostics {
     dir: Mutex<Option<PathBuf>>,
     stderr: Mutex<VecDeque<String>>,
     events: Mutex<VecDeque<String>>,
+    errors: Mutex<VecDeque<String>>,
     home: Mutex<Option<String>>,
 }
 
@@ -185,7 +192,17 @@ impl Diagnostics {
 
     pub fn log_error(&self, source: &str, error: &IpcError) {
         let detail = error.detail.map(|d| format!(" ({d})")).unwrap_or_default();
-        self.log("ERROR", source, &format!("{}{detail}: {}", error.code, error.message));
+        self.log(
+            "ERROR",
+            source,
+            &format!("{}{detail}: {}", error.code, error.message),
+        );
+        // The code alone (no message text) is what the bundle lists, so it cannot carry free text.
+        push_bounded(
+            &self.errors,
+            format!("{} {} {}{detail}", timestamp(), clip(source), error.code),
+            ERROR_RING_LINES,
+        );
     }
 
     /// A line the translation core wrote to stderr.
@@ -208,8 +225,10 @@ impl Diagnostics {
     /// Text for "copy diagnostics": versions, platform, recent events and the core's last stderr.
     pub fn snapshot(&self) -> String {
         let mut text = format!(
-            "PomiTranslate {}\nplatform: {} {}\n\n-- recent events --\n",
+            "PomiTranslate {} (build {}, {})\nplatform: {} {}\n\n-- recent events --\n",
             env!("CARGO_PKG_VERSION"),
+            crate::BUILD_SHA,
+            crate::BUILD_DATE,
             std::env::consts::OS,
             std::env::consts::ARCH
         );
@@ -225,6 +244,64 @@ impl Diagnostics {
         text
     }
 
+    /// The diagnostics bundle: what "copy diagnostics" shows plus the error codes with their times and
+    /// the tail of the rotated log. Everything is scrubbed again on the way out, so a line that
+    /// reached a log file before a redaction rule existed is still cleaned. No key, request, reply or
+    /// world text is ever collected here.
+    pub fn bundle(&self, app_version: &str) -> String {
+        let mut text = format!(
+            "PomiTranslate diagnostics\ngenerated: {}\napp version: {app_version}\nbuild: {} ({})\nplatform: {} {}\n\n",
+            timestamp(),
+            crate::BUILD_SHA,
+            crate::BUILD_DATE,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        );
+        text.push_str("-- error codes (newest last) --\n");
+        for line in lock(&self.errors).iter() {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text.push_str("\n-- recent events --\n");
+        for line in lock(&self.events).iter() {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text.push_str("\n-- translation core stderr (last 200 lines) --\n");
+        for line in lock(&self.stderr).iter() {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text.push_str("\n-- log tail --\n");
+        for line in self.log_tail(LOG_TAIL_LINES) {
+            text.push_str(&self.scrub(&line));
+            text.push('\n');
+        }
+        text
+    }
+
+    /// The newest `count` lines across the live log and its rotated files.
+    fn log_tail(&self, count: usize) -> Vec<String> {
+        let Some(dir) = lock(&self.dir).clone() else {
+            return vec![];
+        };
+        let mut newest_first: Vec<String> = Vec::new();
+        let files = std::iter::once(dir.join(FILE_NAME))
+            .chain((1..KEEP_FILES).map(|n| dir.join(format!("{FILE_NAME}.{n}"))));
+        for path in files {
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            newest_first.extend(content.lines().rev().map(str::to_owned));
+            if newest_first.len() >= count {
+                break;
+            }
+        }
+        newest_first.truncate(count);
+        newest_first.reverse();
+        newest_first
+    }
+
     #[cfg(test)]
     pub fn stderr_lines(&self) -> Vec<String> {
         lock(&self.stderr).iter().cloned().collect()
@@ -234,9 +311,18 @@ impl Diagnostics {
     pub fn reset(&self) {
         lock(&self.stderr).clear();
         lock(&self.events).clear();
+        lock(&self.errors).clear();
         *lock(&self.dir) = None;
         *lock(&self.home) = None;
     }
+}
+
+/// `pomi-diagnostics-YYYYMMDD.txt`, the suggested name of the exported bundle.
+pub fn bundle_file_name() -> String {
+    format!(
+        "pomi-diagnostics-{}.txt",
+        timestamp()[..10].replace('-', "")
+    )
 }
 
 /// `pomi-translate.log.1` is the newest rotated file, `.4` the oldest; the oldest is dropped.
@@ -289,7 +375,10 @@ mod tests {
             assert!(!clean.contains(secret), "{secret} leaked: {clean}");
         }
         assert!(clean.contains("request failed"), "{clean}");
-        assert!(clean.contains("token=short"), "short values stay readable: {clean}");
+        assert!(
+            clean.contains("token=short"),
+            "short values stay readable: {clean}"
+        );
     }
 
     #[test]
@@ -298,7 +387,10 @@ mod tests {
             "Scanning C:\\Users\\kim\\Worlds\\Roguefire: 12 files, region r.0.0.mca",
             Some("C:\\Users\\kim"),
         );
-        assert_eq!(clean, "Scanning ~\\Worlds\\Roguefire: 12 files, region r.0.0.mca");
+        assert_eq!(
+            clean,
+            "Scanning ~\\Worlds\\Roguefire: 12 files, region r.0.0.mca"
+        );
     }
 
     #[test]
@@ -318,7 +410,11 @@ mod tests {
         let lines = diag.stderr_lines();
         assert_eq!(lines.len(), STDERR_RING_LINES);
         assert_eq!(lines[0], "line 26");
-        assert!(!lines.last().unwrap().contains("sk-live"), "{}", lines.last().unwrap());
+        assert!(
+            !lines.last().unwrap().contains("sk-live"),
+            "{}",
+            lines.last().unwrap()
+        );
         assert!(diag.snapshot().contains("line 30"));
     }
 
@@ -351,6 +447,54 @@ mod tests {
             let size = fs::metadata(dir.path().join(name)).unwrap().len();
             assert!(size <= MAX_FILE_BYTES + 2000, "{name} is {size} bytes");
         }
+    }
+
+    #[test]
+    fn the_bundle_lists_error_codes_with_times_the_log_tail_and_no_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let diag = Diagnostics::default();
+        diag.set_dir(dir.path().to_path_buf());
+        diag.log_error(
+            "core:scan.start",
+            &IpcError::new(
+                "CORE_CRASHED",
+                "exit 3 while holding sk-abcdef0123456789abcdef",
+            ),
+        );
+        diag.core_stderr("Traceback: provider echoed Bearer sk-live-00112233445566778899");
+        // A line written to the file before a rule existed is cleaned when the bundle is made.
+        fs::write(
+            dir.path().join(FILE_NAME),
+            "2026-01-01T00:00:00Z INFO app token=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1\nsecond line\n",
+        )
+        .unwrap();
+        let bundle = diag.bundle("9.9.9");
+        assert!(bundle.contains("app version: 9.9.9"));
+        assert!(bundle.contains(&format!("build: {}", crate::BUILD_SHA)));
+        assert!(bundle.contains("platform: "));
+        assert!(bundle.contains("core:scan.start CORE_CRASHED"), "{bundle}");
+        assert!(bundle.contains("second line"));
+        assert!(bundle.contains("-- translation core stderr (last 200 lines) --"));
+        for secret in [
+            "sk-abcdef0123456789abcdef",
+            "sk-live-00112233445566778899",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1",
+        ] {
+            assert!(!bundle.contains(secret), "{secret} leaked:\n{bundle}");
+        }
+        // The error list carries codes and times, never the message text.
+        let errors = bundle.split("-- recent events --").next().unwrap();
+        assert!(!errors.contains("exit 3"), "{errors}");
+    }
+
+    #[test]
+    fn the_suggested_bundle_name_is_dated_text() {
+        let name = bundle_file_name();
+        assert!(
+            name.starts_with("pomi-diagnostics-") && name.ends_with(".txt"),
+            "{name}"
+        );
+        assert_eq!(name.len(), "pomi-diagnostics-20261023.txt".len());
     }
 
     #[test]

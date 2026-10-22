@@ -156,6 +156,13 @@ pub const UPDATE_CODES: &[&str] = &[
     code::UPDATE_INSTALL_FAILED,
 ];
 
+/// Second-level reasons carried in `IpcError::detail` next to an existing code. They are not codes of
+/// their own, so they have no catalog text of their own.
+pub mod detail {
+    /// `CORE_STOPPED` because the person force-stopped the job.
+    pub const JOB_FORCE_STOPPED: &str = "JOB_FORCE_STOPPED";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,7 +170,10 @@ mod tests {
     #[test]
     fn errors_serialize_as_a_code_message_object() {
         let value = serde_json::to_value(IpcError::new(code::BUSY, "busy")).unwrap();
-        assert_eq!(value, serde_json::json!({"code": "BUSY", "message": "busy"}));
+        assert_eq!(
+            value,
+            serde_json::json!({"code": "BUSY", "message": "busy"})
+        );
         let value = serde_json::to_value(
             IpcError::new(code::CREDENTIAL_UNAVAILABLE, "x").with_detail(code::VAULT_CORRUPT),
         )
