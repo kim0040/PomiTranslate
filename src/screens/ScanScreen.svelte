@@ -7,6 +7,8 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import SetupNotice from '../components/SetupNotice.svelte';
   import { exportDocument } from '../lib/document-export';
+  import { clock, holdClock } from '../lib/clock.svelte';
+  import { warningText } from '../lib/failures';
 
   async function exportReport(): Promise<void> {
     try {
@@ -14,12 +16,11 @@
     } catch (cause) { app.fail(cause); }
   }
 
-  let now = $state(Date.now());
   $effect(() => {
     if (app.busy !== 'scan') return;
-    const timer = setInterval(() => { now = Date.now(); }, 500);
-    return () => clearInterval(timer);
+    return holdClock();
   });
+  const now = $derived(clock.now);
 
   const scanning = $derived(app.busy === 'scan');
   const scan = $derived(app.scan);
@@ -29,11 +30,6 @@
     Object.entries(scan?.kinds ?? {}).sort((a, b) => b[1] - a[1])
   );
   const fileLabel = (file: string) => baseName(file);
-  const warnText = (w: { code: string; file?: string; count?: number }) => {
-    const key = `scan.warn.${w.code}` as MessageKey;
-    return t(key, { file: w.file ?? '', count: w.count ?? 0 });
-  };
-  const knownWarnings = ['chunk_unreadable', 'file_unwritable', 'file_unreadable', 'command_unparsed'];
   const coverage = $derived(scan?.coverage ?? []);
   const scanned = $derived(coverage.filter((item) => item.scanned));
   const notScanned = $derived(coverage.filter((item) => !item.scanned));
@@ -55,12 +51,12 @@
   </header>
 
   {#if scanning}
-    <section class="card working" aria-live="polite">
+    <section class="card working">
       <div class="row">
         <Icon name="search" size={22} />
         <h2>{t('scan.running')}</h2>
         <span class="spacer"></span>
-        <span class="muted num">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
+        <span class="muted num" role="timer" aria-live="off">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
       </div>
       <ProgressBar
         label={t('scan.running')}
@@ -122,7 +118,7 @@
       <Callout tone="warning" title={t('scan.warnings')}>
         <ul class="plain">
           {#each scan.warnings as warning}
-            <li>{knownWarnings.includes(warning.code) ? warnText(warning) : (warning.message ?? t('scan.warn.unknown'))}</li>
+            <li>{warningText(warning)}</li>
           {/each}
         </ul>
       </Callout>

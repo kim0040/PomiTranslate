@@ -147,10 +147,11 @@ describe('CandidateSource query state', () => {
   it('can retry a failed page without losing the filter', async () => {
     callBackendMock.mockRejectedValueOnce(new Error('fixture page failure'));
     callBackendMock.mockResolvedValueOnce(page({ total: 1 }));
-    const source = new CandidateSource(() => ({ excluded: [], manual: [] }));
+    // The text on screen comes from the app's describe(), never from the raw failure.
+    const source = new CandidateSource(() => ({ excluded: [], manual: [] }), () => 'localized page failure');
     source.query = 'shop';
     source.reset('fixture');
-    await vi.waitFor(() => expect(source.error).toContain('fixture page failure'));
+    await vi.waitFor(() => expect(source.error).toBe('localized page failure'));
     source.reset();
     await vi.waitFor(() => expect(source.total).toBe(1));
     expect(source.error).toBe('');

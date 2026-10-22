@@ -12,8 +12,14 @@ import {
   resetCredentialStorage,
   onZoomFailed,
   onProgress,
+  type BackupLocation,
   type BackupSummary,
+  type BackupUsage,
+  type BackupsListPayload,
   type BootstrapPayload,
+  type InterruptedJob,
+  type RecoveryResult,
+  type ReviewDraft,
   type Estimate,
   type ModelInfo,
   type Notices,
@@ -27,20 +33,47 @@ import {
   type WorldInspection
 } from './api';
 import {
-  cancelUpdate, checkForUpdate, confirmExit, forceExit, installUpdate, onExitConfirm, onExitStuck, onExitWaiting,
-  onOpenWorld, onUpdateProgress, openExternal, type MenuAction, type UpdateInfo
+  appVersion, cancelUpdate, checkForUpdate, confirmExit, dataLocations, forceExit, installUpdate, onExitConfirm, onExitStuck, onExitWaiting,
+  onOpenWorld, onUpdateProgress, openExternal, revealPath, type MenuAction, type UpdateInfo
 } from './native';
+import { expectedLogFolder, formatDiagnostics, newDiagnosticId } from './diagnostics';
+import { hasConsent, loadLocalPrefs, rememberConsent, saveLocalPrefs, type LocalPrefs } from './local-prefs';
+import { notificationsAvailable, requestNotificationPermission, sendNotification } from './plugins';
+import { cleanOverrides } from './review';
+import { LISTABLE_PROVIDERS } from './recommended-models';
 import { resourcePackOptions } from './resource-pack';
 import { CandidateSource } from './candidates.svelte';
-import { hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
+import { detectLocale, hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
 import { applyTheme, type ThemeChoice } from './theme';
 import { emptyProgress, reduceProgress, type JobProgress } from './workflow';
 import { normalizedScanOptions, scanOptionsSignature } from './settings';
 
 export type Page = 'workspace' | 'backups' | 'settings' | 'about' | 'help';
 export type Step = 'world' | 'scan' | 'review' | 'run' | 'result';
-export type Busy = '' | 'loading' | 'scan' | 'translate' | 'restore' | 'models' | 'prompt' | 'settings' | 'usage';
+export type Busy = '' | 'loading' | 'scan' | 'translate' | 'restore' | 'recovery' | 'prompt' | 'settings' | 'usage';
 export type Tone = 'info' | 'success' | 'error';
+/** Why Start is unavailable, in the order the screens explain it. */
+export type RunBlocker = 'recovery' | 'credential' | 'interrupted' | 'model' | 'key';
+/** What a pending question about dropping an unsaved review is about. */
+export type DiscardReason = 'world' | 'restore' | 'forget' | 'rescan' | 'settings';
+export type DraftState = 'idle' | 'saving' | 'saved' | 'error';
+export type Toast = { id: number; tone: Tone; message: string; ms: number };
+
+/** The language a person translating in this UI language most likely wants as the target. */
+export const DEFAULT_TARGET: Record<Locale, string> = { ko: '한국어', en: 'English', ja: '日本語' };
+const DRAFT_SAVE_DELAY = 800;
+const ESTIMATE_DELAY = 400;
+const PREFS_RETRY_LIMIT = 5;
+/** Backend calls whose type the core does not know yet (an older core) fail with these codes. */
+const UNKNOWN_COMMAND_CODES = ['UNSUPPORTED_REQUEST', 'UNKNOWN_REQUEST'];
+
+/** An error whose message is already shown text in the display language (made by this file). */
+class LocalizedError extends Error {}
+
+function samePath(a: string, b: string): boolean {
+  const norm = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return !!a && !!b && norm(a) === norm(b);
+}
 
 export const STEPS: Step[] = ['world', 'scan', 'review', 'run', 'result'];
 
@@ -63,7 +96,7 @@ export const DEFAULT_PREFS: AppPrefs = {
 export type UpdateState = 'idle' | 'checking' | 'installing' | 'error';
 /** Menu commands that work while the core failed to start: help pages and links only. */
 const STARTUP_SAFE_ACTIONS: MenuAction[] = ['help', 'shortcuts', 'licenses', 'report'];
-const RESUMABLE = ['cancelled', 'needs_retry', 'failed'];
+const RESUMABLE = ['cancelled', 'needs_retry', 'failed', 'partial'];
 /** Settings that change which text a scan finds. Changing one makes a reviewed scan stale. */
 const SCOPE_KEYS: (keyof Settings)[] = ['target_language', 'resource_pack_enabled', 'skip_target_language_text'];
 
@@ -93,7 +126,7 @@ export class AppState {
   updateError = $state('');
   updateProgress = $state<{ downloaded: number; total: number | null } | null>(null);
   banner = $state<{ tone: 'error' | 'warning'; message: string } | null>(null);
-  toasts = $state<{ id: number; tone: Tone; message: string }[]>([]);
+  toasts = $state<Toast[]>([]);
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
@@ -118,6 +151,9 @@ export class AppState {
   credentialRecovery = new SvelteSet<string>();
   private settingsRecoveryRevision = 0;
   models = $state<ModelInfo[]>([]);
+  /** A model-list request is running. Separate from `busy`, so it never blocks scan, review or save. */
+  modelsLoading = $state(false);
+  private modelsInFlight: { scope: string; promise: Promise<number> } | null = null;
   modelsScope = $state('');
   modelsCached = $state(false);
   private modelCatalogs = new Map<string, { models: ModelInfo[]; fetchedAt: number; cached: boolean }>();
@@ -128,14 +164,39 @@ export class AppState {
   discovered = $state<DiscoveredWorld[]>([]);
   discoveredLoaded = $state(false);
   backups = $state<BackupSummary[]>([]);
+  /** False once the core said it has no backups.delete/prune (an older core): the controls are hidden. */
+  backupAdminSupported = $state(true);
+  /** Disk used by backups; absent when the core is too old to report it. */
+  backupUsage = $state<BackupUsage | null>(null);
+  /** Work an earlier run left half done, found at start-up. */
+  interruptedJobs = $state<InterruptedJob[]>([]);
+  /** The finished recovery the person is looking at (its job leaves the list once decided). */
+  recoveryResult = $state<{ job: InterruptedJob; result: RecoveryResult } | null>(null);
+  recoveryJobId = $state('');
 
   scan = $state<ScanResult | null>(null);
+  /** When the scan on screen was made (ms), for the return-visit summary. */
+  scanAt = $state(0);
   candidates = new CandidateSource(() => ({
     excluded: [...this.excluded],
-    manual: Object.entries(this.overrides).filter(([, value]) => value.trim()).map(([id]) => id)
-  }));
+    manual: Object.keys(this.effectiveOverrides)
+  }), (cause) => this.describe(cause));
   excluded = new SvelteSet<string>();
+  /** What was typed, exactly as typed. `effectiveOverrides` is what counts. */
   overrides = $state<Record<string, string>>({});
+  /** Manual translations as sent: trimmed, blank ones dropped. */
+  effectiveOverrides = $derived(cleanOverrides(this.overrides));
+  /** Bumped on every include/exclude/override change; screens depend on this instead of the sets. */
+  reviewVersion = $state(0);
+  draftState = $state<DraftState>('idle');
+  /** The review has changes that are not stored in the core yet. */
+  private draftDirty = $state(false);
+  /** False once the core answered that it has no draft commands (an older core). */
+  private draftSupported = $state(true);
+  private draftTimer: ReturnType<typeof setTimeout> | null = null;
+  private estimateTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The question "drop this unsaved review?" and what to do on yes. */
+  discardPrompt = $state<{ reason: DiscardReason; resolve: (agreed: boolean) => void } | null>(null);
   estimate = $state<Estimate | null>(null);
   /** True while a newer estimate is on its way, so screens can say "calculating" instead of "unknown". */
   estimateLoading = $state(false);
@@ -146,6 +207,17 @@ export class AppState {
   resume = $state<ResumeStatus | null>(null);
   /** The recovery snapshot of the last restore, until the next scan or world change replaces the job. */
   lastRestoreId = $state('');
+  /** The last failure the person was shown, for the diagnostics copy. */
+  lastError = $state<{ code: string; id: string; at: number } | null>(null);
+  /** Switches kept in this web view (see local-prefs.ts). */
+  localPrefs = $state<LocalPrefs>(loadLocalPrefs());
+  /** The shell can show system notifications (plugin present). */
+  notificationsSupported = $state(false);
+  /** The person has not yet picked a display and target language in the first-run dialog. */
+  firstRun = $state(false);
+  private targetTouched = false;
+  private prefsAttempts = 0;
+  private prefsGaveUp = false;
 
   private toastSerial = 0;
   private estimateRevision = 0;
@@ -165,7 +237,7 @@ export class AppState {
 
   get manualCount(): number {
     if (this.estimate && Object.keys(this.settings.source_overrides ?? {}).length) return Math.max(0, this.includedCount - this.estimate.candidateCount);
-    return Object.entries(this.overrides).filter(([id, value]) => value.trim() && !this.excluded.has(id)).length;
+    return Object.keys(this.effectiveOverrides).filter((id) => !this.excluded.has(id)).length;
   }
 
   manualTranslation(candidate: import('./api').Candidate): string {
@@ -198,10 +270,29 @@ export class AppState {
     return needs;
   }
 
+  /** Interrupted work on the world that is open. Translating or restoring it first would hide it. */
+  get interruptedHere(): InterruptedJob[] {
+    return this.interruptedJobs.filter((job) => samePath(job.worldPath, this.worldDir));
+  }
+
+  /**
+   * Everything that stops Start, in the order the screens explain it. Empty means Start works (apart
+   * from a job already running). Models and keys are not needed when every sentence is written by hand.
+   */
+  get runBlockers(): RunBlocker[] {
+    const blockers: RunBlocker[] = [];
+    if (this.settingsRecoveryRequired) blockers.push('recovery');
+    const needsProvider = !this.manualOnly;
+    if (this.credentialRecovery.has(this.settings.provider) || (needsProvider && this.credentialStoreError)) blockers.push('credential');
+    if (this.interruptedHere.length) blockers.push('interrupted');
+    if (needsProvider && !this.hasModel) blockers.push('model');
+    if (needsProvider && !this.apiKeyStored && !this.credentialStoreError) blockers.push('key');
+    return blockers;
+  }
+
   get canRun(): boolean {
     return !!this.scan && this.scan.status === 'completed' && !this.scan.writeBlockers?.length &&
-      this.includedCount > 0 && (this.hasModel || this.manualOnly) && (this.apiKeyStored || this.manualOnly) && !this.busy &&
-      !this.settingsRecoveryRequired && !this.credentialRecovery.has(this.settings.provider);
+      this.includedCount > 0 && !this.busy && this.runBlockers.length === 0;
   }
 
   get stepReached(): Record<Step, boolean> {
@@ -216,23 +307,52 @@ export class AppState {
   }
 
   get isBusy(): boolean {
-    return this.busy === 'scan' || this.busy === 'translate' || this.busy === 'restore';
+    return this.busy === 'scan' || this.busy === 'translate' || this.busy === 'restore' || this.busy === 'recovery';
   }
 
   // --- feedback ----------------------------------------------------------------------------
 
+  /**
+   * Show a toast. Errors stay until dismissed; the others leave on their own, and the toast region
+   * (components/Toasts.svelte) holds that timer while the pointer or focus is on a toast.
+   */
   notify(message: string, tone: Tone = 'info', ms = 5200): void {
+    // Behind an open dialog a toast cannot be reached, so an error raised meanwhile is shown inside
+    // the dialog instead (one place, announced once) and not queued as a second copy.
+    if (tone === 'error' && this.dialogDepth > 0) {
+      this.dialogError = message;
+      return;
+    }
     const id = ++this.toastSerial;
-    this.toasts = [...this.toasts, { id, tone, message }];
-    if (ms > 0) setTimeout(() => this.dismissToast(id), ms);
+    this.toasts = [...this.toasts, { id, tone, message, ms: tone === 'error' ? 0 : ms }];
+  }
+
+  /** Dialogs currently open, and the latest error to show inside them. */
+  dialogDepth = $state(0);
+  dialogError = $state('');
+
+  /** Called by each open Dialog. Returns the function that says it closed. */
+  registerDialog(): () => void {
+    this.dialogDepth += 1;
+    this.dialogError = '';
+    return () => {
+      this.dialogDepth = Math.max(0, this.dialogDepth - 1);
+      if (!this.dialogDepth) this.dialogError = '';
+    };
   }
 
   dismissToast(id: number): void {
     this.toasts = this.toasts.filter((toast) => toast.id !== id);
   }
 
-  /** A readable message for a failed call. Codes the shell or core sent map to catalog text. */
+  /**
+   * A readable message for a failed call, in the display language. A code the shell or core sent
+   * maps to catalog text with a next step; anything else gets the generic text and an error id the
+   * diagnostics copy carries. The raw English message of a failure is never shown.
+   */
   describe(cause: unknown): string {
+    if (cause instanceof LocalizedError) return cause.message;
+    const code = cause instanceof BackendError ? cause.code : '';
     if (cause instanceof BackendError) {
       const key = `error.${cause.code}`;
       if (cause.code === 'BUSY') return t('error.busy');
@@ -241,24 +361,41 @@ export class AppState {
         const why = cause.detail ? `error.${cause.detail}` : '';
         return why && hasMessage(why) ? `${t(key as MessageKey)} ${t(why as MessageKey)}` : t(key as MessageKey);
       }
-      // The shell's own English text is for the log, not for people.
-      if (cause.origin === 'shell') return `${t('error.default')} ${t('error.copyDiagnostics')}`;
-      return cause.message || t('error.default');
     }
-    // Anything else that reached here was not made by the core: say so plainly, and keep the detail
-    // for the diagnostics copy rather than showing raw English.
-    return `${t('error.default')} ${t('error.copyDiagnostics')}`;
+    const id = newDiagnosticId();
+    // Written outside any render: describe runs from handlers, never from a template.
+    this.lastError = { code: code || 'UNKNOWN', id, at: Date.now() };
+    return `${t('error.default')} ${t('error.copyDiagnostics')} ${t('error.id', { id })}`;
   }
 
-  /** Put the shell's diagnostics (versions, recent events, the core's last output) on the clipboard. */
+  /** Put what a bug report needs on the clipboard: versions, last error, log folder. No keys, no world text. */
   async copyDiagnostics(): Promise<void> {
     try {
-      const text = await diagnosticsSnapshot();
+      const shellText = await diagnosticsSnapshot().catch(() => '');
+      const places = await dataLocations();
+      const text = formatDiagnostics({
+        shellText,
+        appVersion: await appVersion(''),
+        revision: String((import.meta.env as Record<string, unknown>).VITE_BUILD_REVISION ?? ''),
+        uiLocale: this.locale,
+        browserLocale: typeof navigator === 'undefined' ? '' : navigator.language,
+        platform: typeof navigator === 'undefined' ? '' : navigator.platform,
+        provider: this.settings.provider,
+        model: this.settings.model,
+        lastError: this.lastError,
+        logFolder: expectedLogFolder(places?.app)
+      });
       await navigator.clipboard.writeText(text);
       this.notify(t('diagnostics.copied'), 'success');
     } catch {
       this.notify(t('diagnostics.copyFailed'), 'error');
     }
+  }
+
+  /** The error boundary caught a failure while drawing the app: keep an id for the diagnostics copy. */
+  reportCrash(error: unknown): void {
+    this.lastError = { code: error instanceof Error && error.name ? `UI_${error.name}`.toUpperCase() : 'UI_CRASH', id: newDiagnosticId(), at: Date.now() };
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) console.error('[ui] render failure', error);
   }
 
   /** Record what the shell reported about the key store. */
@@ -267,7 +404,9 @@ export class AppState {
   }
 
   fail(cause: unknown): void {
-    this.banner = { tone: 'error', message: this.describe(cause) };
+    const message = this.describe(cause);
+    this.banner = { tone: 'error', message };
+    if (this.dialogDepth > 0) this.dialogError = message;
   }
 
   // --- start-up ----------------------------------------------------------------------------
@@ -317,8 +456,11 @@ export class AppState {
       this.worldDir = boot.settings.last_world_dir || '';
       this.inspection = boot.worldInspection;
       this.backups = boot.backups;
+      this.interruptedJobs = Array.isArray(boot.interruptedJobs) ? boot.interruptedJobs : [];
       this.applyPrefs(boot);
-      if (this.worldDir && this.inspection?.validJavaWorld) this.step = 'scan';
+      this.applyFirstRunLanguage(boot);
+      void notificationsAvailable().then((ok) => { this.notificationsSupported = ok; });
+      if (this.worldDir && this.inspection?.validJavaWorld) this.step = this.interruptedHere.length ? 'world' : 'scan';
       this.applyResume(boot.resume);
 
     } catch (cause) {
@@ -333,6 +475,8 @@ export class AppState {
   destroy(): void {
     this.destroyed = true;
     if (this.prefsRetry) clearTimeout(this.prefsRetry);
+    if (this.draftTimer) clearTimeout(this.draftTimer);
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
     for (const stop of this.unsubscribe) stop();
     this.unsubscribe = [];
   }
@@ -361,6 +505,30 @@ export class AppState {
     }
   }
 
+  /**
+   * First launch: show the interface in the language the system uses (Korean, English or Japanese,
+   * else English) and suggest that language as the translation target. Nothing is saved until the
+   * notice is accepted, so closing the app during the dialog leaves the install as it was.
+   */
+  private applyFirstRunLanguage(boot: BootstrapPayload): void {
+    // The notice is shown exactly on a launch nobody has accepted it on yet (applyPrefs decided that).
+    this.firstRun = this.showNotice;
+    if (!this.firstRun || boot.settings.app_prefs) return;
+    this.chooseFirstRunLanguage(detectLocale());
+  }
+
+  /** The language switcher of the first-run dialog: applies at once, saved on accept. */
+  chooseFirstRunLanguage(locale: Locale): void {
+    this.settings = { ...this.settings, ui_language: locale };
+    if (!this.targetTouched) this.settings.target_language = DEFAULT_TARGET[locale];
+    setLocale(locale);
+  }
+
+  setFirstRunTarget(value: string): void {
+    this.targetTouched = true;
+    this.settings = { ...this.settings, target_language: value };
+  }
+
   private unsavedPrefs: Partial<AppPrefs> = {};
   private prefsRetry: ReturnType<typeof setTimeout> | null = null;
 
@@ -376,8 +544,19 @@ export class AppState {
     try {
       const saved = await callBackend<{ prefs: AppPrefs }>('prefs.set', { prefs: pending });
       this.prefs = { ...this.prefs, ...saved.prefs, ...this.unsavedPrefs };
+      this.prefsAttempts = 0;
+      this.prefsGaveUp = false;
     } catch {
       this.unsavedPrefs = { ...pending, ...this.unsavedPrefs };
+      this.prefsAttempts += 1;
+      if (this.prefsAttempts >= PREFS_RETRY_LIMIT) {
+        // The change applies for this session; stop retrying and say so once.
+        if (!this.prefsGaveUp) {
+          this.prefsGaveUp = true;
+          this.notify(t('prefs.notSaved'), 'error');
+        }
+        return;
+      }
       if (!this.prefsRetry && !this.destroyed) {
         this.prefsRetry = setTimeout(() => {
           this.prefsRetry = null;
@@ -392,6 +571,11 @@ export class AppState {
     this.showNotice = false;
     if (!this.prefs.tutorial_seen) this.showTour = true;
     void this.setPrefs({ notice_accepted: true });
+    if (this.firstRun) {
+      this.firstRun = false;
+      // The language and target picked in the dialog become the saved settings.
+      void this.persistSettings().catch((cause) => this.fail(cause));
+    }
   }
 
   finishTour(): void {
@@ -662,7 +846,13 @@ export class AppState {
     this.lastRestoreId = '';
     this.estimateRevision++;
     this.estimateLoading = false;
+    if (this.draftTimer) { clearTimeout(this.draftTimer); this.draftTimer = null; }
+    if (this.estimateTimer) { clearTimeout(this.estimateTimer); this.estimateTimer = null; }
+    this.draftDirty = false;
+    this.draftState = 'idle';
+    this.reviewVersion += 1;
     this.scan = null;
+    this.scanAt = 0;
     this.candidates.reset('');
     this.excluded.clear();
     this.overrides = {};
@@ -670,6 +860,140 @@ export class AppState {
     this.result = null;
     this.progress = emptyProgress();
     this.resume = null;
+  }
+
+  // --- review draft ------------------------------------------------------------------------
+
+  /** Excluded sentences plus manual translations in the review. */
+  get draftCount(): number {
+    return this.excluded.size + Object.keys(this.effectiveOverrides).length;
+  }
+
+  /**
+   * Dropping the review would lose work: it has content and is not stored in the core (or the core
+   * cannot store drafts at all). A stored draft is restored on re-scan, so it needs no question.
+   */
+  get draftNeedsConfirm(): boolean {
+    return this.draftCount > 0 && (this.draftDirty || !this.draftSupported);
+  }
+
+  /**
+   * May the review be dropped now? Yes at once when nothing would be lost; otherwise the question
+   * is shown (components/DiscardReviewDialog.svelte) and this resolves with the answer. Callers try
+   * to store the draft first, so the question only appears when that was not possible.
+   */
+  async mayDiscard(reason: DiscardReason): Promise<boolean> {
+    if (this.draftDirty) await this.storeReview(true);
+    if (!this.draftNeedsConfirm) return true;
+    this.discardPrompt?.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      this.discardPrompt = { reason, resolve };
+    });
+  }
+
+  answerDiscard(agreed: boolean): void {
+    const prompt = this.discardPrompt;
+    this.discardPrompt = null;
+    prompt?.resolve(agreed);
+  }
+
+  /** A review choice changed (include/exclude or manual text). */
+  private reviewChanged(): void {
+    this.reviewVersion += 1;
+    this.estimate = null;
+    this.estimateLoading = true;
+    this.draftDirty = true;
+    this.scheduleDraftSave();
+    this.scheduleEstimate();
+  }
+
+  private scheduleEstimate(): void {
+    if (this.estimateTimer) clearTimeout(this.estimateTimer);
+    this.estimateTimer = setTimeout(() => {
+      this.estimateTimer = null;
+      void this.loadEstimate();
+    }, ESTIMATE_DELAY);
+  }
+
+  private scheduleDraftSave(delay = DRAFT_SAVE_DELAY): void {
+    if (!this.scan || !this.draftSupported || this.destroyed) return;
+    if (this.draftTimer) clearTimeout(this.draftTimer);
+    this.draftTimer = setTimeout(() => {
+      this.draftTimer = null;
+      void this.storeReview();
+    }, delay);
+  }
+
+  /** Store the review in the core now. Resolves true when nothing is left unstored. */
+  async storeReview(force = false): Promise<boolean> {
+    if (this.draftTimer) { clearTimeout(this.draftTimer); this.draftTimer = null; }
+    const scan = this.scan;
+    if (!scan || !this.draftDirty) return !this.draftDirty;
+    if (!this.draftSupported) return false;
+    // The core is busy with a job and answers in order; store the draft when it has finished.
+    if (this.isBusy && !force) return false;
+    const version = this.reviewVersion;
+    this.draftState = 'saving';
+    try {
+      await callBackend('review.draft.set', {
+        scanPlanId: scan.scanPlanId,
+        excludedCandidateIds: [...this.excluded],
+        candidateOverrides: this.effectiveOverrides
+      });
+      if (this.scan?.scanPlanId === scan.scanPlanId && version === this.reviewVersion) this.draftDirty = false;
+      this.draftState = 'saved';
+      return !this.draftDirty;
+    } catch (cause) {
+      const code = cause instanceof BackendError ? cause.code : '';
+      if (UNKNOWN_COMMAND_CODES.includes(code)) {
+        this.draftSupported = false;
+        this.draftState = 'idle';
+      } else if (code === 'DRAFT_TOO_LARGE') {
+        this.draftState = 'error';
+        this.notify(t('review.draft.tooLarge'), 'error');
+      } else if (code === 'PLAN_NOT_FOUND') {
+        this.draftState = 'error';
+      } else {
+        this.draftState = 'error';
+        this.scheduleDraftSave(5000);
+      }
+      return false;
+    }
+  }
+
+  /** Bring back the review stored for this scan plan, unless the person already changed it. */
+  private async restoreDraft(planId: string): Promise<void> {
+    if (!this.draftSupported) return;
+    const version = this.reviewVersion;
+    try {
+      const draft = await callBackend<ReviewDraft>('review.draft.get', { scanPlanId: planId });
+      if (!draft.exists || this.scan?.scanPlanId !== planId || version !== this.reviewVersion) return;
+      const ids = draft.excludedCandidateIds ?? [];
+      const typed = draft.candidateOverrides ?? {};
+      if (!ids.length && !Object.keys(typed).length) return;
+      this.excluded.clear();
+      for (const id of ids) this.excluded.add(id);
+      this.overrides = { ...typed };
+      this.draftDirty = false;
+      this.draftState = 'saved';
+      this.reviewVersion += 1;
+      this.candidates.refetchSoon(0);
+      void this.loadEstimate();
+      this.notify(t('review.draft.restored', { excluded: ids.length, manual: Object.keys(typed).length }), 'info', 6000);
+    } catch (cause) {
+      if (cause instanceof BackendError && UNKNOWN_COMMAND_CODES.includes(cause.code)) this.draftSupported = false;
+      // A draft that cannot be read is simply absent: the review starts empty.
+    }
+  }
+
+  /** Remove the stored draft once the review has been applied (or thrown away on purpose). */
+  private async clearDraft(planId: string): Promise<void> {
+    if (!this.draftSupported) return;
+    try {
+      await callBackend('review.draft.clear', { scanPlanId: planId });
+    } catch (cause) {
+      if (cause instanceof BackendError && UNKNOWN_COMMAND_CODES.includes(cause.code)) this.draftSupported = false;
+    }
   }
 
   async chooseWorld(): Promise<void> {
@@ -683,6 +1007,8 @@ export class AppState {
   }
 
   async useWorld(path: string): Promise<void> {
+    if (this.isBusy) return;
+    if (path !== this.worldDir && !(await this.mayDiscard('world'))) return;
     if (this.isBusy) return;
     this.banner = null;
     try {
@@ -705,12 +1031,14 @@ export class AppState {
   }
 
   async forgetWorld(path: string): Promise<void> {
+    if (this.worldDir === path && !(await this.mayDiscard('forget'))) return;
     try {
       this.recent = (await callBackend<{ worlds: RecentWorld[] }>('worlds.forget', { worldDir: path })).worlds;
       if (this.worldDir === path) {
         this.worldDir = '';
         this.inspection = null;
         this.backups = [];
+        this.backupUsage = null;
         this.resetJob();
         this.step = 'world';
       }
@@ -722,9 +1050,12 @@ export class AppState {
   async loadBackups(): Promise<void> {
     if (!this.worldDir) {
       this.backups = [];
+      this.backupUsage = null;
       return;
     }
-    this.backups = (await callBackend<{ backups: BackupSummary[] }>('backups.list', { worldDir: this.worldDir })).backups;
+    const listed = await callBackend<BackupsListPayload>('backups.list', { worldDir: this.worldDir });
+    this.backups = listed.backups;
+    this.backupUsage = listed.usage ?? null;
   }
 
   // --- resume ------------------------------------------------------------------------------
@@ -750,29 +1081,61 @@ export class AppState {
     for (const id of resumable.excludedCandidateIds || []) this.excluded.add(id);
     this.overrides = { ...(resumable.candidateOverrides || {}) };
     this.resume = resumable;
+    this.draftDirty = false;
+    this.reviewVersion += 1;
+    this.scanAt = (resumable.savedAt ?? 0) * 1000;
     this.candidates.reset(resumable.scanPlanId, resumable.candidates, resumable.candidateCount);
     void this.loadEstimate();
+    // A checkpoint carries its own choices; without one the stored review draft (if any) applies.
+    if (!this.excluded.size && !Object.keys(this.overrides).length) void this.restoreDraft(resumable.scanPlanId);
+  }
+
+  /** Throw away the saved partial run (and its checkpoint) so the next start begins from scratch. */
+  async discardResume(): Promise<boolean> {
+    if (!this.worldDir || this.isBusy) return false;
+    try {
+      await callBackend<{ discarded: number }>('resume.discard', {
+        worldDir: this.worldDir,
+        ...(this.scan ? { scanPlanId: this.scan.scanPlanId } : {})
+      });
+      this.resume = null;
+      this.notify(t('run.discarded'), 'success');
+      return true;
+    } catch (cause) {
+      this.fail(cause);
+      return false;
+    }
   }
 
   // --- scan --------------------------------------------------------------------------------
 
   async startScan(): Promise<void> {
     if (!this.worldDir || this.isBusy) return;
+    if (this.scan && !(await this.mayDiscard('rescan'))) return;
+    if (this.isBusy) return;
     this.busy = 'scan';
     this.banner = null;
     this.resetJob();
     this.progress = { ...emptyProgress(), phase: 'collect', startedAt: Date.now() };
+    let finished = false;
     try {
       await this.persistSettings();
       this.scan = await callBackend<ScanResult>('scan.start', { worldDir: this.worldDir });
+      this.scanAt = Date.now();
       this.estimate = this.scan.estimate ?? null;
       this.candidates.reset(this.scan.scanPlanId, this.scan.candidates, this.scan.candidateCount);
+      finished = this.scan.status === 'completed';
     } catch (cause) {
       this.fail(cause);
     } finally {
       this.busy = '';
       this.progress = emptyProgress();
     }
+    const cancelled = this.cancelling;
+    this.cancelling = false;
+    this.announce('scan', finished, cancelled);
+    // The same plan (same world and settings) gets its earlier review back.
+    if (finished && this.scan) void this.restoreDraft(this.scan.scanPlanId);
   }
 
   async loadEstimate(): Promise<void> {
@@ -786,7 +1149,7 @@ export class AppState {
       const estimate = await callBackend<Estimate>('estimate.get', {
         scanPlanId: planId,
         excludedCandidateIds: [...this.excluded],
-        overrideCandidateIds: Object.entries(this.overrides).filter(([, value]) => value.trim()).map(([id]) => id)
+        overrideCandidateIds: Object.keys(this.effectiveOverrides)
       });
       if (revision === this.estimateRevision && signature === this.estimateSignature()) this.estimate = estimate;
     } catch {
@@ -797,22 +1160,38 @@ export class AppState {
   }
 
   private estimateSignature(): string {
-    return JSON.stringify([this.scan?.scanPlanId, this.settings, [...this.excluded].sort(),
-      Object.entries(this.overrides).filter(([, value]) => value.trim()).map(([id]) => id).sort()]);
+    return JSON.stringify([this.scan?.scanPlanId, this.settings, this.reviewVersion]);
   }
 
   setIncluded(id: string, included: boolean): void {
-    this.estimate = null;
+    if (this.excluded.has(id) === !included) return;
     if (included) this.excluded.delete(id);
     else this.excluded.add(id);
+    this.reviewChanged();
   }
 
+  /** Include or exclude many sentences at once (a whole filtered list) as one review change. */
+  setIncludedMany(ids: string[], included: boolean): void {
+    let changed = false;
+    for (const id of ids) {
+      if (this.excluded.has(id) === !included) continue;
+      if (included) this.excluded.delete(id);
+      else this.excluded.add(id);
+      changed = true;
+    }
+    if (changed) this.reviewChanged();
+  }
+
+  /**
+   * Keep what was typed exactly as typed (so the box does not jump while typing); `effectiveOverrides`
+   * is the trimmed version that is counted, estimated, saved and sent.
+   */
   setOverride(id: string, value: string): void {
-    this.estimate = null;
     const next = { ...this.overrides };
     if (value) next[id] = value;
     else delete next[id];
     this.overrides = next;
+    this.reviewChanged();
   }
 
   // --- translate ---------------------------------------------------------------------------
@@ -821,8 +1200,13 @@ export class AppState {
     this.progress = reduceProgress(this.progress, event);
   }
 
-  async startTranslate(options: { resume?: boolean } = {}): Promise<void> {
+  async startTranslate(options: { resume?: boolean; fromInterrupted?: boolean } = {}): Promise<void> {
     if (!this.scan || this.isBusy || this.settingsRecoveryRequired || this.credentialRecovery.has(this.settings.provider)) return;
+    // Continuing an interrupted job is the one start allowed while it is open.
+    if (this.interruptedHere.length && !options.fromInterrupted) return;
+    // The review is stored before the job takes the core; a draft that cannot be stored is not lost
+    // because the job's own checkpoint keeps the reviewed choices.
+    await this.storeReview();
     this.busy = 'translate';
     this.cancelling = false;
     this.banner = null;
@@ -830,6 +1214,7 @@ export class AppState {
     this.step = 'run';
     this.progress = { ...emptyProgress(), phase: 'collect', startedAt: Date.now() };
     let outcome: TranslationResult | null = null;
+    const planId = this.scan.scanPlanId;
     try {
       await this.persistSettings();
       outcome = await callBackend<TranslationResult>(options.resume ? 'translate.resume' : 'translate.start', {
@@ -837,7 +1222,7 @@ export class AppState {
         fingerprint: this.scan.fingerprint,
         scanPlanId: this.scan.scanPlanId,
         excludedCandidateIds: [...this.excluded],
-        candidateOverrides: this.overrides,
+        candidateOverrides: this.effectiveOverrides,
         manualOnly: this.manualOnly,
         provider: this.settings.provider,
         model: this.settings.model,
@@ -853,10 +1238,14 @@ export class AppState {
         // A resumed job keeps its reviewed choices: applyResume rebuilds them from the checkpoint.
       } else {
         this.resume = null;
+        // The review has been applied; a stored draft would only come back as a stale suggestion.
+        if (outcome.status === 'completed') void this.clearDraft(planId);
       }
     } catch (cause) {
       this.fail(cause);
       this.step = this.scan ? 'run' : 'scan';
+      // An unfinished job of this world must be settled first: take the person to where that happens.
+      if (cause instanceof BackendError && cause.code === 'RECOVERY_REQUIRED') await this.openInterrupted();
       if (!options.resume && this.resume) {
         // Starting over drops the saved checkpoint; ask what is left rather than offer a stale resume.
         void callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir })
@@ -865,9 +1254,20 @@ export class AppState {
       }
     } finally {
       this.busy = '';
-      this.cancelling = false;
       this.progress = emptyProgress();
     }
+    const cancelled = this.cancelling || outcome?.status === 'cancelled';
+    this.cancelling = false;
+    this.announce('translate', !!outcome && (outcome.status === 'completed' || outcome.status === 'partial'), cancelled);
+    if (this.draftDirty) this.scheduleDraftSave(0);
+  }
+
+  /** A run that failed before writing anything: start it again from the scan that is still on screen. */
+  translateAgain(): void {
+    if (!this.scan || this.isBusy || !this.stepReached.run) return;
+    this.result = null;
+    this.banner = null;
+    this.step = 'run';
   }
 
   async cancel(): Promise<void> {
@@ -883,15 +1283,22 @@ export class AppState {
 
   async restore(backupSetId: string): Promise<boolean> {
     if (!this.worldDir || this.isBusy) return false;
+    if (this.interruptedHere.length) {
+      this.notify(t('recovery.blocksRestore'), 'error');
+      return false;
+    }
+    if (this.scan && !(await this.mayDiscard('restore'))) return false;
+    if (this.isBusy) return false;
     this.busy = 'restore';
     this.banner = null;
+    let ok = false;
     try {
       const restored = await callBackend<{ status: string; recoverySetId: string }>('restore.start', {
         worldDir: this.worldDir,
         backupSetId
       });
       if (restored.status !== 'restored' || !restored.recoverySetId) {
-        throw new Error(t('backups.restoreUnconfirmed'));
+        throw new LocalizedError(t('backups.restoreUnconfirmed'));
       }
       this.resetJob();
       // Set after the reset: the scan and backup pages say why the reviewed scan is gone.
@@ -899,13 +1306,176 @@ export class AppState {
       this.step = 'scan';
       await this.loadBackups();
       this.notify(t('backups.restoreDone'), 'success', 9000);
+      ok = true;
       return true;
     } catch (cause) {
       this.fail(cause);
+      if (cause instanceof BackendError && cause.code === 'RECOVERY_REQUIRED') await this.openInterrupted();
       return false;
     } finally {
       this.busy = '';
+      this.announce('restore', ok, false);
     }
+  }
+
+  // --- backup administration ---------------------------------------------------------------
+
+  /** Delete one backup set. The core refuses while a job holds the world and for sets recovery needs. */
+  async deleteBackup(backupSetId: string, location: BackupLocation = 'app', acknowledgeLastCopy = false): Promise<boolean> {
+    if (!this.worldDir || this.isBusy) return false;
+    try {
+      await callBackend('backups.delete', { worldDir: this.worldDir, backupSetId, location, acknowledgeLastCopy });
+      await this.loadBackups();
+      this.notify(t('backups.deleted'), 'success');
+      return true;
+    } catch (cause) {
+      if (cause instanceof BackendError && UNKNOWN_COMMAND_CODES.includes(cause.code)) this.backupAdminSupported = false;
+      this.fail(cause);
+      await this.loadBackups().catch(() => {});
+      return false;
+    }
+  }
+
+  /** Keep the newest `keepLatest` sets and delete the rest (never the only recovery copy). */
+  async pruneBackups(keepLatest: number, location: BackupLocation = 'app'): Promise<boolean> {
+    if (!this.worldDir || this.isBusy) return false;
+    try {
+      const outcome = await callBackend<{ deleted: string[]; skipped?: unknown[]; failed?: unknown[] }>('backups.prune', {
+        worldDir: this.worldDir, keepLatest, location, acknowledgeLastCopy: false
+      });
+      await this.loadBackups();
+      const count = outcome.deleted?.length ?? 0;
+      this.notify(t(count ? 'backups.pruned' : 'backups.prunedNone', { count }), count ? 'success' : 'info');
+      if (outcome.failed?.length) this.notify(t('backups.pruneSomeFailed', { count: outcome.failed.length }), 'error');
+      return true;
+    } catch (cause) {
+      if (cause instanceof BackendError && UNKNOWN_COMMAND_CODES.includes(cause.code)) this.backupAdminSupported = false;
+      this.fail(cause);
+      await this.loadBackups().catch(() => {});
+      return false;
+    }
+  }
+
+  // --- interrupted work --------------------------------------------------------------------
+
+  /**
+   * Decide what to do with work an earlier run left half done: undo it (restore from the backup the
+   * run made) or keep the files as they are. The core makes a recovery backup first and keeps any
+   * file that changed since as a conflict instead of overwriting it.
+   */
+  async recover(job: InterruptedJob, mode: 'rollback' | 'keep', options: { acceptConflicts?: boolean } = {}): Promise<RecoveryResult | null> {
+    if (this.isBusy) return null;
+    this.busy = 'recovery';
+    this.recoveryJobId = job.jobId;
+    this.banner = null;
+    this.progress = { ...emptyProgress(), phase: 'recovery', startedAt: Date.now() };
+    let result: RecoveryResult | null = null;
+    try {
+      result = await callBackend<RecoveryResult>('recovery.start', {
+        jobId: job.jobId, mode, ...(mode === 'keep' && options.acceptConflicts ? { acceptConflicts: true } : {})
+      });
+      this.recoveryResult = { job, result };
+      // A decided job no longer needs attention; one that is partial or in conflict stays listed.
+      if (result.state !== 'partial' && result.state !== 'recovery_conflict') this.interruptedJobs = this.interruptedJobs.filter((item) => item.jobId !== job.jobId);
+      if (samePath(job.worldPath, this.worldDir)) {
+        this.resetJob();
+        this.step = 'world';
+        await this.loadBackups().catch(() => {});
+      }
+    } catch (cause) {
+      this.fail(cause);
+    } finally {
+      this.busy = '';
+      this.recoveryJobId = '';
+      this.progress = emptyProgress();
+    }
+    this.announce('recovery', !!result && (result.state === 'rolled_back' || result.state === 'kept'), false);
+    return result;
+  }
+
+  /** The blocking job to point at after a request was refused with RECOVERY_REQUIRED. */
+  highlightedJobId = $state('');
+
+  /** Reload the interrupted jobs (the list only changes at start-up and after a decision) and show them. */
+  async openInterrupted(): Promise<void> {
+    try {
+      const boot = await callBackend<BootstrapPayload>('app.bootstrap');
+      this.interruptedJobs = Array.isArray(boot.interruptedJobs) ? boot.interruptedJobs : this.interruptedJobs;
+    } catch { /* the list stays as it was */ }
+    const here = this.interruptedHere;
+    this.highlightedJobId = (here.find((job) => job.blocking) ?? here[0])?.jobId ?? '';
+    this.step = 'world';
+  }
+
+  /** "Continue the remaining work" of a partial job: the same checkpoint, resumed. */
+  async continueInterrupted(job: InterruptedJob): Promise<void> {
+    if (this.isBusy || !samePath(job.worldPath, this.worldDir)) return;
+    try {
+      this.applyResume(await callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir }));
+    } catch (cause) {
+      this.fail(cause);
+      return;
+    }
+    if (!this.resume || !this.scan) {
+      this.notify(t('interrupted.continueUnavailable'), 'error');
+      return;
+    }
+    this.step = 'run';
+    await this.startTranslate({ resume: true, fromInterrupted: true });
+    // A finished continuation settles the job; its list entry is refreshed from the core.
+    await this.openInterrupted();
+    if (!this.interruptedHere.length) this.step = 'result';
+  }
+
+  closeRecoveryResult(): void {
+    this.recoveryResult = null;
+  }
+
+  async openFolder(path: string): Promise<void> {
+    if (await revealPath(path)) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      this.notify(t('folder.copied', { path }), 'info', 9000);
+    } catch {
+      this.notify(t('folder.show', { path }), 'info', 12000);
+    }
+  }
+
+  // --- notifications -----------------------------------------------------------------------
+
+  /** Tell the person a job ended while the window is in the background. No world text goes in. */
+  private announce(kind: 'scan' | 'translate' | 'restore' | 'recovery', ok: boolean, cancelled: boolean): void {
+    if (cancelled || !this.localPrefs.notify_on_finish || !this.notificationsSupported) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible' && document.hasFocus()) return;
+    void sendNotification(
+      t(ok ? 'notify.title.done' : 'notify.title.failed'),
+      t(`notify.body.${kind}.${ok ? 'done' : 'failed'}` as MessageKey)
+    );
+  }
+
+  /** The Settings switch. Turning it on asks the system for permission once. */
+  async setNotifyOnFinish(on: boolean): Promise<void> {
+    if (on && !(await requestNotificationPermission())) {
+      this.notify(t('notify.denied'), 'info', 9000);
+      this.localPrefs = { ...this.localPrefs, notify_on_finish: false };
+    } else {
+      this.localPrefs = { ...this.localPrefs, notify_on_finish: on };
+    }
+    saveLocalPrefs(this.localPrefs);
+  }
+
+  // --- consent to send text to a provider --------------------------------------------------
+
+  /** First run with this provider and model: ask once before sentences leave the computer. */
+  get needsConsent(): boolean {
+    return !this.manualOnly && !hasConsent(this.settings.provider, this.settings.model) && !this.consentGiven.has(`${this.settings.provider}|${this.settings.model}`);
+  }
+
+  private consentGiven = new SvelteSet<string>();
+
+  grantConsent(): void {
+    rememberConsent(this.settings.provider, this.settings.model);
+    this.consentGiven.add(`${this.settings.provider}|${this.settings.model}`);
   }
 
   // --- settings ----------------------------------------------------------------------------
@@ -965,6 +1535,9 @@ export class AppState {
   private async recoverSettings(): Promise<void> {
     this.settingsRecoveryRequired = true;
     this.settingsRecoveryRevision += 1;
+    // The reviewed scan has to go, but the review itself is kept in the core when possible.
+    await this.storeReview(true);
+    if (this.draftNeedsConfirm) this.notify(t('review.draft.lostOnRecovery'), 'error', 12000);
     this.resetJob();
     if (this.worldDir) this.step = 'scan';
     try {
@@ -981,17 +1554,29 @@ export class AppState {
     }
   }
 
+  /** Whether two settings differ in what a scan finds (so a reviewed scan would go stale). */
+  private scopeDiffers(before: Settings, now: Settings): boolean {
+    return SCOPE_KEYS.some((key) => before[key] !== now[key]) ||
+      JSON.stringify(before.external_resource_pack_paths ?? []) !== JSON.stringify(now.external_resource_pack_paths ?? []) ||
+      scanOptionsSignature(before.scan_options) !== scanOptionsSignature(now.scan_options) ||
+      JSON.stringify(resourcePackOptions(before.resource_pack_options)) !== JSON.stringify(resourcePackOptions(now.resource_pack_options));
+  }
+
   /** Save from the settings screen. A change that alters what a scan finds makes the scan stale. */
   async saveSettings(before: Settings, apiKey = '', beforeMode: CredentialMode = this.credentialMode): Promise<boolean> {
+    if (this.busy) return false;
+    if (this.scan && this.scopeDiffers(before, this.settings) && !(await this.mayDiscard('settings'))) {
+      // Declined: nothing was saved, so the settings screen keeps its unsaved draft.
+      this.settings = { ...before };
+      this.credentialMode = beforeMode;
+      return false;
+    }
     if (this.busy) return false;
     this.busy = 'settings';
     const recoveryRevision = this.settingsRecoveryRevision;
     try {
       await this.persistSettings(apiKey);
-      const scopeChanged = SCOPE_KEYS.some((key) => before[key] !== this.settings[key]) ||
-        JSON.stringify(before.external_resource_pack_paths ?? []) !== JSON.stringify(this.settings.external_resource_pack_paths ?? []) ||
-        scanOptionsSignature(before.scan_options) !== scanOptionsSignature(this.settings.scan_options) ||
-        JSON.stringify(resourcePackOptions(before.resource_pack_options)) !== JSON.stringify(resourcePackOptions(this.settings.resource_pack_options));
+      const scopeChanged = this.scopeDiffers(before, this.settings);
       if (scopeChanged && this.scan) {
         this.resetJob();
         if (this.step !== 'world') this.step = 'scan';
@@ -1001,6 +1586,8 @@ export class AppState {
       if (JSON.stringify(before.source_overrides) !== JSON.stringify(this.settings.source_overrides)) this.candidates.refetchSoon(0);
       if (this.scan) void this.loadEstimate();
       this.notify(t('settings.saved'), 'success', 2600);
+      // A new key makes the provider's model list readable: fetch it so the model box has choices.
+      if (apiKey && LISTABLE_PROVIDERS.includes(this.settings.provider)) void this.loadModels(this.settings, true).catch(() => {});
       return true;
     } catch (cause) {
       if (this.settingsRecoveryRevision === recoveryRevision) {
@@ -1022,33 +1609,43 @@ export class AppState {
     return this.modelsScope === this.modelScope(selection) ? this.models : [];
   }
 
-  async loadModels(selection: Settings = this.settings, force = false): Promise<number> {
+  /**
+   * Read the provider's model list. Runs beside everything else: it sets `modelsLoading`, not `busy`,
+   * so scanning, reviewing and saving settings stay available while a slow provider answers. A second
+   * request for the same provider joins the one in flight.
+   */
+  loadModels(selection: Settings = this.settings, force = false): Promise<number> {
     const scope = this.modelScope(selection);
     const cached = this.modelCatalogs.get(scope);
     if (!force && cached && Date.now() - cached.fetchedAt < 5 * 60_000) {
       this.models = cached.models;
       this.modelsScope = scope;
       this.modelsCached = cached.cached;
-      return cached.models.length;
+      return Promise.resolve(cached.models.length);
     }
-    if (this.busy) throw new Error(t('settings.model.wait'));
-    this.busy = 'models';
-    try {
-      const listed = await callBackend<{ models: ModelInfo[]; cached?: boolean }>('models.list', {
-        provider: selection.provider,
-        ...(selection.provider === 'custom' ? { baseUrl: selection.base_url } : {}),
-        model: '',
-        wireFormat: selection.wire_format,
-        ...(selection.provider === 'openrouter' ? { publicCatalog: true } : {})
-      });
-      this.models = listed.models;
-      this.modelsScope = scope;
-      this.modelsCached = !!listed.cached;
-      this.modelCatalogs.set(scope, { models: listed.models, fetchedAt: Date.now(), cached: !!listed.cached });
-      return listed.models.length;
-    } finally {
-      this.busy = '';
-    }
+    if (this.modelsInFlight?.scope === scope) return this.modelsInFlight.promise;
+    const promise = (async () => {
+      this.modelsLoading = true;
+      try {
+        const listed = await callBackend<{ models: ModelInfo[]; cached?: boolean }>('models.list', {
+          provider: selection.provider,
+          ...(selection.provider === 'custom' ? { baseUrl: selection.base_url } : {}),
+          model: '',
+          wireFormat: selection.wire_format,
+          ...(selection.provider === 'openrouter' ? { publicCatalog: true } : {})
+        });
+        this.models = listed.models;
+        this.modelsScope = scope;
+        this.modelsCached = !!listed.cached;
+        this.modelCatalogs.set(scope, { models: listed.models, fetchedAt: Date.now(), cached: !!listed.cached });
+        return listed.models.length;
+      } finally {
+        this.modelsLoading = false;
+        this.modelsInFlight = null;
+      }
+    })();
+    this.modelsInFlight = { scope, promise };
+    return promise;
   }
 
   /**

@@ -5,11 +5,51 @@
   import { flip } from 'svelte/animate';
   import { fade, fly } from 'svelte/transition';
   import { motion } from '../lib/motion';
+  import type { Toast } from '../lib/app.svelte';
+
+  /**
+   * Leave on their own after `toast.ms`, but never while the pointer or keyboard focus is on the
+   * toast: someone reading or about to press its button must not lose it. Errors have no timer.
+   */
+  function autoDismiss(node: HTMLElement, toast: Toast) {
+    if (toast.ms <= 0) return {};
+    let remaining = toast.ms;
+    let started = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const start = () => {
+      started = Date.now();
+      timer = setTimeout(() => app.dismissToast(toast.id), remaining);
+    };
+    const pause = () => {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+      remaining = Math.max(1500, remaining - (Date.now() - started));
+    };
+    const resume = () => {
+      if (timer !== undefined || node.matches(':hover') || node.contains(document.activeElement)) return;
+      start();
+    };
+    node.addEventListener('pointerenter', pause);
+    node.addEventListener('focusin', pause);
+    node.addEventListener('pointerleave', resume);
+    node.addEventListener('focusout', resume);
+    start();
+    return {
+      destroy() {
+        if (timer !== undefined) clearTimeout(timer);
+        node.removeEventListener('pointerenter', pause);
+        node.removeEventListener('focusin', pause);
+        node.removeEventListener('pointerleave', resume);
+        node.removeEventListener('focusout', resume);
+      }
+    };
+  }
 </script>
 
-<div class="toasts" role="region" aria-label={t('error.title')}>
+<div class="toasts" role="region" aria-label={t('toast.region')}>
   {#each app.toasts as toast (toast.id)}
-    <div class="toast {toast.tone}" role={toast.tone === 'error' ? 'alert' : 'status'}
+    <div class="toast {toast.tone}" role={toast.tone === 'error' ? 'alert' : 'status'} use:autoDismiss={toast}
       in:fly={{ y: -8, duration: motion(160) }} out:fade={{ duration: motion(120) }} animate:flip={{ duration: motion(160) }}>
       <Icon name={toast.tone === 'error' ? 'alert-circle' : toast.tone === 'success' ? 'check-circle' : 'info'} size={18} />
       <span class="msg">{toast.message}</span>

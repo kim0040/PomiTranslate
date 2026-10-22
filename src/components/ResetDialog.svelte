@@ -20,7 +20,7 @@
 </script>
 
 {#if stage === 'explain'}
-  <Dialog title={t('reset.title')} tone="danger" {onClose}>
+  <Dialog showClose={false} title={t('reset.title')} tone="danger" {onClose}>
     <div class="lists">
       <section>
         <h3>{t('reset.removes')}</h3>
@@ -47,7 +47,7 @@
     {/snippet}
   </Dialog>
 {:else}
-  <Dialog title={t('reset.confirmTitle')} tone="danger" {onClose}>
+  <Dialog showClose={false} title={t('reset.confirmTitle')} tone="danger" {onClose}>
     <div class="warn"><Icon name="alert-triangle" size={22} /><p>{t('reset.confirmBody')}{#if clearKeys} <strong>{t('reset.confirmKeys')}</strong>{/if}</p></div>
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" data-autofocus disabled={working} onclick={onClose}>{t('common.cancel')}</button>

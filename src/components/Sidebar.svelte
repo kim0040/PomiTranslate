@@ -2,6 +2,8 @@
   import { app, type Page } from '../lib/app.svelte';
   import { t } from '../lib/i18n/index.svelte';
   import { formatDuration } from '../lib/format';
+  import { clock, holdClock } from '../lib/clock.svelte';
+  import { milestone, percentDone } from '../lib/workflow';
   import Icon, { type IconName } from './Icon.svelte';
 
   const items: { page: Page; icon: IconName; label: 'nav.workspace' | 'nav.backups' | 'nav.settings' | 'nav.help' | 'nav.about' }[] = [
@@ -23,19 +25,25 @@
       : app.busy === 'scan' ? t('status.scanning')
       : app.busy === 'translate' ? t('status.translating')
       : app.busy === 'restore' ? t('status.restoring')
+      : app.busy === 'recovery' ? t('status.recovering')
       : app.busy ? t('status.working')
       : app.startupFailed ? t('startup.failed')
       : t('status.ready')
   );
-  let now = $state(Date.now());
+  // One clock shared with the run screen.
   $effect(() => {
     if (!app.isBusy) return;
-    now = Date.now();
-    const timer = setInterval(() => { now = Date.now(); }, 1000);
-    return () => clearInterval(timer);
+    return holdClock();
   });
+  const now = $derived(clock.now);
 
   const taskPage = $derived<Page>(app.busy === 'restore' ? 'backups' : 'workspace');
+  // Screen readers hear the phase, and then every 10% — not every sentence that finishes.
+  const announcement = $derived.by(() => {
+    if (!app.isBusy) return status;
+    const step = milestone(percentDone(app.progress));
+    return step === null ? status : `${status} ${step}%`;
+  });
   const percent = $derived(
     app.busy === 'translate' && app.progress.phase === 'translate' && app.progress.total > 0
       ? Math.round((app.progress.done / app.progress.total) * 100)
@@ -72,13 +80,14 @@
     {#if app.updateAvailable && !app.railCollapsed}
       <button type="button" class="update" onclick={showUpdate}><Icon name="download" size={14} /> {t('update.sidebar', { version: app.update?.version ?? '' })}</button>
     {/if}
-    <div class="state" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy} role="status" aria-live="polite">
+    <span class="sr-only" role="status" aria-live="polite">{announcement}</span>
+    <div class="state" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy}>
       <img class="pomi" src="/images/pomi.png" alt="" width="32" height="32" />
       <div class="text">
         <span class="dot" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy} aria-hidden="true"></span>
         <span class="status-text">{status}{percent !== null ? ` ${percent}%` : ''}</span>
         {#if app.isBusy && app.progress.startedAt}
-          <span class="sub num">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
+          <span class="sub num" role="timer" aria-live="off">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
         {/if}
       </div>
     </div>

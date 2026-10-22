@@ -151,6 +151,20 @@ export async function revealDataFolder(): Promise<void> {
   }
 }
 
+/**
+ * Show a file or folder the app made (a quarantine folder, a report) in Finder or Explorer.
+ * Returns false when the shell has no such command or refused; the caller then shows the path.
+ */
+export async function revealPath(path: string): Promise<boolean> {
+  if (!inShell()) return false;
+  try {
+    await invoke('reveal_path', { path });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function appVersion(fallback: string): Promise<string> {
   if (!inShell()) return fallback;
   try {

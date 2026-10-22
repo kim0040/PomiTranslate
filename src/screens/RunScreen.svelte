@@ -8,6 +8,9 @@
   import SetupNotice from '../components/SetupNotice.svelte';
   import Dialog from '../components/Dialog.svelte';
   import { REASONING_PROVIDERS, reasoningSummary, supportsReasoning } from '../lib/reasoning';
+  import { clock, holdClock } from '../lib/clock.svelte';
+  import { milestone, percentDone, remainingSeconds } from '../lib/workflow';
+  import { failureKey } from '../lib/failures';
 
   const providerLabels: Record<string, string> = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', openrouter: 'OpenRouter', comet: 'Comet API', custom: 'Custom' };
   const running = $derived(app.busy === 'translate');
@@ -16,13 +19,28 @@
   // A model known not to reason has nothing to edit; an unknown one might, so the way to settings stays.
   const reasoningEditable = $derived(!reasoningModel || supportsReasoning(reasoningModel));
   let confirmFresh = $state(false);
+  let confirmDiscardResume = $state(false);
+  // First send to this provider and model: say what leaves the computer and what it costs, once.
+  let confirmSend = $state(false);
+  function start(): void {
+    if (app.needsConsent) {
+      confirmSend = true;
+      return;
+    }
+    void app.startTranslate({ resume: !!app.resume });
+  }
+  function sendConfirmed(): void {
+    confirmSend = false;
+    app.grantConsent();
+    void app.startTranslate({ resume: !!app.resume });
+  }
   function startFresh(): void {
     confirmFresh = false;
     void app.startTranslate({ resume: false });
   }
   let attemptedMetadata = false;
   $effect(() => {
-    if (app.settings.provider !== 'openrouter' || app.manualOnly || app.busy || attemptedMetadata) return;
+    if (app.settings.provider !== 'openrouter' || app.manualOnly || app.isBusy || attemptedMetadata) return;
     const timer = setTimeout(() => {
       attemptedMetadata = true;
       void app.loadModels().catch(() => {}); // The summary explicitly keeps unknown metadata unknown.
@@ -34,12 +52,12 @@
     app.manualOnly ? t('run.manualOnly') : app.hasModel ? `${providerLabels[app.settings.provider] ?? app.settings.provider} · ${app.settings.model}` : t('run.noModel')
   );
 
-  let now = $state(Date.now());
+  // The sidebar and this screen read the same clock, so their elapsed times always agree.
   $effect(() => {
     if (!running) return;
-    const timer = setInterval(() => { now = Date.now(); }, 500);
-    return () => clearInterval(timer);
+    return holdClock();
   });
+  const now = $derived(clock.now);
 
   const p = $derived(app.progress);
   const phases: { id: 'collect' | 'translate' | 'write'; key: MessageKey }[] = [
@@ -47,7 +65,7 @@
     { id: 'translate', key: 'run.phase.translate' },
     { id: 'write', key: 'run.phase.write' }
   ];
-  const order = { idle: -1, collect: 0, translate: 1, write: 2 } as const;
+  const order = { idle: -1, collect: 0, translate: 1, write: 2, recovery: -1 } as const;
   const phaseIndex = $derived(order[p.phase]);
   const barValue = $derived(
     p.phase === 'translate' ? (p.total ? p.done : null) : p.fileTotal ? p.fileIndex : null
@@ -62,6 +80,19 @@
           ? t('run.progress.collect', { index: p.fileIndex, total: p.fileTotal })
           : t('common.loading')
   );
+  const eta = $derived(remainingSeconds(p, now));
+  // What a screen reader hears: the phase when it changes, then every 10% — never each sentence.
+  const announcement = $derived.by(() => {
+    const phase = phases.find((item) => item.id === p.phase);
+    if (!phase) return '';
+    const step = milestone(percentDone(p));
+    return step === null ? t(phase.key) : t('run.announce', { phase: t(phase.key), percent: step });
+  });
+  const spentText = $derived.by(() => {
+    if (p.cost === null) return '–';
+    const spent = formatUsd(p.cost, app.locale);
+    return estimate?.cost ? t('run.cost.spentOf', { spent, high: formatUsd(estimate.cost.high, app.locale) }) : spent;
+  });
   const costText = $derived.by(() => {
     if (app.manualOnly || estimate?.requests === 0) return t('run.cost.free');
     if (!estimate) return app.estimateLoading ? t('run.cost.calculating') : t('run.cost.unknown');
@@ -84,7 +115,8 @@
       <p class="lead">{t('run.busyHelp')}</p>
     </header>
 
-    <section class="card live" aria-live="polite">
+    <section class="card live">
+      <p class="sr-only" role="status" aria-live="polite">{announcement}</p>
       <ol class="phases" aria-label={t('step.list')}>
         {#each phases as phase, index (phase.id)}
           <li class:done={phaseIndex > index} class:current={phaseIndex === index}>
@@ -101,18 +133,37 @@
         <div class="line">
           <span class="num strong">{detail}</span>
           <span class="spacer"></span>
-          <span class="num muted">{t('run.progress.elapsed', { time: formatDuration((now - p.startedAt) / 1000, app.locale) })}</span>
+          <span class="num muted" role="timer" aria-live="off">{t('run.progress.elapsed', { time: formatDuration((now - p.startedAt) / 1000, app.locale) })}</span>
         </div>
+        <!-- Always one line tall, so the rows below do not move when an estimate appears. -->
+        <p class="num muted detail-line">
+          {#if eta !== null}{t('run.progress.eta', { time: formatDuration(eta, app.locale) })}{:else}&nbsp;{/if}
+          {#if p.currentFile && p.phase !== 'translate'}<span class="file" title={p.currentFile}>{middleEllipsis(p.currentFile, 56)}</span>{/if}
+        </p>
       </div>
 
       <!-- Always laid out, so the cancel button does not move when translation starts. -->
       <dl class="facts">
         <div><dt>{t('run.progress.requestsLabel')}</dt><dd class="num">{p.phase === 'translate' ? t('run.progress.requests', { done: p.requests, total: p.requestsEstimate || estimate?.requests || 0 }) : '–'}</dd></div>
         <div><dt>{t('result.stat.failed')}</dt><dd class="num" class:bad={p.failed > 0}>{p.phase === 'translate' ? p.failed : '–'}</dd></div>
+        <div><dt>{t('run.cost.soFar')}</dt><dd class="num">{spentText}</dd></div>
       </dl>
 
+      {#if p.samples.length}
+        <div class="samples">
+          <h2 class="group-title">{t('run.samples')}</h2>
+          <ul>
+            {#each p.samples as sample, index (index + sample.source)}
+              <li><span class="from" title={sample.source}>{sample.source}</span><span class="arrow" aria-hidden="true">→</span><span class="to" title={sample.translated}>{sample.translated}</span></li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+
       {#if p.retry}
-        <Callout tone="warning" title={t('run.progress.retry', { attempt: p.retry.attempt, max: p.retry.max })} role="status" />
+        <Callout tone="warning" title={t('run.progress.retry', { attempt: p.retry.attempt, max: p.retry.max })} role="status">
+          {#if p.retry.code}{t(failureKey(p.retry.code))}{/if}
+        </Callout>
       {/if}
 
       <div>
@@ -130,11 +181,13 @@
     {#if app.resume}
       <Callout tone="info" title={t('world.resumeFound')}>
         {resumeText}
-        {#if app.resume.reason}<br /><strong>{t('run.resumeReason')}:</strong> {app.resume.reason}{/if}
+        {#snippet actions()}
+          <button type="button" class="btn btn-quiet btn-sm" disabled={app.isBusy} onclick={() => (confirmDiscardResume = true)}>{t('run.discard')}</button>
+        {/snippet}
       </Callout>
     {/if}
 
-    {#if !app.manualOnly}<SetupNotice blocking />{/if}
+    <SetupNotice blocking />
 
     <section aria-labelledby="summary-title">
       <h2 id="summary-title" class="group-title">{t('run.summaryTitle')}</h2>
@@ -179,7 +232,7 @@
     </fieldset>
 
     <div class="action-bar">
-      <p class="note">{t('run.confirm.body')}</p>
+      <p class="note">{t('run.confirm.note')}</p>
       <div class="buttons">
         <button type="button" class="btn btn-secondary btn-lg" disabled={app.isBusy} onclick={() => app.goStep('review')}>
           <Icon name="chevron-left" size={16} /> {t('step.review')}
@@ -188,7 +241,7 @@
           <!-- Resuming is the default; starting over is offered, behind a cost warning. -->
           <button type="button" class="btn btn-secondary btn-lg" disabled={!app.canRun} onclick={() => (confirmFresh = true)}>{t('run.fresh')}</button>
         {/if}
-        <button type="button" class="btn btn-primary btn-lg" disabled={!app.canRun} onclick={() => app.startTranslate({ resume: !!app.resume })}>
+        <button type="button" class="btn btn-primary btn-lg" disabled={!app.canRun} onclick={start}>
           <Icon name="play" size={16} /> {app.resume ? t('run.resume') : t('run.start')}
         </button>
       </div>
@@ -197,7 +250,7 @@
 </div>
 
 {#if confirmFresh && app.resume}
-  <Dialog title={t('run.freshTitle')} onClose={() => (confirmFresh = false)}>
+  <Dialog showClose={false} title={t('run.freshTitle')} onClose={() => (confirmFresh = false)}>
     <p>{t('run.freshBody', { count: formatNumber(app.resume.translatedCount ?? 0, app.locale) })}</p>
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmFresh = false)}>{t('common.cancel')}</button>
@@ -206,7 +259,38 @@
   </Dialog>
 {/if}
 
+{#if confirmSend}
+  <Dialog showClose={false} title={t('run.confirm.title')} onClose={() => (confirmSend = false)}>
+    <p>{t('run.confirm.body')}</p>
+    <dl class="group">
+      <div class="row-item"><dt class="k">{t('run.summary.model')}</dt><dd class="v">{modelText}</dd></div>
+      <div class="row-item"><dt class="k">{t('run.summary.texts')}</dt><dd class="v num">{formatNumber(app.outgoingCount, app.locale)}</dd></div>
+      <div class="row-item"><dt class="k">{t('run.summary.cost')}</dt><dd class="v num">{costText}</dd></div>
+    </dl>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmSend = false)}>{t('common.cancel')}</button>
+      <button type="button" class="btn btn-primary" disabled={!app.canRun} onclick={sendConfirmed}>{t('run.confirm.send')}</button>
+    {/snippet}
+  </Dialog>
+{/if}
+
+{#if confirmDiscardResume}
+  <Dialog showClose={false} title={t('run.discardTitle')} onClose={() => (confirmDiscardResume = false)}>
+    <p>{t('run.discardBody')}</p>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => (confirmDiscardResume = false)}>{t('common.cancel')}</button>
+      <button type="button" class="btn btn-danger-solid" onclick={() => { confirmDiscardResume = false; void app.discardResume(); }}>{t('run.discardConfirm')}</button>
+    {/snippet}
+  </Dialog>
+{/if}
+
 <style>
+  .detail-line { margin: 0; min-height: 1.4em; font-size: var(--text-sm); display: flex; gap: var(--space-3); }
+  .file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .samples ul { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); }
+  .samples li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--space-2); font-size: var(--text-sm); }
+  .samples .from, .samples .to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .samples .from { color: var(--text-secondary); }
   .external-paths { padding-inline-start: 1em; margin: 0; overflow-wrap: anywhere; }
   /* The edit button keeps its line when the summary text changes length, so the rows below stay put. */
   .inline { display: flex; align-items: center; gap: var(--space-2); }

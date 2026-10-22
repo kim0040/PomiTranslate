@@ -35,7 +35,7 @@
 {/if}
 
 {#if confirming}
-  <Dialog title={t('credential.reset.title')} tone="danger" onClose={() => (confirming = false)}>
+  <Dialog showClose={false} title={t('credential.reset.title')} tone="danger" onClose={() => (confirming = false)}>
     <p>{t('credential.reset.body')}</p>
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" data-autofocus disabled={working} onclick={() => (confirming = false)}>{t('common.cancel')}</button>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
   import type { SortMode, StateFilter } from '../lib/candidates.svelte';
@@ -11,6 +11,18 @@
   import Icon from '../components/Icon.svelte';
 
   const source = app.candidates;
+  // Why Start will not be available on the next screen, said here while it can still be fixed.
+  const blockerLabel: Record<string, MessageKey> = {
+    recovery: 'setup.short.recovery', credential: 'setup.short.credential', interrupted: 'setup.short.interrupted',
+    model: 'setup.short.model', key: 'setup.short.key'
+  };
+  const blockedText = $derived(app.runBlockers.map((reason) => t(blockerLabel[reason])).join(', '));
+  const draftText = $derived(
+    app.draftState === 'saving' ? t('review.draft.saving')
+      : app.draftState === 'saved' ? t('review.draft.saved')
+      : app.draftState === 'error' ? t('review.draft.error')
+      : ''
+  );
   let selected = $state<Candidate | null>(null);
   // When the list area is too narrow for a side panel the detail is a sheet. It opens on a click or
   // Enter, never on arrow keys or Space, so moving through the list and toggling rows stays a
@@ -67,12 +79,19 @@
     };
   });
 
-  // Changes to who is included only change what a state filter shows. Reload it after a pause.
+  // A choice only changes what a state filter shows. Reload it after a pause, without emptying the
+  // list. The estimate is reloaded by the app itself, debounced, when a choice changes.
   $effect(() => {
-    void app.excluded.size;
-    void Object.keys(app.overrides).length;
-    if (source.state !== 'all') source.refetchSoon(350);
-    void app.loadEstimate();
+    void app.reviewVersion;
+    untrack(() => {
+      if (source.state !== 'all') source.refetchSoon(350);
+    });
+  });
+  // Opening the screen with no estimate yet asks for one; choices made here refresh it themselves.
+  $effect(() => {
+    untrack(() => {
+      if (!app.estimate && !app.estimateLoading) void app.loadEstimate();
+    });
   });
 
   const states: { value: StateFilter; key: MessageKey }[] = [
@@ -110,7 +129,7 @@
   async function bulk(include: boolean): Promise<void> {
     busyBulk = true;
     try {
-      for (const id of await source.allIds()) app.setIncluded(id, include);
+      app.setIncludedMany(await source.allIds(), include);
     } catch (cause) {
       app.fail(cause);
     } finally {
@@ -184,9 +203,17 @@
       <button type="button" class="btn btn-secondary btn-sm" disabled={busyBulk || source.total === 0} onclick={() => bulk(false)}>{t('review.excludeVisible')}</button>
       <button type="button" class="btn btn-secondary btn-sm" disabled={busyBulk || source.total === 0} onclick={() => bulk(true)}>{t('review.includeVisible')}</button>
       <span class="hint">{t('review.bulkNote', { count: formatNumber(source.total, app.locale) })}</span>
+      <!-- Always present, so the footer does not change height as the draft is saved. -->
+      <span class="hint draft" class:error={app.draftState === 'error'} aria-live="off">{draftText}</span>
     </div>
     <div class="next">
-      {#if app.includedCount === 0}<span class="hint" role="alert">{t('review.nothingIncluded')}</span>{/if}
+      {#if app.includedCount === 0}<span class="hint" role="alert">{t('review.nothingIncluded')}</span>
+      {:else if blockedText}
+        <span class="hint blocked">{t('review.blocked', { reasons: blockedText })}</span>
+        {#if app.runBlockers.some((reason) => reason !== 'interrupted')}
+          <button type="button" class="btn btn-secondary btn-sm" disabled={app.busy === 'settings'} onclick={() => app.openSettingsFor('review')}>{t('setup.open')}</button>
+        {/if}
+      {/if}
       <button type="button" class="btn btn-primary btn-lg" disabled={app.includedCount === 0} onclick={() => app.goStep('run')}>
         {t('review.toRun')} <Icon name="chevron-right" size={16} />
       </button>
@@ -225,6 +252,9 @@
   .tablewrap, .detailwrap { min-height: 0; height: 100%; }
   .foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; padding-top: var(--space-3); border-top: 1px solid var(--border); }
   .meta { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  .draft { min-width: 9em; }
+  .draft.error { color: var(--danger-text); }
+  .blocked { color: var(--warning-text); }
   .next { display: flex; align-items: center; gap: var(--space-3); margin-inline-start: auto; }
   /* Only the bulk note gives way; the "nothing included" alert explains the disabled button. */
   @media (max-width: 1100px) { .meta .hint { display: none; } }

@@ -15,6 +15,8 @@
   import { callBackend, credentialStatus, importCredential, type CredentialMode, type Settings, type ProviderUsage } from '../lib/api';
   import CredentialStoreNotice from '../components/CredentialStoreNotice.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { formatUsd } from '../lib/format';
+  import { RECOMMENDED_MODELS, perMillion } from '../lib/recommended-models';
   import type { ThemeChoice } from '../lib/theme';
   import { REASONING_PROVIDERS, defaultReasoningLabel, effortLabel, reasoningMode, supportedEfforts, supportsReasoning } from '../lib/reasoning';
 
@@ -194,13 +196,22 @@
     (!reasoningModel || !reasoningSupported || (currentReasoning === 'disabled' && !!reasoningMetadata?.mandatory) || hiddenReasoning));
   const dirty = $derived(!!snapshot && (JSON.stringify(copySettings(draft)) !== JSON.stringify(copySettings(snapshot)) ||
     !!apiKey.trim() || credentialMode !== savedCredentialMode));
+  // The provider's own price for the chosen model, when the list carries one (per million tokens).
+  const modelPrice = $derived.by(() => {
+    const input = perMillion(reasoningModel?.pricing_prompt);
+    const output = perMillion(reasoningModel?.pricing_completion);
+    if (input === null || output === null) return '';
+    return t('settings.model.price', { input: formatUsd(input, app.locale), output: formatUsd(output, app.locale) });
+  });
+  // Without a model list (no key yet, or the lookup failed) a short, dated suggestion beats an empty box.
+  const recommended = $derived(RECOMMENDED_MODELS[draft.provider]);
   const selectionKey = $derived(`${draft.provider}:${draft.model.trim()}`);
   const visibleModelError = $derived(modelErrorSelection === selectionKey ? modelError : '');
 
   // Only public metadata auto-loads. No key/keychain read and no preference write.
   $effect(() => {
     const key = selectionKey;
-    if (!app.ready || draft.provider !== 'openrouter' || !draft.model.trim() || app.busy || lastAutoLookup === key) return;
+    if (!app.ready || draft.provider !== 'openrouter' || !draft.model.trim() || app.isBusy || lastAutoLookup === key) return;
     const timer = setTimeout(() => {
       lastAutoLookup = key;
       void untrack(() => loadModels(false));
@@ -346,7 +357,8 @@
   }
 
   async function loadModels(force = true): Promise<void> {
-    if (!snapshot || app.busy || baseUrlInvalid) return;
+    // A running scan or translation holds the core; the list would only queue behind it.
+    if (!snapshot || app.isBusy || app.busy === 'settings' || baseUrlInvalid) return;
     const selection = copySettings(draft);
     const key = selectionKey;
     if (selection.provider !== 'openrouter' && (!stored || apiKey.trim())) {
@@ -441,7 +453,7 @@
   </header>
 
   <form class="settings-form" onsubmit={submit} novalidate>
-    <fieldset disabled={!!app.busy && app.busy !== 'models'} aria-busy={app.busy === 'settings'}>
+    <fieldset disabled={!!app.busy} aria-busy={app.busy === 'settings'}>
     <section class="card settings-section" aria-labelledby="provider-title">
       <div class="section-head">
         <div class="section-icon" aria-hidden="true"><Icon name="shield" size={20} /></div>
@@ -466,17 +478,28 @@
             placeholder={t('settings.model.placeholder')}
           />
           <div class="model-actions">
-            <button type="button" class="btn btn-secondary btn-sm" disabled={!!app.busy || baseUrlInvalid} onclick={() => loadModels(true)}>
-              <Icon name="refresh" size={15} /> {t(app.busy === 'models' ? 'settings.model.listing' : 'settings.model.refresh')}
+            <button type="button" class="btn btn-secondary btn-sm" disabled={!!app.busy || baseUrlInvalid || app.modelsLoading} onclick={() => loadModels(true)}>
+              <Icon name="refresh" size={15} /> {t(app.modelsLoading ? 'settings.model.listing' : 'settings.model.refresh')}
             </button>
             {#if draft.provider === 'openrouter'}<span class="hint">{t('settings.model.public')}</span>{/if}
           </div>
           <div class="hint" role="status" aria-live="polite">
             {#if visibleModelError}<span class="field-error">{visibleModelError}</span>
-            {:else if app.busy === 'models'}{t('settings.model.listing')}
+            {:else if app.modelsLoading}{t('settings.model.listing')}
             {:else if draft.model.trim() && models.length && !reasoningModel}{t('settings.model.notFound')}
             {:else if reasoningModel}{t('settings.model.verified')}{#if app.modelsCached} · {t('settings.model.cached')}{/if}{/if}
           </div>
+          {#if modelPrice}<p class="hint num">{modelPrice}</p>{/if}
+          {#if !models.length && recommended}
+            <div class="recommended">
+              <span class="hint">{t('settings.model.recommended', { date: recommended.asOf, source: t(recommended.source) })}</span>
+              <span class="chips">
+                {#each recommended.models as id (id)}
+                  <button type="button" class="btn btn-quiet btn-sm" onclick={() => (draft.model = id)}>{id}</button>
+                {/each}
+              </span>
+            </div>
+          {/if}
           <datalist id="model-list">{#each models as model (model.id)}<option value={model.id}>{model.display_name || model.id}</option>{/each}</datalist>
         </div>
         {#if REASONING_PROVIDERS.includes(draft.provider)}
@@ -748,6 +771,15 @@
           </select>
           <span id="ui-language-help" class="hint">{t('settings.app.languageHelp')}</span>
         </div>
+        {#if app.notificationsSupported}
+          <div class="field">
+            <label class="check">
+              <input type="checkbox" checked={app.localPrefs.notify_on_finish} onchange={(event) => app.setNotifyOnFinish(event.currentTarget.checked)} />
+              <span class="label">{t('settings.notify.label')}</span>
+            </label>
+            <span class="hint">{t('settings.notify.help')}</span>
+          </div>
+        {/if}
       </div>
     </section>
 
@@ -789,7 +821,7 @@
 </div>
 
 {#if app.pendingLeave}
-  <Dialog title={t('settings.leave.title')} onClose={() => app.resolveLeave(false)}>
+  <Dialog showClose={false} title={t('settings.leave.title')} onClose={() => app.resolveLeave(false)}>
     <p>{t('settings.leave.body')}</p>
     {#if hasBlockingError}<p class="field-error" role="alert">{t('settings.fixErrors')}</p>{/if}
     {#snippet actions()}
@@ -803,7 +835,7 @@
 {/if}
 
 {#if showStyleConfirm}
-  <Dialog title={t('settings.styleAssist.title')} onClose={() => (showStyleConfirm = false)}>
+  <Dialog showClose={false} title={t('settings.styleAssist.title')} onClose={() => (showStyleConfirm = false)}>
     <p>{t('settings.styleAssist.confirm')}</p>
     <p><strong>{providerName(draft.provider)} · {draft.model}</strong></p>
     {#snippet actions()}
@@ -814,7 +846,7 @@
 {/if}
 
 {#if showDeleteConfirm}
-  <Dialog title={t('settings.apiKey.deleteTitle', { provider: providerName(draft.provider) })} onClose={() => (showDeleteConfirm = false)}>
+  <Dialog showClose={false} title={t('settings.apiKey.deleteTitle', { provider: providerName(draft.provider) })} onClose={() => (showDeleteConfirm = false)}>
     <p>{t('settings.apiKey.deleteBody')}</p>
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" onclick={() => (showDeleteConfirm = false)}>{t('common.cancel')}</button>
@@ -824,6 +856,8 @@
 {/if}
 
 <style>
+  .recommended { display: grid; gap: var(--space-1); }
+  .recommended .chips { display: flex; flex-wrap: wrap; gap: var(--space-1); }
   .settings > :global(*), .settings-form > fieldset { max-width: 920px; }
   .settings > .settings-form { max-width: none; }
   .settings-form { display: grid; gap: var(--space-4); }

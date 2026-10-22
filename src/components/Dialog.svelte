@@ -1,19 +1,40 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { onMount } from 'svelte';
+  import { app } from '../lib/app.svelte';
   import { t } from '../lib/i18n/index.svelte';
 
   let {
     title,
     dismissible = true,
+    showClose = dismissible,
     size = 'normal',
     tone = 'normal',
     onClose,
     children,
     actions
-  }: { title: string; dismissible?: boolean; size?: 'normal' | 'wide'; tone?: 'normal' | 'danger'; onClose: () => void; children?: Snippet; actions?: Snippet } = $props();
+  }: {
+    title: string;
+    /** Escape (and the X, unless hidden) closes the dialog. */
+    dismissible?: boolean;
+    /**
+     * The X in the corner. A dialog that asks a question with its own buttons ("Keep" / "Discard")
+     * hides it: a second way out that does not say which choice it makes is only confusing.
+     */
+    showClose?: boolean;
+    size?: 'normal' | 'wide';
+    tone?: 'normal' | 'danger';
+    onClose: () => void;
+    children?: Snippet;
+    actions?: Snippet;
+  } = $props();
 
   let dialog: HTMLDialogElement | undefined = $state();
   const titleId = `dialog-${Math.random().toString(36).slice(2, 8)}`;
+
+  // An error raised while a modal is open would appear on the page behind the backdrop, out of sight
+  // and out of the focus trap. The app reports it here too, inside the dialog.
+  onMount(() => app.registerDialog());
 
   // Native <dialog>: focus is trapped, Escape is handled, and the page behind is inert.
   $effect(() => {
@@ -38,13 +59,16 @@
 <dialog bind:this={dialog} class="dialog" class:wide={size === 'wide'} class:danger={tone === 'danger'} aria-labelledby={titleId} oncancel={handleCancel}>
   <div class="head">
     <h2 id={titleId}>{title}</h2>
-    {#if dismissible}
+    {#if showClose}
       <button type="button" class="btn btn-quiet btn-icon btn-sm close" aria-label={t('common.close')} onclick={onClose}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
       </button>
     {/if}
   </div>
   <div class="body">{@render children?.()}</div>
+  {#if app.dialogError}
+    <p class="dialog-error" role="alert">{app.dialogError}</p>
+  {/if}
   {#if actions}<div class="actions">{@render actions()}</div>{/if}
 </dialog>
 
@@ -66,5 +90,6 @@
   h2 { font-size: var(--text-xl); }
   .close { margin: -4px -8px 0 0; }
   .body { margin-top: var(--space-3); display: grid; gap: var(--space-3); color: var(--text-secondary); }
+  .dialog-error { margin: var(--space-3) 0 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger-text); border: 1px solid var(--danger-border); font-size: var(--text-sm); }
   .actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-5); }
 </style>

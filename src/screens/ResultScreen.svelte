@@ -6,6 +6,7 @@
   import Callout from '../components/Callout.svelte';
   import { resultPresentation } from '../lib/workflow';
   import { exportDocument } from '../lib/document-export';
+  import { failureKey, failureSummary, warningText } from '../lib/failures';
 
   async function exportReport(): Promise<void> {
     try {
@@ -27,24 +28,32 @@
   );
   const stats = $derived(result?.translation ?? {});
   const firstError = $derived(result?.errors?.[0]);
+  // The core's own message is for the exported report; the screen shows text from the catalog.
   const reason = $derived.by(() => {
     if (!firstError) return '';
-    if (!firstError.code) return firstError.message ?? '';
-    const key = `result.errorCode.${firstError.code}`;
-    return hasMessage(key) ? t(key as MessageKey) : firstError.message ?? '';
+    const code = firstError.code ?? '';
+    for (const key of [`result.errorCode.${code}`, `error.${code}`]) if (code && hasMessage(key)) return t(key as MessageKey);
+    return t('result.errorCode.default');
   });
+  const failureRows = $derived(failureSummary(result?.translationFailureCodes));
   const showReason = $derived(presentation.showReason);
   const resumable = $derived(!!app.resume && app.isResumeStatus(status));
+  // Nothing written and the scan still on screen: the same reviewed scan can simply be run again.
+  const canTranslateAgain = $derived(
+    !resumable && !!app.scan && ['failed', 'needs_retry', 'cancelled', 'locked'].includes(status) && !(result?.changedFileCount ?? 0)
+  );
   const usage = $derived(result?.usage);
+  // The labels are the same for every status: "prepared" counts sentences the provider returned,
+  // "applied" counts the files that were written into the world.
   const cards = $derived([
-    { label: t(status === 'completed' ? 'result.stat.translated' : 'result.stat.prepared'), value: stats.translated ?? 0, tone: status === 'completed' ? 'ok' : '' },
+    { label: t('result.stat.prepared'), value: stats.translated ?? 0, tone: status === 'completed' ? 'ok' : '' },
     { label: t('result.stat.unchanged'), value: stats.unchanged ?? 0, tone: '' },
     { label: t('result.stat.failed'), value: stats.failed ?? 0, tone: (stats.failed ?? 0) > 0 ? 'bad' : '' },
     { label: t('result.stat.kept'), value: stats.kept_original ?? 0, tone: (stats.kept_original ?? 0) > 0 ? 'warn' : '' },
-    { label: t('result.stat.files'), value: result?.changedFileCount ?? 0, tone: '' },
+    { label: t('result.stat.filesApplied'), value: result?.changedFileCount ?? 0, tone: (result?.changedFileCount ?? 0) > 0 ? 'ok' : '' },
     { label: t('result.stat.requests'), value: result?.providerRequests ?? 0, tone: '' }
   ]);
-  const warnKnown = ['chunk_unreadable', 'file_unwritable', 'file_unreadable', 'command_unparsed'];
+  const adapted = $derived(result?.usage?.adapted_parameters?.filter((name) => typeof name === 'string' && name) ?? []);
 </script>
 
 <div class="page">
@@ -61,9 +70,14 @@
       {#snippet actions()}
         {#if resumable}
           <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.startTranslate({ resume: true })}><Icon name="refresh" size={18} /> {t('result.retry')}</button>
+        {:else if canTranslateAgain}
+          <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.translateAgain()}><Icon name="refresh" size={18} /> {t('result.again')}</button>
         {/if}
         {#if status === 'invalidated' || status === 'partial' || (!resumable && status !== 'completed')}
           <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.goStep('scan')}>{t('result.retryAll')}</button>
+        {/if}
+        {#if firstError?.code === 'RECOVERY_REQUIRED'}
+          <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.openInterrupted()}>{t('result.toInterrupted')}</button>
         {/if}
         {#if result.backupSetId}
           <button type="button" class="btn btn-secondary" onclick={() => app.goto('backups')}><Icon name="archive" size={18} /> {t('result.toBackups')}</button>
@@ -79,6 +93,7 @@
         <div class="stat {card.tone}"><span class="v num">{formatNumber(card.value, app.locale)}</span><span class="l">{card.label}</span></div>
       {/each}
     </section>
+    <p class="muted stat-help">{t('result.stat.help')}</p>
     {#if (usage && (usage.prompt_tokens || usage.completion_tokens)) || usage?.cost_reported}
       <dl class="group usage">
         {#if usage && (usage.prompt_tokens || usage.completion_tokens)}
@@ -89,12 +104,13 @@
         {/if}
       </dl>
     {/if}
+    {#if adapted.length}<p class="muted quiet-note">{t('result.adapted', { params: adapted.join(', ') })}</p>{/if}
 
     {#if result.warnings?.length}
       <Callout tone="warning" title={t('result.warnings')}>
         <ul class="plain">
           {#each result.warnings as warning}
-            <li>{warnKnown.includes(warning.code) ? t(`scan.warn.${warning.code}` as MessageKey, { file: warning.file ?? '', count: warning.count ?? 0 }) : warning.message ?? t('scan.warn.unknown')}</li>
+            <li>{warningText(warning)}</li>
           {/each}
         </ul>
       </Callout>
@@ -115,6 +131,15 @@
       </section>
     {/if}
 
+    {#if failureRows.length}
+      <section class="card samples" aria-labelledby="fail-summary-title">
+        <h2 id="fail-summary-title">{t('result.failureSummary')}</h2>
+        <ul class="lines">
+          {#each failureRows as row (row.code)}<li><strong class="num">{formatNumber(row.count, app.locale)}</strong><span>{t(failureKey(row.code))}</span></li>{/each}
+        </ul>
+      </section>
+    {/if}
+
     {#if result.translationFailures?.length}
       <section class="card samples" aria-labelledby="fail-title">
         <h2 id="fail-title">{t('result.failures')}</h2>
@@ -122,7 +147,7 @@
           <p class="muted">{t('result.failuresShown', { total: formatNumber(stats.failed ?? 0, app.locale), shown: formatNumber(result.translationFailures.length, app.locale) })}</p>
         {/if}
         <ul class="lines">
-          {#each result.translationFailures as item (item.source)}<li><strong>{item.source}</strong><span class="muted">{item.reason}</span></li>{/each}
+          {#each result.translationFailures as item, index (index)}<li><strong>{item.source}</strong><span class="muted">{t(failureKey(item.code))}</span></li>{/each}
         </ul>
       </section>
     {/if}
@@ -138,6 +163,7 @@
 </div>
 
 <style>
+  .stat-help, .quiet-note { margin: 0; font-size: var(--text-sm); }
   /* One strip of numbers, divided by hairlines, instead of a dashboard of cards. */
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); overflow: hidden; }
   .stat { padding: var(--space-3) var(--space-4); display: grid; gap: 2px; align-content: start; border-inline-start: 1px solid var(--border); margin-inline-start: -1px; }

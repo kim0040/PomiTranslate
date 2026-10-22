@@ -17,11 +17,11 @@
 
 {#if prompt}
   {#if prompt.phase === 'waiting'}
-    <Dialog title={t('exit.waitingTitle')} dismissible={false} onClose={() => {}}>
+    <Dialog showClose={false} title={t('exit.waitingTitle')} dismissible={false} onClose={() => {}}>
       <p role="status" aria-live="polite">{t('exit.waitingBody')}</p>
     </Dialog>
   {:else if prompt.phase === 'stuck'}
-    <Dialog title={t('exit.stuckTitle')} tone="danger" onClose={() => app.exitStay()}>
+    <Dialog showClose={false} title={t('exit.stuckTitle')} tone="danger" onClose={() => app.exitStay()}>
       <p>{t('exit.stuckBody')}</p>
       {#snippet actions()}
         <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.exitStay()}>{t('exit.keepWaiting')}</button>
@@ -29,7 +29,7 @@
       {/snippet}
     </Dialog>
   {:else if prompt.job}
-    <Dialog title={t('exit.jobTitle')} tone="danger" onClose={() => app.exitStay()}>
+    <Dialog showClose={false} title={t('exit.jobTitle')} tone="danger" onClose={() => app.exitStay()}>
       <p>{t('exit.jobBody')}</p>
       {#if prompt.dirty}<p>{t('exit.jobDirty')}</p>{/if}
       {#snippet actions()}
@@ -38,7 +38,7 @@
       {/snippet}
     </Dialog>
   {:else}
-    <Dialog title={t('exit.dirtyTitle')} onClose={() => app.exitStay()}>
+    <Dialog showClose={false} title={t('exit.dirtyTitle')} onClose={() => app.exitStay()}>
       <p>{t('exit.dirtyBody')}</p>
       {#snippet actions()}
         <button type="button" class="btn btn-quiet" onclick={() => app.exitStay()}>{t('common.cancel')}</button>

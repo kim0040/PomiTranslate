@@ -4,16 +4,20 @@
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { describeDetail, describeLocation, formatNumber } from '../lib/format';
   import Icon from './Icon.svelte';
+  import { compareTokens, tokenCounts } from '../lib/tokens';
+  import { counterState, effectiveOverride, MAX_MANUAL_LENGTH } from '../lib/review';
 
   let { candidate, onClose, showHeading = true }: { candidate: Candidate | null; onClose?: () => void; showHeading?: boolean } = $props();
 
   const included = $derived(candidate ? !app.excluded.has(candidate.id) : false);
   const manual = $derived(candidate ? app.manualTranslation(candidate) : '');
-  const tokens = $derived.by(() => {
-    if (!candidate) return [];
-    const found = candidate.source.match(/§.|%(?:\d+\$)?[sdif]|\{[A-Za-z0-9_]+\}/g) ?? [];
-    return [...new Set(found)];
-  });
+  // The same grammar the core checks (see lib/tokens.ts), so the note and the warning below agree with it.
+  const tokens = $derived(candidate ? [...tokenCounts(candidate.source).values()].map((entry) => entry.shown) : []);
+  const typed = $derived(effectiveOverride(manual));
+  // Warn while typing, before the core would have refused the translation and kept the original.
+  const tokenReport = $derived(candidate && typed ? compareTokens(candidate.source, typed) : null);
+  const length = $derived(manual.length);
+  const counter = $derived(counterState(length));
   const kinds = $derived(candidate ? Object.entries(candidate.kinds ?? { [candidate.kind]: candidate.occurrences }) : []);
   const shown = $derived(candidate?.locations ?? []);
 </script>
@@ -55,13 +59,32 @@
         class="textarea"
         rows="4"
         value={manual}
+        maxlength={MAX_MANUAL_LENGTH}
         disabled={!included}
         placeholder={t('review.detail.manualPlaceholder')}
-        aria-describedby="manual-help"
+        aria-describedby="manual-help manual-counter manual-token-warning"
         oninput={(event) => app.setOverride(candidate.id, event.currentTarget.value)}
+        onblur={(event) => {
+          // Leaving the box commits the trimmed text; whitespace alone stops being an override.
+          const value = event.currentTarget.value;
+          if (value !== value.trim()) app.setOverride(candidate.id, value.trim());
+        }}
       ></textarea>
+      <p id="manual-counter" class="counter num {counter}" aria-live="off">{t('review.detail.counter', { count: formatNumber(length, app.locale), max: formatNumber(MAX_MANUAL_LENGTH, app.locale) })}</p>
       <p id="manual-help" class="hint">{t('review.detail.manualHelp')}</p>
-      {#if manual}
+      <div id="manual-token-warning" role="status" aria-live="polite">
+        {#if tokenReport && !tokenReport.ok}
+          <p class="token-warning">
+            <Icon name="alert-triangle" size={14} />
+            <span>
+              {#if tokenReport.lost.length}{t('review.detail.tokensLost')} {#each tokenReport.lost as token, index (index)}<code>{token}</code>{/each}{/if}
+              {#if tokenReport.added.length}{t('review.detail.tokensAdded')} {#each tokenReport.added as token, index (index)}<code>{token}</code>{/each}{/if}
+              {t('review.detail.tokensConsequence')}
+            </span>
+          </p>
+        {/if}
+      </div>
+      {#if manual.length}
         <button type="button" class="btn btn-quiet btn-sm" onclick={() => app.setOverride(candidate.id, '')}>
           <Icon name="undo" size={16} /> {t('review.detail.clearManual')}
         </button>
@@ -101,6 +124,11 @@
   .source { margin: 0; padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; max-height: 220px; overflow: auto; font-size: var(--text-md); }
   .tokens { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); margin: 0; }
   .tokens code { padding: 1px 6px; border-radius: 4px; background: var(--warning-soft); color: var(--warning-text); font-weight: 700; }
+  .counter { margin: 0; font-size: var(--text-xs); color: var(--text-secondary); text-align: end; }
+  .counter.near { color: var(--warning-text); }
+  .counter.full { color: var(--danger-text); font-weight: 700; }
+  .token-warning { display: flex; gap: var(--space-2); align-items: flex-start; margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-sm); }
+  .token-warning code { margin-inline: 2px; padding: 0 4px; border-radius: 4px; background: color-mix(in srgb, currentColor 14%, transparent); font-weight: 700; }
   .kinds, .places { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
   .kinds li { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
   .places { font-size: var(--text-xs); }

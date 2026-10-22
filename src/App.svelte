@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { app } from './lib/app.svelte';
-  import { t, type MessageKey } from './lib/i18n/index.svelte';
+  import { LOCALES, t, type Locale, type MessageKey } from './lib/i18n/index.svelte';
+  import { keepWindowOnScreen } from './lib/plugins';
+  import CrashScreen from './components/CrashScreen.svelte';
+  import DiscardReviewDialog from './components/DiscardReviewDialog.svelte';
   import { applyTheme, storedTheme, watchSystemTheme } from './lib/theme';
   import { inShell, isMac, onDropPath, onMenu, openExternal, requestAttention, setMenuLabels, setSettingsDirty, setTaskProgress, setWindowTitle } from './lib/native';
   import { baseName } from './lib/format';
@@ -35,6 +38,8 @@
     const stopTheme = watchSystemTheme(() => app.theme);
     document.documentElement.classList.toggle('mac-chrome', macChrome);
     void app.boot();
+    // The shell restores the saved window placement; make sure it is on a monitor that still exists.
+    void keepWindowOnScreen();
     const stops: (() => void)[] = [];
     void onMenu((action) => app.menu(action)).then((stop) => stops.push(stop)).catch(() => {});
     void onDropPath((path) => void app.openDropped(path), (over) => (dropping = over && !app.isBusy))
@@ -62,6 +67,12 @@
       event.preventDefault();
       void openExternal(href).catch((cause) => app.fail(cause));
     };
+    // A promise nobody awaited that rejected: show it like any other failure instead of losing it.
+    const unhandled = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      app.fail(event.reason);
+    };
+    window.addEventListener('unhandledrejection', unhandled);
     if (inShell()) document.addEventListener('contextmenu', contextMenu);
     if (inShell()) document.addEventListener('click', links);
     document.addEventListener('keydown', shortcuts);
@@ -71,6 +82,7 @@
       document.removeEventListener('contextmenu', contextMenu);
       document.removeEventListener('click', links);
       document.removeEventListener('keydown', shortcuts);
+      window.removeEventListener('unhandledrejection', unhandled);
       app.destroy();
     };
   });
@@ -123,6 +135,7 @@
   const pageTitles: Record<string, MessageKey> = { backups: 'nav.backups', settings: 'nav.settings', about: 'nav.about', help: 'nav.help' };
 </script>
 
+<svelte:boundary onerror={(error) => app.reportCrash(error)}>
 <a class="skip" href="#main-content">{t('app.skip')}</a>
 
 <div class="shell" class:rail={app.railCollapsed}>
@@ -206,6 +219,23 @@
       <li><Icon name="language" size={19} /> <span>{t('notice.item2')}</span></li>
       <li><Icon name="info" size={19} /> <span>{t('notice.item3')}</span></li>
     </ul>
+    <div class="first-run">
+      <div class="field">
+        <span class="label" id="first-lang">{t('firstRun.language')}</span>
+        <div class="segmented" role="group" aria-labelledby="first-lang">
+          {#each LOCALES as locale (locale)}
+            <button type="button" lang={locale} aria-pressed={app.settings.ui_language === locale}
+              onclick={() => app.chooseFirstRunLanguage(locale as Locale)}>{locale === 'ko' ? '한국어' : locale === 'ja' ? '日本語' : 'English'}</button>
+          {/each}
+        </div>
+      </div>
+      <div class="field">
+        <label class="label" for="first-target">{t('firstRun.target')}</label>
+        <input id="first-target" class="input" type="text" autocomplete="off" value={app.settings.target_language}
+          aria-describedby="first-target-help" oninput={(event) => app.setFirstRunTarget(event.currentTarget.value)} />
+        <span id="first-target-help" class="hint">{t('firstRun.targetHelp')}</span>
+      </div>
+    </div>
     <p class="required" lang="en">NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
     {#snippet actions()}
       <button type="button" class="btn btn-primary btn-lg" data-autofocus onclick={() => app.acceptNotice()}>{t('notice.accept')}</button>
@@ -227,7 +257,14 @@
   </div>
 {/if}
 
+<DiscardReviewDialog />
+
 <Toasts />
+
+{#snippet failed(_error: unknown, reset: () => void)}
+  <CrashScreen {reset} />
+{/snippet}
+</svelte:boundary>
 
 <style>
   .skip {
@@ -265,6 +302,7 @@
   .notice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
   .notice-list li { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: var(--space-3); }
   .required { font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); letter-spacing: 0.01em; }
+  .first-run { display: grid; gap: var(--space-3); }
   .notice-list :global(.icon) { color: var(--accent-text); margin-top: 2px; }
   .drop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 3px dashed var(--accent); outline-offset: -12px; pointer-events: none; animation: pomi-fade var(--dur-fast) var(--ease-out); }
   .drop-card { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-radius: var(--radius-xl); background: var(--bg-surface); color: var(--accent-text); font-weight: 600; box-shadow: var(--shadow-pop); }
