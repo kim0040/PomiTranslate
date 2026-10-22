@@ -27,7 +27,9 @@ test('model lookup never saves drafts, keys or invalidates reviewed candidates',
   await page.getByRole('button', { name: '변경 취소', exact: true }).click();
   await expect(page.locator('#target-language')).toHaveValue('한국어');
   await expect(page.locator('#api-key')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+  // Nothing left to save: the save bar is gone, not a disabled button.
+  await expect(page.locator('.action-bar')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '저장', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   await page.getByRole('button', { name: /^후보 검토/ }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
@@ -122,19 +124,22 @@ test('reasoning modes support keyboard navigation and focus reaches supported ef
 });
 
 for (const width of [1440, 840, 320]) {
-  test(`settings save bar stays reachable without covering fields at ${width}px`, async ({ page }) => {
+  test(`settings save bar appears only with a change and stays reachable without covering fields at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 620 });
     await settings(page);
     await expect(page.getByText('모델 기본값: 켜짐 · 강하게 (high)', { exact: true })).toBeAttached();
+    // Clean page: no save bar and no Save button at all.
+    await expect(page.locator('.action-bar')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '저장', exact: true })).toHaveCount(0);
+    await page.locator('#model').fill('edited-model');
     const save = page.getByRole('button', { name: '저장', exact: true });
+    await expect(save).toBeEnabled();
     await expect(save).toBeInViewport();
     await page.locator('#style-prompt').focus();
     const editor = await page.locator('#style-prompt').boundingBox();
-    const bar = await page.locator('.save-bar').boundingBox();
+    const bar = await page.locator('.action-bar').boundingBox();
     expect(editor!.y + editor!.height).toBeLessThanOrEqual(bar!.y);
-    await page.locator('#model').fill('edited-model');
-    await expect(save).toBeEnabled();
-    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.evaluate(() => document.getElementById('main-content')!.scrollTo(0, 99999));
     await expect(save).toBeInViewport();
     expect(await save.evaluate((button) => {
       const box = button.getBoundingClientRect();
@@ -142,7 +147,11 @@ for (const width of [1440, 840, 320]) {
     })).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.evaluate(() => document.getElementById('main-content')!.scrollTo(0, 0));
     await page.screenshot({ path: `output/playwright/settings-ux-${width}.png` });
+    // Saving removes the bar again and leaves focus on something that is still there.
+    await save.click();
+    await expect(page.locator('.action-bar')).toHaveCount(0);
+    await expect(page.locator('.section-nav a:focus')).toHaveCount(1);
   });
 }

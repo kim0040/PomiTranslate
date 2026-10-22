@@ -31,7 +31,7 @@ test('settings switch light, dark and system at once and keep the choice', async
   await expect.poll(async () => (await chrome(page, 'plugin:window|set_theme')).at(-1)?.value).toBe('dark');
   await expect.poll(async () => (await chrome(page, 'set_menu_theme')).at(-1)?.choice).toBe('dark');
   await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0e0f11');
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); // nothing to save
+  await expect(page.locator('.action-bar')).toHaveCount(0); // nothing to save: no save bar
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 
   await section.getByRole('radio', { name: '라이트' }).check();
