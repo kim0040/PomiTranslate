@@ -28,7 +28,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
     }
   },
   "plugins": {
@@ -45,9 +45,20 @@
   "bundle": {
     "active": true,
     "targets": [
+      "nsis",
       "app",
-      "dmg"
+      "dmg",
+      "appimage",
+      "deb"
     ],
+    "publisher": "PomiTranslate contributors",
+    "copyright": "Copyright (c) 2026 PomiTranslate contributors. MIT License.",
+    "category": "Utility",
+    "homepage": "https://github.com/kim0040/PomiTranslate",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "shortDescription": "Translate Minecraft worlds with an AI provider you choose.",
+    "longDescription": "PomiTranslate scans a Minecraft Java world, translates the text it finds (books, signs, item names, command blocks and more) with the AI provider you choose, and keeps a backup so every change can be restored.",
     "externalBin": [
       "binaries/pomi-sidecar"
     ],
@@ -56,6 +67,20 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Korean",
+          "English",
+          "Japanese"
+        ],
+        "displayLanguageSelector": false
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "12.0"
     }

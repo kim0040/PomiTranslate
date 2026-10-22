@@ -9,11 +9,15 @@ use std::{
     path::Path,
     ptr::{null, null_mut},
     slice,
+    time::Duration,
 };
+
+use super::{wait_for_lock, FsError};
 
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ,
+        CloseHandle, GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_LOCK_VIOLATION,
+        GENERIC_READ,
         GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, PSID,
     },
     Security::Authorization::{
@@ -32,8 +36,8 @@ use windows_sys::Win32::{
         UnlockFileEx, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DEVICE,
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, LOCKFILE_EXCLUSIVE_LOCK, OPEN_EXISTING,
-        READ_CONTROL,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OPEN_EXISTING, READ_CONTROL,
     },
     System::{
         Threading::{GetCurrentProcess, OpenProcessToken},
@@ -48,7 +52,9 @@ const SID_REVISION_VALUE: u8 = 1;
 const SID_MAX_SUB_AUTHORITIES: usize = 15;
 const ACCESS_ALLOWED_ACE_SID_OFFSET: usize = 8;
 const SID_HEADER_SIZE: usize = 8;
-const SECURITY_SHARE_MODE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+// FILE_SHARE_DELETE lets the key file be renamed into place even if a scanner still has it open;
+// the vault also closes its own handle before every rename.
+const SECURITY_SHARE_MODE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
 struct OwnedHandle(HANDLE);
 
@@ -101,7 +107,7 @@ impl CurrentUser {
             return Err("Cannot inspect the current Windows user".into());
         }
 
-        let word_count = (required_bytes as usize + size_of::<usize>() - 1) / size_of::<usize>();
+        let word_count = (required_bytes as usize).div_ceil(size_of::<usize>());
         let mut token_user = vec![0usize; word_count];
         let mut returned_bytes = 0u32;
         if unsafe {
@@ -356,17 +362,17 @@ fn inspect_security(handle: HANDLE, directory: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn check(path: &Path, directory: bool) -> Result<(), String> {
-    let handle = open_inspection_handle(path, directory)?;
-    inspect_handle(handle.0, directory)
+pub fn check(path: &Path, directory: bool) -> Result<(), FsError> {
+    let handle = open_inspection_handle(path, directory).map_err(FsError::io)?;
+    inspect_handle(handle.0, directory).map_err(FsError::permissions)
 }
 
-pub fn directory(path: &Path) -> Result<(), String> {
+pub fn directory(path: &Path) -> Result<(), FsError> {
     if !path
         .try_exists()
-        .map_err(|_| "Cannot inspect credential directory")?
+        .map_err(|_| FsError::io("Cannot inspect credential directory"))?
     {
-        let descriptor = security_descriptor(true)?;
+        let descriptor = security_descriptor(true).map_err(FsError::io)?;
         let attributes = create_attributes(&descriptor);
         let path_wide = wide_path(path);
         unsafe {
@@ -377,9 +383,9 @@ pub fn directory(path: &Path) -> Result<(), String> {
     check(path, true)
 }
 
-pub fn open(path: &Path, create: bool) -> Result<File, String> {
+pub fn open(path: &Path, create: bool) -> Result<File, FsError> {
     let descriptor = if create {
-        Some(security_descriptor(false)?)
+        Some(security_descriptor(false).map_err(FsError::io)?)
     } else {
         None
     };
@@ -401,12 +407,12 @@ pub fn open(path: &Path, create: bool) -> Result<File, String> {
         )
     };
     if handle == INVALID_HANDLE_VALUE || handle == 0 {
-        return Err("Cannot open private credential file".into());
+        return Err(FsError::io("Cannot open private credential file"));
     }
 
     let file = unsafe { File::from_raw_handle(handle as RawHandle) };
     inspect_handle(file.as_raw_handle() as HANDLE, false)
-        .map_err(|_| "Credential file permissions or ownership are unsafe".to_string())?;
+        .map_err(|_| FsError::permissions("Credential file permissions or ownership are unsafe"))?;
     Ok(file)
 }
 
@@ -416,26 +422,35 @@ pub struct Lock {
 }
 
 impl Lock {
-    pub fn acquire(path: &Path) -> Result<Self, String> {
+    pub fn acquire(path: &Path, wait: Duration) -> Result<Self, FsError> {
         let file = match open(path, true) {
             Ok(file) => file,
             Err(_error) if path.try_exists().unwrap_or(false) => open(path, false)?,
             Err(error) => return Err(error),
         };
         let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-        if unsafe {
-            LockFileEx(
-                file.as_raw_handle() as HANDLE,
-                LOCKFILE_EXCLUSIVE_LOCK,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        } == 0
-        {
-            return Err("Cannot lock credential storage".into());
-        }
+        wait_for_lock(
+            || {
+                let locked = unsafe {
+                    LockFileEx(
+                        file.as_raw_handle() as HANDLE,
+                        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                        0,
+                        1,
+                        0,
+                        &mut overlapped,
+                    )
+                };
+                if locked != 0 {
+                    Ok(true)
+                } else if unsafe { GetLastError() } == ERROR_LOCK_VIOLATION {
+                    Ok(false)
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            },
+            wait,
+        )?;
         Ok(Self { file, overlapped })
     }
 }

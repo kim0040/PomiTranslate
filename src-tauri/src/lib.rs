@@ -1,34 +1,28 @@
 mod app_menu;
 mod credentials;
 mod desktop_links;
+mod diagnostics;
 mod document_export;
+mod error;
+mod exit_gate;
 mod provider_boundary;
 mod settings_transaction;
+mod sidecar;
 mod sidecar_paths;
 mod startup;
 mod startup_theme;
 mod updates;
-mod zoom_menu;
 
-use std::{fs, path::PathBuf, sync::Mutex};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 use tauri::{Emitter, Manager, State, WindowEvent};
-use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
-    ShellExt,
-};
 
-struct ActiveProcess {
-    child: CommandChild,
-    cancel_path: PathBuf,
-}
-
-#[derive(Default)]
-struct ActiveSidecar {
-    process: Mutex<Option<ActiveProcess>>,
-    request_gate: tauri::async_runtime::Mutex<()>,
-}
+use error::{code, IpcError};
+use sidecar::ActiveSidecar;
 
 const ALLOWED_REQUESTS: &[&str] = &[
     "app.bootstrap",
@@ -90,74 +84,179 @@ fn is_public_catalog(kind: &str, payload: &serde_json::Map<String, Value>) -> bo
         && payload.get("publicCatalog").and_then(Value::as_bool) == Some(true)
 }
 
-/// Remove and return every complete line in `buffer`, without its trailing whitespace.
-/// A partial last line stays in the buffer for the next chunk.
-fn drain_complete_lines(buffer: &mut Vec<u8>) -> Vec<Vec<u8>> {
-    let mut lines = Vec::new();
-    while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-        let mut line: Vec<u8> = buffer.drain(..=newline).collect();
-        while line.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
-            line.pop();
-        }
-        if !line.is_empty() {
-            lines.push(line);
-        }
-    }
-    lines
-}
-
-fn credential_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// Where credentials, reports and the logs live.
+pub(crate) fn app_data_root(app: &tauri::AppHandle) -> Result<PathBuf, IpcError> {
     app.path()
         .app_data_dir()
-        .map_err(|_| "Application data directory is unavailable".into())
+        .map_err(|_| IpcError::new(code::INTERNAL, "Application data directory is unavailable"))
+}
+
+/// A vault or keychain failure while a request needs the key: the request cannot run, and the page is
+/// told which step repairs it. Other errors (an endpoint mismatch, a bad provider) pass through.
+fn credential_unavailable(error: IpcError) -> IpcError {
+    let storage = error.code.starts_with("VAULT_") || error.code.starts_with("KEYCHAIN_");
+    if storage {
+        IpcError::new(code::CREDENTIAL_UNAVAILABLE, error.message).with_detail(error.code)
+    } else {
+        error
+    }
+}
+
+/// Run blocking vault work off the async workers and the main thread (CR-6).
+async fn vault<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    work: impl FnOnce(&credentials::Credentials, &Path) -> Result<T, IpcError> + Send + 'static,
+) -> Result<T, IpcError> {
+    let root = app_data_root(app)?;
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let credentials = handle.state::<credentials::Credentials>();
+        work(&credentials, &root)
+    })
+    .await
+    .map_err(|_| IpcError::new(code::INTERNAL, "Credential work could not finish"))?
+}
+
+fn logged<T>(source: &str, result: Result<T, IpcError>) -> Result<T, IpcError> {
+    if let Err(error) = &result {
+        diagnostics::global().log_error(source, error);
+    }
+    result
 }
 
 #[tauri::command]
-fn credential_status(
+async fn credential_status(
     app: tauri::AppHandle,
-    state: State<'_, credentials::Credentials>,
     provider: String,
-) -> Result<credentials::Status, String> {
-    state.status(&credential_root(&app)?, &provider)
+) -> Result<credentials::State, IpcError> {
+    vault(&app, move |credentials, root| Ok(credentials.state(root, &provider))).await
 }
 
 #[tauri::command]
-fn credential_import(
+async fn credential_import(
     app: tauri::AppHandle,
-    state: State<'_, credentials::Credentials>,
     provider: String,
-) -> Result<credentials::Status, String> {
-    state.import_keychain(&credential_root(&app)?, &provider)
+    endpoint: Option<String>,
+) -> Result<credentials::Status, IpcError> {
+    let endpoint = endpoint.as_deref().and_then(provider_boundary::canonical_endpoint);
+    logged(
+        "credential_import",
+        vault(&app, move |credentials, root| {
+            credentials.import_keychain(root, &provider, endpoint.as_deref())
+        })
+        .await,
+    )
+}
+
+/// "Reset credential storage": set the damaged vault aside and start an empty one. Saved keys in it
+/// are gone from the app; the set-aside copy stays on disk until the app is reset.
+#[tauri::command]
+async fn credential_reset_storage(
+    app: tauri::AppHandle,
+    state: State<'_, ActiveSidecar>,
+) -> Result<(), IpcError> {
+    let _gate = state
+        .request_gate
+        .try_lock()
+        .map_err(|_| IpcError::new(code::BUSY, "Another PomiTranslate operation is still running"))?;
+    logged(
+        "credential_reset_storage",
+        vault(&app, |credentials, root| {
+            credentials.reset_storage(root).map_err(|error| {
+                IpcError::new(code::CREDENTIAL_RESET_FAILED, error.message).with_detail(error.code)
+            })
+        })
+        .await,
+    )
+}
+
+/// The Rust-owned half of "reset the app" (RB-9): saved keys first (when asked), then the run
+/// reports. The page resets the core's own data only after this succeeds, so a failure here leaves
+/// everything the core owns untouched and the message can say exactly what was and was not removed.
+#[tauri::command]
+async fn native_reset(
+    app: tauri::AppHandle,
+    state: State<'_, ActiveSidecar>,
+    delete_keys: bool,
+) -> Result<(), IpcError> {
+    let _gate = state
+        .request_gate
+        .try_lock()
+        .map_err(|_| IpcError::new(code::BUSY, "Another PomiTranslate operation is still running"))?;
+    let root = app_data_root(&app)?;
+    logged(
+        "native_reset",
+        vault(&app, move |credentials, root| {
+            if delete_keys {
+                credentials.purge(root).map_err(credential_unavailable)?;
+            }
+            clear_reports(&root.join("reports"))
+        })
+        .await,
+    )
+    .map(|()| drop(root))
+}
+
+fn clear_reports(reports: &Path) -> Result<(), IpcError> {
+    let failed = || IpcError::new(code::RESET_FAILED, "Could not remove the saved run reports");
+    let entries = match fs::read_dir(reports) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(failed()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let removed = if is_dir {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        removed.map_err(|_| failed())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn sidecar_request(
     app: tauri::AppHandle,
     state: State<'_, ActiveSidecar>,
-    credentials: State<'_, credentials::Credentials>,
-    mut request: Value,
-) -> Result<Value, String> {
+    request: Value,
+) -> Result<Value, IpcError> {
     let kind = request
         .get("type")
         .and_then(Value::as_str)
-        .ok_or("Missing request type")?
+        .unwrap_or("")
+        .to_owned();
+    logged(&format!("sidecar_request:{kind}"), handle_request(&app, &state, request).await)
+}
+
+async fn handle_request(
+    app: &tauri::AppHandle,
+    state: &ActiveSidecar,
+    mut request: Value,
+) -> Result<Value, IpcError> {
+    let invalid = |message: &str| IpcError::new(code::INVALID_REQUEST, message.to_owned());
+    let kind = request
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("Missing request type"))?
         .to_string();
     if !is_allowed_request(&kind) {
-        return Err("Unsupported request type".into());
+        return Err(IpcError::new(code::UNSUPPORTED_REQUEST, "Unsupported request type"));
     }
     let id = request
         .get("id")
         .and_then(Value::as_str)
-        .ok_or("Missing request id")?
+        .ok_or_else(|| invalid("Missing request id"))?
         .to_string();
     if request.get("v").and_then(Value::as_u64) != Some(1) {
-        return Err("Unsupported protocol version".into());
+        return Err(invalid("Unsupported protocol version"));
     }
 
-    let _request_guard = state
-        .request_gate
-        .try_lock()
-        .map_err(|_| "Another PomiTranslate operation is still running")?;
+    let _request_guard = state.request_gate.try_lock().map_err(|_| {
+        IpcError::new(code::BUSY, "Another PomiTranslate operation is still running")
+    })?;
 
     let provider = request
         .get("payload")
@@ -167,9 +266,12 @@ async fn sidecar_request(
         .to_string();
     if kind == "credentials.delete" {
         if provider.is_empty() {
-            return Err("Missing credential provider".into());
+            return Err(invalid("Missing credential provider"));
         }
-        credentials.delete(&credential_root(&app)?, &provider)?;
+        let target = provider.clone();
+        vault(app, move |credentials, root| credentials.delete(root, &target))
+            .await
+            .map_err(credential_unavailable)?;
         return Ok(serde_json::json!({
             "v": 1,
             "id": id,
@@ -182,29 +284,46 @@ async fn sidecar_request(
             payload.insert("credentialOwner".into(), Value::String("rust".into()));
         }
     }
+    // (mode, key the person typed, endpoint the key is for) to commit after the core saved.
     let mut pending_credential = None;
     if kind == "settings.set" {
         let payload = request
             .get_mut("payload")
             .and_then(Value::as_object_mut)
-            .ok_or("Invalid settings payload")?;
+            .ok_or_else(|| invalid("Invalid settings payload"))?;
         provider_boundary::validate(payload)?;
+        let endpoint = provider_boundary::bound_endpoint(payload);
         let supplied = zeroize::Zeroizing::new(match payload.remove("apiKey") {
             Some(Value::String(value)) => value,
             None | Some(Value::Null) => String::new(),
-            _ => return Err("API key must be text".into()),
+            _ => return Err(invalid("API key must be text")),
         });
-        let mode: credentials::Mode = if let Some(value) = payload.remove("credentialMode") {
-            serde_json::from_value(value).map_err(|_| "Unknown credential storage mode")?
-        } else {
-            credentials.status(&credential_root(&app)?, &provider)?.mode
+        let requested: Option<credentials::Mode> = match payload.remove("credentialMode") {
+            Some(value) => Some(
+                serde_json::from_value(value).map_err(|_| invalid("Unknown credential storage mode"))?,
+            ),
+            None => None,
         };
-        pending_credential = Some((mode, supplied));
+        let current = {
+            let target = provider.clone();
+            vault(app, move |credentials, root| Ok(credentials.state(root, &target))).await?
+        };
+        let mode = requested.or(current.mode).unwrap_or_default();
+        // A settings change that does not touch the key never needs the vault, so a damaged one
+        // cannot stop preferences from saving (CR-3).
+        let changes_storage = !supplied.is_empty()
+            || match current.error {
+                None => current.mode != Some(mode),
+                Some(_) => current.mode.is_some() && current.mode != Some(mode),
+            };
+        if changes_storage {
+            pending_credential = Some((mode, supplied, endpoint));
+        }
     } else if KEY_INJECTED_REQUESTS.contains(&kind.as_str()) {
         let payload = request
             .get_mut("payload")
             .and_then(Value::as_object_mut)
-            .ok_or("Invalid provider payload")?;
+            .ok_or_else(|| invalid("Invalid provider payload"))?;
         provider_boundary::validate(payload)?;
         // Frontend cannot bypass the selected store with an arbitrary supplied key.
         payload.remove("apiKey");
@@ -213,28 +332,38 @@ async fn sidecar_request(
         let manual_only = matches!(kind.as_str(), "translate.start" | "translate.resume")
             && payload.get("manualOnly").and_then(Value::as_bool) == Some(true);
         if !manual_only && !is_public_catalog(&kind, payload) {
-            if let Some(secret) = credentials.read(&credential_root(&app)?, &provider)? {
-                payload.insert("apiKey".into(), Value::String(secret.to_string()));
+            let endpoint = provider_boundary::bound_endpoint(payload);
+            let target = provider.clone();
+            let secret = vault(app, move |credentials, root| {
+                credentials.read(root, &target, endpoint.as_deref())
+            })
+            .await
+            .map_err(credential_unavailable)?;
+            if let Some(mut secret) = secret {
+                // Moved, not copied: the Zeroizing wrapper is left with an empty string.
+                payload.insert("apiKey".into(), Value::String(std::mem::take(&mut *secret)));
             }
         }
     }
 
-    let (mut response, committed_status) = if let Some((mode, supplied)) = pending_credential {
-        let root = credential_root(&app)?;
+    let (mut response, committed_status) = if let Some((mode, supplied, endpoint)) = pending_credential {
+        let root = app_data_root(app)?;
+        let credentials = app.state::<credentials::Credentials>();
         settings_transaction::save(
             request,
-            |request| exchange_sidecar(&app, &state, request),
+            |request| sidecar::exchange(app, state, request),
             || {
                 credentials
-                    .save(&root, &provider, mode, &supplied)
+                    .save(&root, &provider, mode, &supplied, endpoint.as_deref())
                     .map_err(|error| settings_transaction::CommitError {
                         uncertain: error.uncertain,
+                        reason: Some(error.error.code),
                     })
             },
         )
         .await?
     } else {
-        (exchange_sidecar(&app, &state, request).await?, None)
+        (sidecar::exchange(app, state, request).await?, None)
     };
     if response.get("type").and_then(Value::as_str) == Some("response.ok")
         && matches!(
@@ -253,16 +382,30 @@ async fn sidecar_request(
         } else {
             provider.clone()
         };
-        let status = if let Some(status) = committed_status {
-            status
+        // Credential storage is reported as data: a vault that cannot be opened never fails these
+        // requests, and "unavailable" is never presented as "empty".
+        let storage = if let Some(status) = committed_status {
+            credentials::State {
+                mode: Some(status.mode),
+                stored: Some(status.stored),
+                error: None,
+            }
         } else {
-            credentials.status(&credential_root(&app)?, &response_provider)?
+            vault(app, move |credentials, root| Ok(credentials.state(root, &response_provider))).await?
         };
         if let Some(payload) = response.get_mut("payload").and_then(Value::as_object_mut) {
-            payload.insert("apiKeyStored".into(), Value::Bool(status.stored));
+            payload.insert("apiKeyStored".into(), Value::Bool(storage.stored.unwrap_or(false)));
+            if let Some(mode) = storage.mode {
+                payload.insert(
+                    "credentialMode".into(),
+                    serde_json::to_value(mode)
+                        .map_err(|_| IpcError::new(code::INTERNAL, "Invalid credential mode"))?,
+                );
+            }
             payload.insert(
-                "credentialMode".into(),
-                serde_json::to_value(status.mode).map_err(|_| "Invalid credential mode")?,
+                "credentialState".into(),
+                serde_json::to_value(&storage)
+                    .map_err(|_| IpcError::new(code::INTERNAL, "Invalid credential state"))?,
             );
         }
     }
@@ -270,202 +413,142 @@ async fn sidecar_request(
     Ok(response)
 }
 
-/// Raw exchange: the outer request gate stays locked across multi-step settings recovery.
-async fn exchange_sidecar(
-    app: &tauri::AppHandle,
-    state: &ActiveSidecar,
-    mut request: Value,
-) -> Result<Value, String> {
-    let deadlines = startup::StartupDeadlines::new(
-        request.get("type").and_then(Value::as_str).unwrap_or(""),
-    );
-    let id = request
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or("Missing request id")?
-        .to_owned();
-    let app_data = credential_root(app)?;
-    let data_dir = sidecar_paths::core_data_dir(&app_data, &app.config().identifier)?;
-    let report_dir = app_data.join("reports");
-    fs::create_dir_all(&report_dir).map_err(|_| "Cannot create the report directory")?;
-    let cancel_path = report_dir.join("active-operation.cancel");
-    let mut receiver = {
-        let mut active = state
-            .process
-            .lock()
-            .map_err(|_| "Sidecar state is unavailable")?;
-        if active.is_some() {
-            return Err("Another PomiTranslate operation is still running".into());
-        }
-        let _ = fs::remove_file(&cancel_path);
-        let command = app
-            .shell()
-            .sidecar("pomi-sidecar")
-            .map_err(|_| "Packaged translation core is unavailable")?
-            .args(sidecar_paths::arguments(
-                &data_dir,
-                &report_dir,
-                &cancel_path,
-            ));
-        let (receiver, mut child) = command
-            .spawn()
-            .map_err(|_| "Could not start the translation core")?;
-        let mut line =
-            zeroize::Zeroizing::new(serde_json::to_vec(&request).map_err(|_| "Invalid request")?);
-        if let Some(secret) = request
-            .get_mut("payload")
-            .and_then(Value::as_object_mut)
-            .and_then(|p| p.get_mut("apiKey"))
-        {
-            if let Value::String(value) = secret {
-                zeroize::Zeroize::zeroize(value);
-            }
-        }
-        line.push(b'\n');
-        if child.write(&line).is_err() {
-            let _ = child.kill();
-            return Err("Could not send the request to the translation core".into());
-        }
-        *active = Some(ActiveProcess {
-            child,
-            cancel_path: cancel_path.clone(),
-        });
-        receiver
-    };
-
-    let mut saw_hello = false;
-    let mut stdout_buffer = Vec::<u8>::new();
-    let result: Result<Value, String> = 'events: loop {
-        let event = match deadlines.receive(saw_hello, receiver.recv()).await {
-            Ok(event) => event,
-            Err(code) => break Err(code.into()),
-        };
-        match event {
-            Some(CommandEvent::Stdout(bytes)) => {
-                stdout_buffer.extend_from_slice(&bytes);
-                if stdout_buffer.len() > 8 * 1024 * 1024 {
-                    break Err("Translation core returned an oversized message".into());
-                }
-                for line in drain_complete_lines(&mut stdout_buffer) {
-                    let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-                        break 'events Err(
-                            "Translation core returned an invalid JSONL message".into()
-                        );
-                    };
-                    if message.get("type").and_then(Value::as_str) == Some("system.hello") {
-                        let version = message
-                            .get("payload")
-                            .and_then(|value| value.get("protocolVersion"))
-                            .and_then(Value::as_u64);
-                        if version != Some(1) {
-                            break 'events Err(
-                                "Translation core protocol version does not match".into()
-                            );
-                        }
-                        saw_hello = true;
-                        continue;
-                    }
-                    if !saw_hello {
-                        break 'events Err("Translation core did not complete its handshake".into());
-                    }
-                    if message.get("id").and_then(Value::as_str) == Some(id.as_str())
-                        && message
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .is_some_and(|kind| kind.ends_with(".progress"))
-                    {
-                        let _ = app.emit("pomi-progress", &message);
-                        continue;
-                    }
-                    if message.get("id").and_then(Value::as_str) == Some(id.as_str()) {
-                        break 'events Ok(message);
-                    }
-                }
-            }
-            Some(CommandEvent::Stderr(_)) => {
-                // The sidecar may include private world paths and provider errors.
-            }
-            Some(CommandEvent::Error(_)) | Some(CommandEvent::Terminated(_)) | None => {
-                break Err("Translation core stopped before it returned a result".into());
-            }
-            Some(_) => continue,
-        }
-    };
-
-    if let Ok(mut active) = state.process.lock() {
-        if let Some(process) = active.take() {
-            let _ = process.child.kill();
-            let _ = fs::remove_file(process.cancel_path);
-        }
-    }
-    result
-}
-
 #[tauri::command]
 fn operation_active(state: State<'_, ActiveSidecar>) -> bool {
-    state.request_gate.try_lock().is_err()
+    state.busy()
 }
 
 #[tauri::command]
-async fn update_check(app: tauri::AppHandle) -> Result<updates::UpdateInfo, String> {
-    updates::check(&app).await
-}
-
-/// Installing replaces the program, so it owns the same gate as a scan or a write: it cannot start
-/// during a job, a job cannot start during it, and quitting is held until it ends.
-#[tauri::command]
-async fn update_install(app: tauri::AppHandle, state: State<'_, ActiveSidecar>) -> Result<(), String> {
-    let _gate = state
-        .request_gate
-        .try_lock()
-        .map_err(|_| "UPDATE_BUSY")?;
-    updates::install(&app).await
+async fn update_check(app: tauri::AppHandle) -> Result<updates::UpdateInfo, IpcError> {
+    logged("update_check", updates::check(&app).await)
 }
 
 #[tauri::command]
-fn cancel_active(state: State<'_, ActiveSidecar>) -> Result<bool, String> {
-    let active = state
-        .process
-        .lock()
-        .map_err(|_| "Sidecar state is unavailable")?;
-    let Some(process) = active.as_ref() else {
-        return Ok(false);
+async fn update_install(
+    app: tauri::AppHandle,
+    state: State<'_, ActiveSidecar>,
+    control: State<'_, updates::UpdateControl>,
+) -> Result<(), IpcError> {
+    logged("update_install", updates::install(&app, &control, &state).await)
+}
+
+#[tauri::command]
+fn update_cancel(control: State<'_, updates::UpdateControl>) {
+    control.cancel();
+}
+
+#[tauri::command]
+fn cancel_active(state: State<'_, ActiveSidecar>) -> Result<bool, IpcError> {
+    state.request_cancel()
+}
+
+/// Versions, platform, recent events and the core's last stderr lines, for "copy diagnostics".
+#[tauri::command]
+fn diagnostics_snapshot() -> String {
+    diagnostics::global().snapshot()
+}
+
+/// The folder in a second launch's arguments, if any: a world folder or its `level.dat`. Relative
+/// paths are taken from the second launch's own working directory.
+fn world_path_from_args(args: &[String], cwd: &str) -> Option<String> {
+    args.iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-') && !arg.is_empty())
+        .find_map(|arg| {
+            let mut path = PathBuf::from(arg);
+            if path.is_relative() {
+                path = Path::new(cwd).join(path);
+            }
+            if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("level.dat")) && path.is_file() {
+                path.pop();
+            }
+            path.is_dir().then(|| path.to_string_lossy().into_owned())
+        })
+}
+
+/// Only the app's own pages may load in the main window. Everything else goes through
+/// `open_external` to the system browser (EX-6).
+fn navigation_allowed(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    let own = match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" | "https" => url.host_str() == Some("tauri.localhost"),
+        "about" => url.as_str() == "about:blank",
+        _ => false,
     };
-    fs::write(&process.cancel_path, b"cancel").map_err(|_| "Could not request cancellation")?;
-    Ok(true)
+    own || dev_url.is_some_and(|dev| {
+        url.scheme() == dev.scheme() && url.host_str() == dev.host_str() && url.port() == dev.port()
+    })
+}
+
+fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|webview, url| {
+            let dev_url = if cfg!(debug_assertions) {
+                webview.app_handle().config().build.dev_url.clone()
+            } else {
+                None
+            };
+            let allowed = navigation_allowed(url, dev_url.as_ref());
+            if !allowed {
+                diagnostics::global().log(
+                    "WARN",
+                    "navigation",
+                    &format!("blocked navigation to {}://{}", url.scheme(), url.host_str().unwrap_or("")),
+                );
+            }
+            allowed
+        })
+        .build()
 }
 
 pub fn run() {
+    diagnostics::install_panic_hook();
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
+                // A second launch with a world folder opens it, like dropping it on the window.
+                if let Some(path) = world_path_from_args(&args, &cwd) {
+                    let _ = window.emit("pomi-open-world", path);
+                }
             }
         }))
+        .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ActiveSidecar::default())
         .manage(credentials::Credentials::default())
+        .manage(updates::UpdateControl::default())
+        .manage(exit_gate::ExitControl::default())
         .setup(|app| {
-            zoom_menu::install(app)?;
+            if let Ok(local) = app.path().app_local_data_dir() {
+                diagnostics::global().set_dir(local.join("logs"));
+            }
+            diagnostics::global().log(
+                "INFO",
+                "app",
+                &format!("PomiTranslate {} started", app.package_info().version),
+            );
+            app_menu::install(app)?;
             startup_theme::apply(app);
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if !app_menu::select(app, event.id().as_ref()) {
-                zoom_menu::select(app, event.id().as_ref());
-            }
+            app_menu::select(app, event.id().as_ref());
         })
         .invoke_handler(tauri::generate_handler![
             sidecar_request,
             cancel_active,
             credential_status,
             credential_import,
+            credential_reset_storage,
+            native_reset,
             operation_active,
+            diagnostics_snapshot,
             document_export::export_document,
             app_menu::set_menu_labels,
             app_menu::set_menu_theme,
@@ -473,34 +556,33 @@ pub fn run() {
             desktop_links::data_locations,
             desktop_links::reveal_data_folder,
             update_check,
-            update_install
+            update_install,
+            update_cancel,
+            exit_gate::exit_set_settings_dirty,
+            exit_gate::exit_confirm,
+            exit_gate::exit_force
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let active = window.state::<ActiveSidecar>();
-                if active.request_gate.try_lock().is_err() {
+                if !exit_gate::allow_close(window.app_handle()) {
                     api.prevent_close();
-                    // Tell the window why it did not close, instead of ignoring the click.
-                    let _ = window.emit("pomi-close-blocked", true);
                 }
             }
         })
         .build(tauri::generate_context!())
         .expect("failed to build PomiTranslate")
         .run(|app, event| {
-            // Quitting (Cmd+Q, the app menu, a session logout) skips CloseRequested. Hold it the same
-            // way while a scan, write or restore owns the core, instead of killing it mid-write.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                let active = app.state::<ActiveSidecar>();
-                if code.is_none() && active.request_gate.try_lock().is_err() {
-                    api.prevent_exit();
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        let _ = window.emit("pomi-close-blocked", true);
+            match &event {
+                // Quitting by Cmd+Q, the app menu or a session logout skips CloseRequested. It is held
+                // the same way while a job runs or settings are unsaved. An exit the person already
+                // confirmed carries a code and passes.
+                tauri::RunEvent::ExitRequested { api, code, .. } => {
+                    if code.is_none() && !exit_gate::allow_close(app) {
+                        api.prevent_exit();
                     }
-                    return;
                 }
+                tauri::RunEvent::Exit => app.state::<ActiveSidecar>().kill_now(),
+                _ => {}
             }
             #[cfg(target_os = "macos")]
             if matches!(event, tauri::RunEvent::Reopen { .. }) {
@@ -510,8 +592,6 @@ pub fn run() {
                     let _ = window.set_focus();
                 }
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app, event);
         });
 }
 
@@ -600,33 +680,92 @@ mod tests {
     }
 
     #[test]
-    fn a_message_split_across_chunks_is_reassembled() {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(b"{\"a\":1}\n{\"b\":");
-        assert_eq!(
-            drain_complete_lines(&mut buffer),
-            vec![b"{\"a\":1}".to_vec()]
-        );
-        assert_eq!(
-            buffer,
-            b"{\"b\":".to_vec(),
-            "the partial line waits for its end"
-        );
-        buffer.extend_from_slice(b"2}\r\n\n  \n");
-        assert_eq!(
-            drain_complete_lines(&mut buffer),
-            vec![b"{\"b\":2}".to_vec()]
-        );
-        assert!(buffer.is_empty());
+    fn storage_failures_become_one_actionable_code_with_the_reason_attached() {
+        for reason in [
+            code::VAULT_PERMISSIONS,
+            code::VAULT_SCHEMA,
+            code::VAULT_CORRUPT,
+            code::VAULT_IO,
+            code::VAULT_KEY_MISSING,
+            code::VAULT_LOCKED,
+            code::KEYCHAIN_UNAVAILABLE,
+            code::KEYCHAIN_FAILED,
+        ] {
+            let error = credential_unavailable(IpcError::new(reason, "x"));
+            assert_eq!(error.code, code::CREDENTIAL_UNAVAILABLE);
+            assert_eq!(error.detail, Some(reason));
+        }
+        let mismatch = credential_unavailable(IpcError::new(code::CREDENTIAL_ENDPOINT_MISMATCH, "x"));
+        assert_eq!(mismatch.code, code::CREDENTIAL_ENDPOINT_MISMATCH, "passes through unchanged");
     }
 
     #[test]
-    fn several_messages_in_one_chunk_come_out_in_order() {
-        let mut buffer = b"one\ntwo\nthree\n".to_vec();
-        let lines: Vec<String> = drain_complete_lines(&mut buffer)
-            .into_iter()
-            .map(|line| String::from_utf8(line).unwrap())
-            .collect();
-        assert_eq!(lines, ["one", "two", "three"]);
+    fn a_second_launch_with_a_world_folder_or_level_dat_opens_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = dir.path().join("My World");
+        fs::create_dir(&world).unwrap();
+        fs::write(world.join("level.dat"), b"x").unwrap();
+        let exe = "C:/Program Files/PomiTranslate/pomitranslate.exe".to_owned();
+        let expected = world.to_string_lossy().into_owned();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        for args in [
+            vec![exe.clone(), expected.clone()],
+            vec![exe.clone(), "--flag".into(), world.join("level.dat").to_string_lossy().into_owned()],
+            vec![exe.clone(), "My World".into()],
+        ] {
+            assert_eq!(world_path_from_args(&args, &cwd).as_deref(), Some(expected.as_str()), "{args:?}");
+        }
+        for args in [
+            vec![exe.clone()],
+            vec![exe.clone(), "--help".into()],
+            vec![exe.clone(), "does-not-exist".into()],
+            vec![exe.clone(), world.join("level.dat").to_string_lossy().replace("level.dat", "other.txt")],
+        ] {
+            assert_eq!(world_path_from_args(&args, &cwd), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn navigation_is_limited_to_the_app_and_the_dev_server() {
+        let url = |text: &str| tauri::Url::parse(text).unwrap();
+        let dev = url("http://127.0.0.1:5173");
+        for allowed in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/#/settings",
+            "about:blank",
+        ] {
+            assert!(navigation_allowed(&url(allowed), None), "{allowed}");
+        }
+        assert!(navigation_allowed(&url("http://127.0.0.1:5173/"), Some(&dev)));
+        for refused in [
+            "https://evil.example/",
+            "http://tauri.localhost.evil.example/",
+            "http://127.0.0.1:5173/",
+            "http://127.0.0.1:9999/",
+            "file:///C:/Windows/win.ini",
+            "javascript:alert(1)",
+            "data:text/html,hi",
+            "tauri://evil/",
+        ] {
+            assert!(!navigation_allowed(&url(refused), None), "{refused}");
+        }
+        assert!(!navigation_allowed(&url("http://127.0.0.1:9999/"), Some(&dev)));
+    }
+
+    #[test]
+    fn reports_are_cleared_without_touching_other_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        fs::create_dir_all(reports.join("nested")).unwrap();
+        fs::write(reports.join("scan-report.json"), b"{}").unwrap();
+        fs::write(reports.join("nested/x.json"), b"{}").unwrap();
+        let keep = dir.path().join("other.txt");
+        fs::write(&keep, b"x").unwrap();
+        clear_reports(&reports).unwrap();
+        assert!(reports.is_dir());
+        assert_eq!(fs::read_dir(&reports).unwrap().count(), 0);
+        assert!(keep.exists());
+        clear_reports(&dir.path().join("missing")).unwrap();
     }
 }
