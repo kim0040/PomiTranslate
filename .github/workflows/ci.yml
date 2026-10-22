@@ -108,6 +108,12 @@ jobs:
         run: python tests/test_review_a_followups.py
       - name: Review drafts survive restarts and stay bounded
         run: python tests/test_review_drafts.py
+      - name: Glossary store, CSV/TSV import and export, conflicts and damaged files
+        run: python tests/test_glossary.py
+      - name: Glossary terms in a translation, cache keys, retry and warnings
+        run: python tests/test_glossary_translation.py
+      - name: Source letters left next to a format code are detected
+        run: python tests/test_format_residue.py
       - name: Backup deletion and pruning respect locks, last copies and open recoveries
         run: python tests/test_backup_admin.py
       - name: Journal review fixes - one reconciliation gate, verify-only keep, identity checks

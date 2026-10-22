@@ -669,6 +669,7 @@ def _run_translator(
     import os
 
     from mc_world_translator import DEFAULT_CONFIG, WorldTranslator, merge_nested, remember_run_settings
+    from mwt.glossary import load_merged as load_merged_glossary
     from mwt.secrets import load_api_key
 
     saved = _saved(data_dir)
@@ -784,6 +785,8 @@ def _run_translator(
                 "overrides": source_overrides,
                 "skip_target_language_text": saved.get("skip_target_language_text", True) is not False,
             },
+            # Global entries plus this world's, the world's winning; unreadable files count as empty.
+            "glossary": {"entries": load_merged_glossary(data_dir, world)},
             "resource_pack": {
                 "enabled": bool(resource_pack_paths),
                 "zip_paths": resource_pack_paths,
@@ -1855,6 +1858,18 @@ def _draft_handler(name: str):
     return _module_handler(operation, ReviewDraftError)
 
 
+def _glossary_handler(name: str):
+    def operation(payload: dict, data_dir: Path) -> dict:
+        from mwt import glossary
+
+        return getattr(glossary, name)(payload, data_dir)
+
+    from mwt.glossary import GlossaryError
+
+    # Query lane, no world lock: one small file per scope under <data_dir>/glossary, written atomically.
+    return _module_handler(operation, GlossaryError)
+
+
 def _backup_handler(name: str):
     def operation(payload: dict, data_dir: Path) -> dict:
         from mwt import backup_admin
@@ -1874,6 +1889,10 @@ REQUEST_HANDLERS = {
     "review.draft.get": _draft_handler("get_draft"),
     "review.draft.set": _draft_handler("set_draft"),
     "review.draft.clear": _draft_handler("clear_draft"),
+    "glossary.get": _glossary_handler("get_glossary"),
+    "glossary.set": _glossary_handler("set_glossary"),
+    "glossary.import": _glossary_handler("import_glossary"),
+    "glossary.export": _glossary_handler("export_glossary"),
     "backups.delete": _backup_handler("delete_backup"),
     "backups.prune": _backup_handler("prune_backups"),
 }
