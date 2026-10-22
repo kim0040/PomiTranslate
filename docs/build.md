@@ -64,9 +64,20 @@ Rust 쪽은 정상 종료 요청 뒤 stdin을 닫고 2초를 기다린 다음 �
 
 창 닫기, Alt+F4, 종료 메뉴, Cmd+Q, 세션 종료와 업데이트 설치 후 재시작이 같은 경로(`exit_gate`)를 지납니다.
 
-- 실행 중인 작업이 없고 저장 안 한 설정도 없으면 바로 종료합니다. 아니면 `pomi-exit-confirm` 이벤트로 화면에 묻습니다. 페이로드는 `{ job, dirty, reason }`이며 `reason`은 `"quit"` 또는 `"update"`입니다.
+- 실행 중인 작업이 없고 저장 안 한 설정도 없으면 바로 종료합니다. 아니면 `pomi-exit-confirm` 이벤트로 화면에 묻습니다. 페이로드는 `{ job, dirty, reason, intent }`이며 `reason`은 `"quit"` 또는 `"update"`입니다.
+- **질문마다 `intent` ID가 있고 답은 그 ID를 실어야 합니다**(`exit_confirm(intent)`, `exit_cancel(intent)`). 열린 질문은 하나뿐입니다. 종료 질문이 열려 있을 때 종료를 또 요청하면 같은 질문(같은 ID)을 다시 알립니다. 다른 종류의 질문은 열린 질문을 **원자적으로 대체**하며, 대체된 업데이트 질문은 즉시 `UPDATE_CANCELLED`로 설치를 취소합니다. 열린 질문이 아닌 ID의 답(시간이 지난 대화상자, 대체된 대화상자)은 거부됩니다(업데이트 질문이었으면 `UPDATE_CANCELLED`, 그 밖에는 `INVALID_REQUEST`). 이런 답은 저장 안 한 설정 표시를 지우지 않고 종료로 이어지지도 않습니다. 같은 업데이트 질문이 이미 답을 기다리는 중이면 다음 설치는 `UPDATE_BUSY`입니다.
 - "작업을 취소하고 종료"(`exit_confirm`) 뒤 코어에 취소를 요청하고 30초 기다립니다. 그 안에 멈추지 않으면 `pomi-exit-stuck`을 보냅니다. 화면은 "계속 기다리기"(`exit_keep_waiting`: 취소 요청을 다시 보내고 종료 대기를 다시 시작), "지금 종료"(`exit_force`), "취소"를 낼 수 있습니다.
 - **업데이트 설치**는 다운로드가 끝난 뒤 같은 의도를 거칩니다. 진행 중인 작업이 있으면 `UPDATE_BUSY`로 거부합니다. 저장 안 한 설정이 있으면 `reason: "update"`로 같은 Save/Discard/Cancel 대화상자를 띄우고, `exit_confirm`(계속)이나 `exit_cancel`(취소 → `UPDATE_CANCELLED`) 응답을 기다립니다(10분 제한). 그 뒤에만 설치하고 재시작합니다.
+
+### 정비 작업 guard (저장소 초기화·앱 초기화·업데이트 설치)
+
+`credential_reset_storage`, `native_reset`, 업데이트의 마지막 설치·재시작 단계는 `ActiveSidecar::maintenance()`가 돌려주는 guard 하나를 변경 내내 쥐고 일합니다. guard는 새 요청을 원자적으로 막고(요청 gate를 잡고 있음) 동시에 활성 코어도, 종료를 확인하지 못해 남긴 코어 slot도, 정리를 기다리는 생성된 자식도 없음을 확인한 경우에만 만들어집니다. 요청이 실행 중이면 `BUSY`(업데이트는 `UPDATE_BUSY`), 종료가 확인되지 않은 코어나 자식이 있으면 `CORE_STATE_UNKNOWN`으로 거부합니다.
+
+### 응답 형식·시간 제한·실패한 시작
+
+- 요청 id가 같은 종료 응답이 유효하지 않으면 protocol 위반입니다. `response.ok`는 객체 `payload`가 있어야 하고, `response.error`는 `error.code`(`[A-Z0-9_]{1,64}`)와 문자열 `error.message`가 있어야 합니다. 위반이면 월드를 쓰는 요청은 협력 취소와 30초 유예 뒤 종료하고, 질의는 즉시 코어를 끝냅니다(`CORE_PROTOCOL`). 유예 중 코어가 취소에 유효하게 답하면 그 답이 결과입니다.
+- 월드 작업이 아닌 모든 요청(`models.list`, 연결 확인 포함)은 요청을 쓴 시점부터 **120초 절대 제한**이 있습니다. 넘으면 코어를 끝내고 `CORE_TIMEOUT`을 돌려줍니다. 월드 작업에는 일괄 제한이 없습니다.
+- 코어를 만들었지만 감독 아래 두지 못했고 종료도 확인하지 못한 자식은 핸들을 정리용 slot에 보관합니다(Windows: 중단 상태로 남아 아무것도 실행하지 않음). 이후 시작 시도마다 먼저 한정된 횟수로 다시 끝내 보고, 확인될 때까지 새 코어는 시작하지 않으며 결과는 `CORE_STATE_UNKNOWN`입니다. 앱 종료 때도 한 번 더 시도합니다.
 
 ### 응답 크기 제한
 
@@ -79,8 +90,8 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 | `force_stop_active()` | `{ wasRunning: bool, killed: bool, bootstrap?: object, bootstrapError?: IpcError }` |
 | `diagnostics_export()` | 저장 대화상자를 열고 `.txt`로 저장. 저장하면 `true`, 취소하면 `false`. 실패는 `EXPORT_FAILED` |
 | `native_reset(deleteKeys)` | `{ keysDeleted, keysPartiallyDeleted, reportsCleared, errors: [코드] }`. 한 단계가 실패해도 나머지를 실행하고 결과를 돌려줍니다. 작업 중이면 `BUSY` 오류 |
-| `exit_keep_waiting()` / `exit_cancel()` | 종료 대기를 다시 시작 / 업데이트 설치를 취소로 답함 |
-| `credentials.confirmEndpoint` (sidecar_request) | `{ provider: "custom", baseUrl, wireFormat }` → `{ provider, confirmed, apiKeyStored }` |
+| `exit_confirm(intent)` / `exit_cancel(intent)` | `pomi-exit-confirm`의 `intent`에 대한 답(계속 / 머무르기). 열린 질문이 아닌 ID는 거부 |
+| `exit_keep_waiting()` | 종료 대기를 다시 시작 |
 | `app_info()` | `{ version, buildSha, buildDate, os, arch }` |
 
 ### 진단 내보내기 정책
@@ -89,19 +100,33 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 
 - 앱 버전, build SHA·날짜, OS·아키텍처.
 - 오류 코드와 시각(출처는 식별자 문자만), 요청 종류·소요 시간·결과 코드·종료 코드·시그널(코어 실행 기록), 패닉이 난 코드 위치(모듈 상대 경로), 개수.
-- 코어 stderr는 줄 전체를 가린(redact) 뒤 **분류**해서 알려진 모양만 남깁니다: Python traceback 머리줄, `File "…", line N, in fn` 프레임(경로는 `mwt/…`·`site-packages/…` 같은 모듈 상대 경로로 줄임), 예외 클래스 이름(메시지는 `[message omitted]`), `[pomi] ` 접두사가 붙은 코어 자체 로거 줄과 고정 안내 문구 두 개. 나머지는 모두 버리고 `[n lines omitted]`로 세어 보여 줍니다. 월드 텍스트·provider 응답·알 수 없는 키가 이 경로로 나갈 수 없습니다.
+- 코어 stderr와 비프로토콜 stdout은 줄 전체를 가린(redact) 뒤 **분류**해서, 미리 컴파일된 목록으로만 만든 모양을 남깁니다. 입력 텍스트는 그 조각 밖으로 복사되지 않습니다.
+  - Python traceback 머리줄과 예외 연쇄 문구.
+  - `File "…", line N, in fn` 프레임: 파일이 코어의 자체 모듈(`mwt/*.py`, `mc_world_translator.py`, `llm_backends.py`, `webui_server.py`)이고 함수 이름이 식별자일 때만 모듈 상대 경로와 함께 남기고, 그 밖의 프레임은 `[frame]`입니다.
+  - 예외 클래스 이름: 내장 예외와 프로젝트 예외 목록에 있을 때만 남기고 아니면 `[exception]`, 메시지는 언제나 `[message omitted]`입니다.
+  - 고정 문장 하나, 정확히 `[pomi] stdin closed while a request was running; cancelling`.
+  - `preferences were not saved: <X>`는 `<X>`가 허용된 예외일 때만, `protocol message had values that were replaced: [...]`는 목록의 모든 항목이 `_plain()`이 만들 수 있는 플래그 이름일 때만 꼬리를 남기고 아니면 꼬리를 버립니다.
+  - 그 밖의 `[pomi] ` 줄은 모두 `[pomi] [message omitted]`로 바뀝니다. 나머지 줄은 버리고 `[n lines omitted]`로 세어 보여 줍니다.
+  - 허용 목록은 Python 소스와 어긋나지 않도록 Rust 테스트가 `mwt/*.py`와 예외 클래스 정의를 읽어 대조합니다.
+  - Rust 쪽 `log_error`와 패닉 기록은 안정된 코드와 출처 구성요소만 남기고 오류 메시지 문자열은 쓰지 않습니다. 화면에서 온 요청 종류는 알려진 목록에 있을 때만 쓰고 아니면 `[unknown request]`입니다.
 - 줄은 자르기 전에 줄 전체를 가립니다. stderr 청크 경계에서 줄이 갈리면 줄이 완성될 때까지 모아 분류하며, 종료 시 마지막 줄도 같은 규칙으로 처리합니다. 표준 출력의 비프로토콜 줄도 같은 분류를 거칩니다.
-- 로컬 로그 파일에는 가려진 Rust 쪽 메시지와 분류를 통과한 코어 줄만 남습니다. 내보내기에는 로그 꼬리를 넣지 않습니다.
+- 로컬 로그 파일과 내보내기는 같은 정책을 따릅니다. Rust 쪽 줄은 컴파일 시점 문장과 코드·숫자만 담고, 코어 줄은 위 분류를 통과한 것만 남습니다. 내보내기에는 로그 꼬리를 넣지 않습니다.
 
-**코어 쪽 계약.** 코어가 자체 진단 줄을 stderr에 남기려면 줄 앞에 정확히 `[pomi] `(대괄호, 소문자, 공백)를 붙여야 하고, 키·요청 본문·월드 텍스트를 넣지 않습니다. 접두사가 없는 줄은 내보내기와 로그에 보이지 않습니다. 이 접두사 줄도 10자 이상이면서 글자와 숫자가 섞인 토큰은 한 번 더 가립니다.
+**코어 쪽 계약.** 코어가 stderr에 남기는 줄은 위 고정 문장뿐이어야 합니다. 새 진단 문구가 필요하면 shell의 허용 목록에 먼저 추가합니다. 그 밖의 `[pomi] ` 줄은 내용이 버려집니다.
 
 강제 종료는 새 최상위 오류 코드를 만들지 않고 `detail`에 `JOB_FORCE_STOPPED`를 담습니다.
 
 ### 자격 증명 저장소 보호
 
-- 키 디렉터리와 vault 디렉터리는 읽기·승격·격리(set aside) 전에 심볼릭 링크/junction/reparse point가 아닌지, 소유자와 ACL이 기대와 같은지 검사합니다. Windows는 `FILE_SHARE_DELETE` 없이 디렉터리 핸들을 열어 두어 검사 뒤 이름 바꾸기·교체가 불가능하게 하고(Unix는 `O_NOFOLLOW|O_DIRECTORY`와 장치/inode 비교), rename 직전에 한 번 더 확인합니다. 링크이면 `VAULT_PERMISSIONS`로 거부하고 링크 바깥은 건드리지 않습니다.
-- Custom 키에 기록된 endpoint가 없으면(예전 저장본) 키를 절대 주입하지 않고 `CREDENTIAL_ENDPOINT_UNBOUND`를 돌려줍니다. 사용자가 키를 다시 입력하거나 `credentials.confirmEndpoint`로 지금 설정된 endpoint를 확인해야 묶입니다. 이미 묶인 키는 이 명령으로 다른 endpoint로 옮길 수 없습니다(`CREDENTIAL_ENDPOINT_MISMATCH`).
-- OS 키체인 항목은 앱이 만든 것만 지웁니다. 비밀이 아닌 소유 기록 `keychain-ledger.json`(vault 밖, 저장소 초기화·격리에서도 남음)에 provider 이름만 적고, 키체인 쓰기 전에 먼저 기록합니다. 앱 초기화(키 삭제)는 이 기록에 있는 항목과(기록 이전 설치는) 읽을 수 있는 vault가 알려 주는 항목만 지우며 키체인을 나열하거나 다른 항목을 건드리지 않습니다. 삭제를 확인하지 못하면 항목을 기록에 남기고 부분 결과(`KEYCHAIN_FAILED`/`KEYCHAIN_UNAVAILABLE`/`KEYCHAIN_UNCONFIRMED`)로 알립니다.
+- 키 디렉터리와 vault 디렉터리는 읽기·승격·격리(set aside) 전에 심볼릭 링크/junction/reparse point가 아닌지, 소유자와 ACL이 기대와 같은지 검사합니다. Windows는 `FILE_SHARE_DELETE` 없이 디렉터리 핸들을 열어 두어 검사 뒤 이름 바꾸기·교체가 불가능하게 하고(Unix는 `O_NOFOLLOW|O_DIRECTORY`로 연 핸들에서 `fstat`으로 소유자·모드를 확인하고 장치/inode를 비교), rename 직전에 한 번 더 확인합니다. 링크이면 `VAULT_PERMISSIONS`로 거부하고 링크 바깥은 건드리지 않습니다.
+- **앱 데이터 폴더(root)도 검사합니다.** vault를 열기 전, 그리고 vault DB·마스터 키·소유 기록을 옮기거나 격리하는 rename 직전마다 root가 실제 디렉터리이고(링크·junction이 아님), Unix에서는 사용자 소유이며 그룹·다른 사용자가 쓸 수 없는지(`mode & 0o022 == 0`)를 연 핸들의 `fstat`으로 확인합니다. 사용자 소유인데 쓰기 비트가 있으면(umask 002인 배포판이 폴더를 그룹 쓰기 가능으로 만듭니다) 같은 핸들에서 `fchmod`로 그룹·다른 사용자의 쓰기 비트를 제거한 뒤 다시 확인하고, 안전하게 만들 수 없거나 소유자가 다르면 `VAULT_PERMISSIONS`로 거부합니다.
+- **위협 모델: 같은 사용자(uid)로 실행되는 다른 프로세스는 보호 범위 밖입니다.** 그런 프로세스는 DB와 key 파일을 직접 읽을 수 있고 같은 권한으로 디렉터리를 바꿀 수 있습니다. 위 검사는 다른 사용자·링크 치환·잘못된 권한을 막는 것이며 악성 프로그램이나 계정 탈취를 막는다고 소개하지 않습니다.
+- Custom 키에 기록된 endpoint가 없으면(예전 저장본) 키를 절대 주입하지 않고 `CREDENTIAL_ENDPOINT_UNBOUND`를 돌려줍니다. endpoint를 확인만으로 묶는 명령은 없습니다(`credentials.confirmEndpoint`는 제거됨). 화면은 사용자에게 **키를 다시 입력**하도록 안내하고, 다시 저장할 때 현재 endpoint에 묶입니다. 이미 묶인 키는 다른 endpoint로 옮길 수 없습니다(`CREDENTIAL_ENDPOINT_MISMATCH`).
+- **OS 키체인 소유 기록**(`keychain-ledger.json`, 비밀 없음, vault 밖이라 저장소 초기화·격리에서도 남음). provider마다 상태는 셋입니다: `owned`(앱이 쓰고 확인됨), `pending`(OS 쓰기 진행 중이거나 결과 불명, 이전 소유 상태를 함께 기록), `uncertain`(있을 수 있으나 앱이 만들었다고 말할 수 없음).
+  - 키체인에 쓰기 전에 `pending`(이전 상태 포함)을 먼저 내구적으로 기록합니다. 쓰기가 확인되면 `owned`, 실패했고 보정이 이전 값을 되돌렸으면 이전 소유 상태를 그대로 되돌립니다(원래 남의 항목이었으면 계속 앱 것이 아닙니다). 되돌리지 못했으면 `uncertain`입니다.
+  - 앱 초기화(키 삭제)는 `owned`만 지웁니다. `pending`·`uncertain`은 지우지 않고 `KEYCHAIN_UNCONFIRMED`로 보고하며 `keysDeleted`는 거짓입니다. 키체인을 나열하거나 다른 항목을 건드리지 않습니다.
+  - 기록이 없거나 손상된 것은 "빈 기록"이 아니라 **알 수 없음**입니다. 손상된 파일은 `keychain-ledger.json.broken-<ms>`로 보존하고(삭제하지 않음), 거기서 읽을 수 있는 이름과 vault 메타데이터에서 알아낸 항목을 합치며(vault의 `known_keychain`은 확인된 소유로, 이름만 남은 것은 `uncertain`), 불확실 표시(`unreconciled`)를 남깁니다. 표시는 읽을 수 있는 vault와 대조해 모든 항목을 처리한 초기화·삭제 뒤에만 사라집니다. 기록과 vault가 모두 읽히지 않으면 `KEYCHAIN_UNCONFIRMED`이며 완료로 보고하지 않습니다.
+  - vault 메타데이터(저장소 초기화·삭제)를 지우기 전에 발견했거나 삭제에 실패한 모든 항목을 기록에 먼저 씁니다. 기록을 쓰지 못하면 vault를 옮기거나 지우지 않습니다. `native_reset.keysDeleted`는 모든 항목이 정리된 경우에만 참입니다.
 
 코어 환경 변수: `POMI_APP_VERSION`, `POMI_BUILD_SHA`, `POMI_BUILD_DATE`, `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`. API 키 환경 변수는 비워서 전달합니다.
 

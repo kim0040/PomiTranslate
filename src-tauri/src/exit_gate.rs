@@ -13,9 +13,18 @@
 //! person's answer (`exit_confirm` to go on, `exit_cancel` to stay) lets the install and restart
 //! happen.
 //!
+//! Every prompt carries an intent id (R9) and the answer must name it. There is at most one open
+//! intent. A second quit prompt while a quit prompt is open reuses it (the page is told again, same
+//! id). A prompt of the other kind *replaces* the open one atomically: a superseded update prompt
+//! calls its install off (`UPDATE_CANCELLED`). An answer whose id is not the open intent - a dialog
+//! that outlived its wait, or one that was replaced - is refused (`UPDATE_CANCELLED` for an update
+//! prompt, `INVALID_REQUEST` otherwise) and changes nothing: it never clears the unsaved-settings
+//! flag and never falls through into a quit.
+//!
 //! A confirmed exit is let through `ExitRequested` (its `code` is then `Some`), so the guard never
 //! blocks the exit it asked for.
 use std::{
+    collections::VecDeque,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -53,15 +62,56 @@ pub enum Answer {
     Stay,
 }
 
+/// How many closed intents are remembered, to tell a late answer from an unknown one.
+const RETIRED_KEPT: usize = 8;
+
+/// The one open exit or update question.
+struct OpenIntent {
+    id: u64,
+    reason: Reason,
+    /// An update install waits for the answer here (only for `Reason::Update`).
+    answer: Option<oneshot::Sender<Answer>>,
+}
+
+#[derive(Default)]
+struct Intents {
+    next: u64,
+    open: Option<OpenIntent>,
+    /// The latest closed intents (answered, expired or replaced) and what they were for.
+    retired: VecDeque<(u64, Reason)>,
+}
+
+impl Intents {
+    fn retire(&mut self, id: u64, reason: Reason) {
+        if self.retired.len() == RETIRED_KEPT {
+            self.retired.pop_front();
+        }
+        self.retired.push_back((id, reason));
+    }
+
+    /// Close the open intent (its waiting update install, if any, is called off by the dropped
+    /// sender).
+    fn close_open(&mut self) {
+        if let Some(open) = self.open.take() {
+            self.retire(open.id, open.reason);
+        }
+    }
+
+    fn open_new(&mut self, reason: Reason, answer: Option<oneshot::Sender<Answer>>) -> u64 {
+        self.close_open();
+        self.next += 1;
+        let id = self.next;
+        self.open = Some(OpenIntent { id, reason, answer });
+        id
+    }
+}
+
 pub struct ExitControl {
     settings_dirty: AtomicBool,
     confirmed: AtomicBool,
     /// A "cancel and quit" is waiting for the job to stop.
     waiting: AtomicBool,
-    /// What the dialog shown last was asked for.
-    reason: Mutex<Reason>,
-    /// An update install waits for the answer to the unsaved-settings question.
-    update_answer: Mutex<Option<oneshot::Sender<Answer>>>,
+    intents: Mutex<Intents>,
 }
 
 impl Default for ExitControl {
@@ -70,8 +120,7 @@ impl Default for ExitControl {
             settings_dirty: AtomicBool::new(false),
             confirmed: AtomicBool::new(false),
             waiting: AtomicBool::new(false),
-            reason: Mutex::new(Reason::Quit),
-            update_answer: Mutex::new(None),
+            intents: Mutex::new(Intents::default()),
         }
     }
 }
@@ -83,19 +132,95 @@ fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl ExitControl {
-    fn reason(&self) -> Reason {
-        *locked(&self.reason)
+    /// The intent for a quit prompt: the open quit prompt again, else a new one that replaces
+    /// whatever else was open.
+    fn begin_quit(&self) -> u64 {
+        let mut intents = locked(&self.intents);
+        match &intents.open {
+            Some(open) if open.reason == Reason::Quit => open.id,
+            _ => intents.open_new(Reason::Quit, None),
+        }
     }
 
-    fn set_reason(&self, reason: Reason) {
-        *locked(&self.reason) = reason;
+    /// The intent for an update prompt, with the install waiting for its answer. An update that is
+    /// already waiting is not replaced.
+    fn begin_update(&self, answer: oneshot::Sender<Answer>) -> Result<u64, IpcError> {
+        let mut intents = locked(&self.intents);
+        if intents
+            .open
+            .as_ref()
+            .is_some_and(|open| open.reason == Reason::Update)
+        {
+            return Err(IpcError::new(
+                code::UPDATE_BUSY,
+                "An update is already waiting for an answer",
+            ));
+        }
+        Ok(intents.open_new(Reason::Update, Some(answer)))
     }
 
-    /// Hand the answer to an update install that is waiting for it. False when none waits.
-    fn answer_update(&self, answer: Answer) -> bool {
-        match locked(&self.update_answer).take() {
-            Some(sender) => sender.send(answer).is_ok(),
-            None => false,
+    /// Take the open intent if it is `id`; anything else is refused without changing a thing.
+    fn take_intent(&self, id: u64) -> Result<OpenIntent, IpcError> {
+        let mut intents = locked(&self.intents);
+        if intents.open.as_ref().is_some_and(|open| open.id == id) {
+            let open = intents.open.take().expect("checked just above");
+            intents.retire(open.id, open.reason);
+            return Ok(open);
+        }
+        let was_update = intents
+            .retired
+            .iter()
+            .any(|(retired, reason)| *retired == id && *reason == Reason::Update);
+        Err(if was_update {
+            IpcError::new(
+                code::UPDATE_CANCELLED,
+                "This update question is no longer open",
+            )
+        } else {
+            IpcError::new(
+                code::INVALID_REQUEST,
+                "This exit question is no longer open",
+            )
+        })
+    }
+
+    /// The question timed out or was abandoned: close it if it is still the open one.
+    fn expire(&self, id: u64) {
+        let mut intents = locked(&self.intents);
+        if intents.open.as_ref().is_some_and(|open| open.id == id) {
+            intents.close_open();
+        }
+    }
+
+    /// The answer to the open intent `id`. For a quit it only validates; for an update it hands the
+    /// answer to the waiting install. The unsaved-settings flag is cleared only by a proceeding
+    /// answer that was accepted.
+    fn answer(&self, id: u64, answer: Answer) -> Result<Reason, IpcError> {
+        let open = self.take_intent(id)?;
+        match (open.reason, open.answer) {
+            (Reason::Update, Some(sender)) => {
+                if sender.send(answer).is_err() {
+                    return Err(IpcError::new(
+                        code::UPDATE_CANCELLED,
+                        "The update is no longer waiting for an answer",
+                    ));
+                }
+                if answer == Answer::Proceed {
+                    // Settings the person saved or chose to discard no longer hold the install back.
+                    self.settings_dirty.store(false, Ordering::SeqCst);
+                }
+                Ok(Reason::Update)
+            }
+            (Reason::Update, None) => Err(IpcError::new(
+                code::UPDATE_CANCELLED,
+                "The update is no longer waiting for an answer",
+            )),
+            (Reason::Quit, _) => {
+                if answer == Answer::Proceed {
+                    self.settings_dirty.store(false, Ordering::SeqCst);
+                }
+                Ok(Reason::Quit)
+            }
         }
     }
 }
@@ -106,6 +231,8 @@ pub struct Prompt {
     pub job: bool,
     pub dirty: bool,
     pub reason: Reason,
+    /// The id of the question (R9): the answer must carry it. 0 until the prompt is announced.
+    pub intent: u64,
 }
 
 pub fn prompt_for(job: bool, dirty: bool) -> Option<Prompt> {
@@ -113,6 +240,7 @@ pub fn prompt_for(job: bool, dirty: bool) -> Option<Prompt> {
         job,
         dirty,
         reason: Reason::Quit,
+        intent: 0,
     })
 }
 
@@ -128,8 +256,8 @@ fn show_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Tell the page. The prompt already carries its intent.
 fn ask<R: Runtime>(app: &AppHandle<R>, prompt: Prompt) {
-    app.state::<ExitControl>().set_reason(prompt.reason);
     show_window(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("pomi-exit-confirm", prompt);
@@ -154,7 +282,8 @@ pub fn allow_close<R: Runtime>(app: &AppHandle<R>) -> bool {
                 show_window(app);
                 let _ = app.emit("pomi-exit-waiting", ());
             } else {
-                ask(app, prompt);
+                let intent = control.begin_quit();
+                ask(app, Prompt { intent, ..prompt });
             }
             false
         }
@@ -200,24 +329,16 @@ async fn authorize_restart(
         return Ok(());
     }
     let (sender, receiver) = oneshot::channel();
-    {
-        let mut slot = locked(&control.update_answer);
-        if slot.is_some() {
-            return Err(IpcError::new(
-                code::UPDATE_BUSY,
-                "An update is already waiting for an answer",
-            ));
-        }
-        *slot = Some(sender);
-    }
+    let intent = control.begin_update(sender)?;
     ask(Prompt {
         job: false,
         dirty: true,
         reason: Reason::Update,
+        intent,
     });
     let answer = tokio::time::timeout(answer_wait, receiver).await;
-    // Whatever happened, no answer is left waiting.
-    locked(&control.update_answer).take();
+    // Whatever happened, the question is closed: a late answer finds nothing to answer.
+    control.expire(intent);
     match answer {
         Ok(Ok(Answer::Proceed)) => {
             // A job may have started while the question was open.
@@ -273,23 +394,18 @@ fn start_waiter(app: AppHandle) {
     });
 }
 
-/// The person chose to quit (or, for `reason: "update"`, to go on with the install). A running job
-/// or update download is asked to stop first.
+/// The person chose to quit (or, for `reason: "update"`, to go on with the install) in answer to the
+/// question `intent`. A running job or update download is asked to stop first. An answer to a
+/// question that is not the open one is refused and changes nothing (R9).
 #[tauri::command]
-pub fn exit_confirm(app: AppHandle) -> Result<(), IpcError> {
+pub fn exit_confirm(app: AppHandle, intent: u64) -> Result<(), IpcError> {
     let control = app.state::<ExitControl>();
-    if control.reason() == Reason::Update {
-        // Settings the person saved or chose to discard no longer hold the install back.
-        control.settings_dirty.store(false, Ordering::SeqCst);
-        if control.answer_update(Answer::Proceed) {
-            return Ok(());
-        }
+    if control.answer(intent, Answer::Proceed)? == Reason::Update {
+        return Ok(());
     }
     if control.waiting.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    // Settings the person chose not to save (or already saved) no longer hold the app back.
-    control.settings_dirty.store(false, Ordering::SeqCst);
     if !job_running(&app) {
         control.waiting.store(false, Ordering::SeqCst);
         control.confirmed.store(true, Ordering::SeqCst);
@@ -322,11 +438,12 @@ pub fn exit_keep_waiting(app: AppHandle) {
     start_waiter(app);
 }
 
-/// The person chose to stay. An update install that waits for the answer is called off; for a
-/// plain quit dialog this changes nothing.
+/// The person chose to stay in answer to the question `intent`. An update install that waits for
+/// the answer is called off; for a quit question this only closes it. A question that is not the
+/// open one is refused.
 #[tauri::command]
-pub fn exit_cancel(control: State<'_, ExitControl>) {
-    control.answer_update(Answer::Stay);
+pub fn exit_cancel(control: State<'_, ExitControl>, intent: u64) -> Result<(), IpcError> {
+    control.answer(intent, Answer::Stay).map(|_| ())
 }
 
 /// "Quit now": the job did not stop, so the core is killed.
@@ -347,6 +464,15 @@ mod tests {
         sync::{atomic::AtomicUsize, Arc},
     };
 
+    fn quit_prompt(job: bool, dirty: bool) -> Prompt {
+        Prompt {
+            job,
+            dirty,
+            reason: Reason::Quit,
+            intent: 0,
+        }
+    }
+
     #[test]
     fn nothing_running_and_nothing_unsaved_asks_nothing() {
         assert_eq!(prompt_for(false, false), None);
@@ -354,40 +480,63 @@ mod tests {
 
     #[test]
     fn a_job_or_unsaved_settings_ask_and_the_job_comes_first() {
-        let quit = |job, dirty| {
-            Some(Prompt {
-                job,
-                dirty,
-                reason: Reason::Quit,
-            })
-        };
-        assert_eq!(prompt_for(true, false), quit(true, false));
-        assert_eq!(prompt_for(false, true), quit(false, true));
-        assert_eq!(prompt_for(true, true), quit(true, true));
+        assert_eq!(prompt_for(true, false), Some(quit_prompt(true, false)));
+        assert_eq!(prompt_for(false, true), Some(quit_prompt(false, true)));
+        assert_eq!(prompt_for(true, true), Some(quit_prompt(true, true)));
     }
 
     #[test]
-    fn the_prompt_reaches_the_page_as_plain_flags_and_a_reason() {
+    fn the_prompt_reaches_the_page_as_plain_flags_a_reason_and_an_intent() {
         let value = serde_json::to_value(Prompt {
-            job: true,
-            dirty: false,
-            reason: Reason::Quit,
+            intent: 7,
+            ..quit_prompt(true, false)
         })
         .unwrap();
         assert_eq!(
             value,
-            serde_json::json!({"job": true, "dirty": false, "reason": "quit"})
+            serde_json::json!({"job": true, "dirty": false, "reason": "quit", "intent": 7})
         );
         let update = serde_json::to_value(Prompt {
             job: false,
             dirty: true,
             reason: Reason::Update,
+            intent: 8,
         })
         .unwrap();
         assert_eq!(update["reason"], "update");
+        assert_eq!(update["intent"], 8);
     }
 
     const SHORT: Duration = Duration::from_millis(60);
+
+    /// Start an update authorisation that waits (unsaved settings) and return it with the prompt it
+    /// raised.
+    async fn waiting_update(
+        control: &Arc<ExitControl>,
+        wait: Duration,
+    ) -> (
+        tokio::task::JoinHandle<Result<(), IpcError>>,
+        Arc<Mutex<Vec<Prompt>>>,
+    ) {
+        control.settings_dirty.store(true, Ordering::SeqCst);
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let waiter = {
+            let (control, prompts) = (Arc::clone(control), Arc::clone(&prompts));
+            tokio::spawn(async move {
+                authorize_restart(
+                    &control,
+                    || false,
+                    |prompt| prompts.lock().unwrap().push(prompt),
+                    wait,
+                )
+                .await
+            })
+        };
+        while prompts.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        (waiter, prompts)
+    }
 
     #[tokio::test]
     async fn an_update_install_with_nothing_unsaved_goes_ahead_without_a_question() {
@@ -412,59 +561,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsaved_settings_raise_the_quit_dialog_with_the_update_reason_and_wait_for_the_answer()
-    {
+    async fn unsaved_settings_raise_the_dialog_with_the_update_reason_and_wait_for_the_answer() {
         for (answer, expected) in [
             (Answer::Proceed, None),
             (Answer::Stay, Some(code::UPDATE_CANCELLED)),
         ] {
             let control = Arc::new(ExitControl::default());
-            control.settings_dirty.store(true, Ordering::SeqCst);
-            let prompts = Arc::new(Mutex::new(Vec::new()));
-            let waiter = {
-                let (control, prompts) = (Arc::clone(&control), Arc::clone(&prompts));
-                tokio::spawn(async move {
-                    authorize_restart(
-                        &control,
-                        || false,
-                        |prompt| prompts.lock().unwrap().push(prompt),
-                        Duration::from_secs(20),
-                    )
-                    .await
-                })
-            };
-            while prompts.lock().unwrap().is_empty() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
+            let (waiter, prompts) = waiting_update(&control, Duration::from_secs(20)).await;
             // Not decided until the person answers.
             assert!(!waiter.is_finished());
+            let prompt = prompts.lock().unwrap()[0];
             assert_eq!(
-                prompts.lock().unwrap()[0],
-                Prompt {
-                    job: false,
-                    dirty: true,
-                    reason: Reason::Update
-                }
+                (prompt.job, prompt.dirty, prompt.reason),
+                (false, true, Reason::Update)
             );
-            assert!(control.answer_update(answer));
+            assert_ne!(prompt.intent, 0, "the question carries its id");
+            control.answer(prompt.intent, answer).unwrap();
             let outcome = waiter.await.unwrap();
             assert_eq!(outcome.err().map(|error| error.code), expected);
-            assert!(
-                !control.answer_update(Answer::Proceed),
-                "nothing left waiting"
+            assert_eq!(
+                control
+                    .answer(prompt.intent, Answer::Proceed)
+                    .unwrap_err()
+                    .code,
+                code::UPDATE_CANCELLED,
+                "an answered question cannot be answered again"
             );
         }
     }
 
     #[tokio::test]
-    async fn an_unanswered_question_calls_the_install_off() {
+    async fn an_unanswered_question_calls_the_install_off_and_a_late_confirm_does_nothing() {
+        let control = Arc::new(ExitControl::default());
+        let (waiter, prompts) = waiting_update(&control, SHORT).await;
+        let intent = prompts.lock().unwrap()[0].intent;
+        let error = waiter.await.unwrap().unwrap_err();
+        assert_eq!(error.code, code::UPDATE_CANCELLED);
+        // The dialog is still on screen and the person confirms late (R9).
+        control.settings_dirty.store(true, Ordering::SeqCst);
+        let late = control.answer(intent, Answer::Proceed).unwrap_err();
+        assert_eq!(late.code, code::UPDATE_CANCELLED);
+        assert!(
+            control.settings_dirty.load(Ordering::SeqCst),
+            "a late answer never clears the unsaved-settings flag"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_names_no_open_question_is_refused_and_changes_nothing() {
         let control = ExitControl::default();
         control.settings_dirty.store(true, Ordering::SeqCst);
-        let error = authorize_restart(&control, || false, |_| {}, SHORT)
+        // Nothing was ever asked.
+        for answer in [Answer::Proceed, Answer::Stay] {
+            let error = control.answer(41, answer).unwrap_err();
+            assert_eq!(error.code, code::INVALID_REQUEST);
+        }
+        assert!(control.settings_dirty.load(Ordering::SeqCst));
+        // A quit question is open: another id is refused, and the open one is still answerable.
+        let intent = control.begin_quit();
+        assert!(control.answer(intent + 1, Answer::Proceed).is_err());
+        assert!(control.settings_dirty.load(Ordering::SeqCst));
+        assert_eq!(
+            control.answer(intent, Answer::Proceed).unwrap(),
+            Reason::Quit
+        );
+        assert!(
+            !control.settings_dirty.load(Ordering::SeqCst),
+            "only an accepted proceeding answer clears the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quit_prompt_replaces_an_open_update_prompt_and_calls_the_install_off() {
+        let control = Arc::new(ExitControl::default());
+        let (waiter, prompts) = waiting_update(&control, Duration::from_secs(20)).await;
+        let update_intent = prompts.lock().unwrap()[0].intent;
+        let quit_intent = control.begin_quit();
+        assert_ne!(quit_intent, update_intent);
+        // The install was called off at once, without waiting for the answer window.
+        let error = tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
+            .expect("the replaced question ends the wait")
+            .unwrap()
             .unwrap_err();
         assert_eq!(error.code, code::UPDATE_CANCELLED);
-        assert!(!control.answer_update(Answer::Proceed));
+        // A confirm for the replaced update dialog neither quits nor clears anything.
+        control.settings_dirty.store(true, Ordering::SeqCst);
+        assert_eq!(
+            control
+                .answer(update_intent, Answer::Proceed)
+                .unwrap_err()
+                .code,
+            code::UPDATE_CANCELLED
+        );
+        assert!(control.settings_dirty.load(Ordering::SeqCst));
+        // The quit question is the open one.
+        assert_eq!(
+            control.answer(quit_intent, Answer::Stay).unwrap(),
+            Reason::Quit
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_prompt_replaces_an_open_quit_prompt_and_a_second_update_waits_its_turn() {
+        let control = Arc::new(ExitControl::default());
+        let quit_intent = control.begin_quit();
+        let (waiter, prompts) = waiting_update(&control, Duration::from_secs(20)).await;
+        let update_intent = prompts.lock().unwrap()[0].intent;
+        // The quit dialog's confirm no longer reaches anything.
+        let error = control.answer(quit_intent, Answer::Proceed).unwrap_err();
+        assert_eq!(error.code, code::INVALID_REQUEST);
+        // A second install is refused while the first waits.
+        let (sender, _receiver) = oneshot::channel();
+        assert_eq!(
+            control.begin_update(sender).unwrap_err().code,
+            code::UPDATE_BUSY
+        );
+        control.answer(update_intent, Answer::Proceed).unwrap();
+        waiter.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn asking_to_quit_again_reuses_the_open_quit_question() {
+        let control = ExitControl::default();
+        let first = control.begin_quit();
+        assert_eq!(control.begin_quit(), first);
     }
 
     #[tokio::test]
@@ -472,23 +693,29 @@ mod tests {
         let control = Arc::new(ExitControl::default());
         control.settings_dirty.store(true, Ordering::SeqCst);
         let calls = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(Mutex::new(Vec::new()));
         let waiter = {
-            let (control, calls) = (Arc::clone(&control), Arc::clone(&calls));
+            let (control, calls, prompts) = (
+                Arc::clone(&control),
+                Arc::clone(&calls),
+                Arc::clone(&prompts),
+            );
             tokio::spawn(async move {
                 authorize_restart(
                     &control,
                     // Idle at the first look, busy at the second.
                     || calls.fetch_add(1, Ordering::SeqCst) > 0,
-                    |_| {},
+                    |prompt| prompts.lock().unwrap().push(prompt),
                     Duration::from_secs(20),
                 )
                 .await
             })
         };
-        while locked(&control.update_answer).is_none() {
+        while prompts.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        control.answer_update(Answer::Proceed);
+        let intent = prompts.lock().unwrap()[0].intent;
+        control.answer(intent, Answer::Proceed).unwrap();
         assert_eq!(waiter.await.unwrap().unwrap_err().code, code::UPDATE_BUSY);
     }
 
@@ -513,14 +740,5 @@ mod tests {
         };
         assert!(wait_until_stopped(&probe, Duration::from_secs(5), Duration::from_millis(5)).await);
         ends.await.unwrap();
-    }
-
-    #[test]
-    fn only_a_dialog_asked_for_an_update_hands_its_answer_to_the_install() {
-        let control = ExitControl::default();
-        assert_eq!(control.reason(), Reason::Quit);
-        control.set_reason(Reason::Update);
-        assert_eq!(control.reason(), Reason::Update);
-        assert!(!control.answer_update(Answer::Proceed), "none is waiting");
     }
 }

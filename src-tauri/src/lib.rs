@@ -45,7 +45,6 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "settings.import_legacy",
     "settings.set",
     "credentials.delete",
-    "credentials.confirmEndpoint",
     "worlds.list",
     "worlds.remember",
     "worlds.forget",
@@ -183,12 +182,8 @@ async fn credential_reset_storage(
     app: tauri::AppHandle,
     state: State<'_, ActiveSidecar>,
 ) -> Result<(), IpcError> {
-    let _gate = state.request_gate.try_lock().map_err(|_| {
-        IpcError::new(
-            code::BUSY,
-            "Another PomiTranslate operation is still running",
-        )
-    })?;
+    // Held until the reset is done: no request starts, and no core is active or unconfirmed (R10).
+    let _gate = logged("credential_reset_storage", state.maintenance())?;
     logged(
         "credential_reset_storage",
         vault(&app, |credentials, root| {
@@ -233,7 +228,7 @@ impl ResetOutcome {
                 _ => code::KEYCHAIN_FAILED,
             });
         }
-        if purged.keychain_unverified {
+        if purged.keychain_unverified || !purged.keychain_uncertain.is_empty() {
             self.note(code::KEYCHAIN_UNCONFIRMED);
         }
         for reason in &purged.errors {
@@ -255,12 +250,8 @@ async fn native_reset(
     state: State<'_, ActiveSidecar>,
     delete_keys: bool,
 ) -> Result<ResetOutcome, IpcError> {
-    let _gate = state.request_gate.try_lock().map_err(|_| {
-        IpcError::new(
-            code::BUSY,
-            "Another PomiTranslate operation is still running",
-        )
-    })?;
+    // Held until the reset is done: no request starts, and no core is active or unconfirmed (R10).
+    let _gate = logged("native_reset", state.maintenance())?;
     let outcome = vault(&app, move |credentials, root| {
         Ok(reset_native(credentials, root, delete_keys))
     })
@@ -399,34 +390,6 @@ async fn handle_request(
             "id": id,
             "type": "response.ok",
             "payload": {"provider": provider, "deleted": true, "apiKeyStored": false}
-        }));
-    }
-    if kind == "credentials.confirmEndpoint" {
-        // The person confirms that the Custom key saved before keys were bound to an endpoint
-        // belongs to the endpoint now configured (H5).
-        let payload = request
-            .get_mut("payload")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| invalid("Invalid payload"))?;
-        if provider != "custom" {
-            return Err(IpcError::new(
-                code::CREDENTIAL_PROVIDER_INVALID,
-                "Only the Custom provider has an endpoint to confirm",
-            ));
-        }
-        provider_boundary::validate(payload)?;
-        let endpoint = provider_boundary::bound_endpoint(payload);
-        let target = provider.clone();
-        let status = vault(app, move |credentials, root| {
-            credentials.confirm_endpoint(root, &target, endpoint.as_deref())
-        })
-        .await
-        .map_err(credential_unavailable)?;
-        return Ok(serde_json::json!({
-            "v": 1,
-            "id": id,
-            "type": "response.ok",
-            "payload": {"provider": provider, "confirmed": status.stored, "apiKeyStored": status.stored}
         }));
     }
     if CREDENTIAL_OWNER_REQUESTS.contains(&kind.as_str()) {
@@ -753,15 +716,8 @@ fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             };
             let allowed = navigation_allowed(url, dev_url.as_ref());
             if !allowed {
-                diagnostics::global().log(
-                    "WARN",
-                    "navigation",
-                    &format!(
-                        "blocked navigation to {}://{}",
-                        url.scheme(),
-                        url.host_str().unwrap_or("")
-                    ),
-                );
+                // Where the page tried to go is not logged: it is the page's text.
+                diagnostics::global().log("WARN", "navigation", "blocked a navigation");
             }
             allowed
         })
@@ -797,11 +753,7 @@ pub fn run() {
             if let Ok(local) = app.path().app_local_data_dir() {
                 diagnostics::global().set_dir(local.join("logs"));
             }
-            diagnostics::global().log(
-                "INFO",
-                "app",
-                &format!("PomiTranslate {} started", app.package_info().version),
-            );
+            diagnostics::global().log("INFO", "app", "PomiTranslate started");
             app_menu::install(app)?;
             startup_theme::apply(app);
             Ok(())
@@ -1116,14 +1068,14 @@ mod tests {
     }
 
     #[test]
-    fn the_endpoint_confirmation_is_an_allowed_request_that_never_gets_a_key() {
-        assert!(is_allowed_request("credentials.confirmEndpoint"));
-        assert!(!KEY_INJECTED_REQUESTS.contains(&"credentials.confirmEndpoint"));
-        assert!(!CREDENTIAL_OWNER_REQUESTS.contains(&"credentials.confirmEndpoint"));
-        assert_eq!(
-            sidecar::lane("credentials.confirmEndpoint"),
-            sidecar::Lane::Query
-        );
+    fn there_is_no_request_that_binds_a_stored_key_to_an_endpoint() {
+        // R2: the renderer cannot say where a legacy key belongs; only re-entering the key does.
+        for kind in ["credentials.confirmEndpoint", "credentials.bind"] {
+            assert!(!is_allowed_request(kind), "{kind}");
+        }
+        assert!(ALLOWED_REQUESTS
+            .iter()
+            .all(|kind| !kind.starts_with("credentials.") || *kind == "credentials.delete"));
     }
 
     // --- M6: the reset reports what it did, whatever failed --------------------------------------

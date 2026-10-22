@@ -5,6 +5,15 @@ const EP: &str = "https://models.example.test/v1";
 const OTHER: &str = "https://attacker.example/v1";
 const SECRET: &str = "fixture-secret-never-persist-in-plaintext-1942";
 
+/// The providers the ownership record says the app may delete.
+fn owned_in_record(root: &Path) -> Vec<&'static str> {
+    match Ledger::new(root).read().unwrap() {
+        ledger::Read::Present(record) => record.owned(),
+        ledger::Read::Missing => Vec::new(),
+        ledger::Read::Damaged { .. } => panic!("the record is damaged"),
+    }
+}
+
 fn key_dir(root: &Path) -> PathBuf {
     root.join("credential-key")
 }
@@ -452,7 +461,7 @@ fn a_failed_keychain_delete_is_a_partial_outcome_and_the_retry_finishes_the_job(
     assert!(!dir.path().join("credentials").exists());
     assert!(fake.entries.lock().unwrap().contains_key("openai"));
     assert_eq!(
-        Ledger::new(dir.path()).providers().unwrap(),
+        owned_in_record(dir.path()),
         ["openai"],
         "the record survives so a retry finds the entry"
     );
@@ -534,7 +543,7 @@ fn the_custom_key_is_only_returned_for_the_endpoint_it_was_saved_for() {
 }
 
 #[test]
-fn a_custom_key_saved_before_the_binding_existed_is_never_released_until_confirmed() {
+fn a_custom_key_saved_before_the_binding_existed_is_never_released_and_only_re_entering_binds_it() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
     vault
@@ -553,11 +562,22 @@ fn a_custom_key_saved_before_the_binding_existed_is_never_released_until_confirm
             );
         }
     }
-    // Only the person's confirmation binds it - and then to that endpoint alone.
-    let status = vault
-        .confirm_endpoint(dir.path(), "custom", Some(EP))
+    // A settings save that supplies no key does not bind it either (R2: nothing but the key the
+    // person types again can say where the key belongs).
+    vault
+        .save(dir.path(), "custom", Mode::Local, "", Some(OTHER))
         .unwrap();
-    assert!(status.stored);
+    assert_eq!(
+        vault
+            .read(dir.path(), "custom", Some(OTHER))
+            .unwrap_err()
+            .code,
+        code::CREDENTIAL_ENDPOINT_UNBOUND
+    );
+    // Typing the key again binds it, to that endpoint alone.
+    vault
+        .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
+        .unwrap();
     assert_eq!(
         vault
             .read(dir.path(), "custom", Some(EP))
@@ -573,67 +593,6 @@ fn a_custom_key_saved_before_the_binding_existed_is_never_released_until_confirm
             .code,
         code::CREDENTIAL_ENDPOINT_MISMATCH
     );
-}
-
-#[test]
-fn confirming_an_endpoint_never_retargets_a_bound_key_and_only_serves_custom() {
-    let dir = tempfile::tempdir().unwrap();
-    let vault = Credentials::default();
-    vault
-        .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
-        .unwrap();
-    assert_eq!(
-        vault
-            .confirm_endpoint(dir.path(), "custom", Some(OTHER))
-            .unwrap_err()
-            .code,
-        code::CREDENTIAL_ENDPOINT_MISMATCH
-    );
-    // The same endpoint is a no-op.
-    assert!(
-        vault
-            .confirm_endpoint(dir.path(), "custom", Some(EP))
-            .unwrap()
-            .stored
-    );
-    assert_eq!(
-        vault
-            .confirm_endpoint(dir.path(), "openai", Some(EP))
-            .unwrap_err()
-            .code,
-        code::CREDENTIAL_PROVIDER_INVALID
-    );
-    assert_eq!(
-        vault
-            .confirm_endpoint(dir.path(), "custom", None)
-            .unwrap_err()
-            .code,
-        code::CUSTOM_ENDPOINT_REQUIRED
-    );
-    // With no key stored there is nothing to bind.
-    let empty = tempfile::tempdir().unwrap();
-    assert!(
-        !vault
-            .confirm_endpoint(empty.path(), "custom", Some(EP))
-            .unwrap()
-            .stored
-    );
-}
-
-#[test]
-fn re_entering_an_unbound_key_binds_it_to_the_endpoint_given() {
-    let dir = tempfile::tempdir().unwrap();
-    let vault = Credentials::default();
-    vault
-        .save(dir.path(), "custom", Mode::Local, SECRET, None)
-        .unwrap();
-    vault
-        .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
-        .unwrap();
-    assert!(vault
-        .read(dir.path(), "custom", Some(EP))
-        .unwrap()
-        .is_some());
 }
 
 #[test]
@@ -653,7 +612,7 @@ fn an_old_database_without_the_endpoint_column_is_upgraded_in_place() {
         code::CREDENTIAL_ENDPOINT_UNBOUND
     );
     vault
-        .confirm_endpoint(dir.path(), "custom", Some(EP))
+        .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
         .unwrap();
     assert!(vault
         .read(dir.path(), "custom", Some(EP))
@@ -688,11 +647,11 @@ fn the_ownership_record_survives_a_storage_reset_and_a_purge_then_deletes_the_en
     vault
         .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
         .unwrap();
-    assert_eq!(Ledger::new(dir.path()).providers().unwrap(), ["openai"]);
+    assert_eq!(owned_in_record(dir.path()), ["openai"]);
     // "Reset credential storage" sets the vault aside; the OS entry is still the app's.
     vault.reset_storage(dir.path()).unwrap();
     assert!(fake.entries.lock().unwrap().contains_key("openai"));
-    assert_eq!(Ledger::new(dir.path()).providers().unwrap(), ["openai"]);
+    assert_eq!(owned_in_record(dir.path()), ["openai"]);
     let purged = vault.purge(dir.path()).unwrap();
     assert!(purged.complete(), "{purged:?}");
     assert_eq!(purged.keychain_deleted, ["openai"]);
@@ -770,7 +729,299 @@ fn deleting_one_key_after_a_storage_reset_still_removes_its_keychain_entry() {
     // The fresh vault knows nothing, the record does.
     vault.delete(dir.path(), "openai").unwrap();
     assert!(fake.entries.lock().unwrap().is_empty());
-    assert!(Ledger::new(dir.path()).providers().unwrap().is_empty());
+    assert!(owned_in_record(dir.path()).is_empty());
+}
+
+// --- R3 / R5: ownership is pending, then owned; a lost record is unknown, not empty ------------
+
+fn corrupt_record(root: &Path, bytes: &[u8]) {
+    fs::write(root.join(ledger::FILE_NAME), bytes).unwrap();
+}
+
+fn break_the_database(root: &Path) {
+    fs::write(
+        root.join("credentials/credentials.sqlite"),
+        b"this is not a database at all, just bytes that are long enough to be rejected",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_failed_write_over_an_entry_the_app_never_made_leaves_it_alone_and_unowned() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    fake.entries
+        .lock()
+        .unwrap()
+        .insert("openai".into(), "someone-elses-secret".into());
+    fake.fail_next_sets.store(1, Ordering::SeqCst);
+    let error = vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap_err();
+    assert!(!error.uncertain, "the compensation put the old value back");
+    assert_eq!(
+        fake.entries.lock().unwrap().get("openai").unwrap(),
+        "someone-elses-secret"
+    );
+    // The entry was never the app's, and a failed attempt does not make it so.
+    assert!(owned_in_record(dir.path()).is_empty());
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(purged.keychain_deleted.is_empty(), "{purged:?}");
+    assert!(purged.keychain_uncertain.is_empty(), "{purged:?}");
+    assert_eq!(
+        fake.entries.lock().unwrap().get("openai").unwrap(),
+        "someone-elses-secret",
+        "a purge never deletes what the app did not write"
+    );
+}
+
+#[test]
+fn a_failed_write_whose_undo_worked_restores_the_ownership_the_entry_had() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    assert_eq!(owned_in_record(dir.path()), ["openai"]);
+    fake.fail_next_sets.store(1, Ordering::SeqCst);
+    let error = vault
+        .save(
+            dir.path(),
+            "openai",
+            Mode::Keychain,
+            "second-fixture-secret",
+            None,
+        )
+        .unwrap_err();
+    assert!(!error.uncertain);
+    assert_eq!(
+        owned_in_record(dir.path()),
+        ["openai"],
+        "still the app's: the old value is back"
+    );
+    assert_eq!(fake.entries.lock().unwrap().get("openai").unwrap(), SECRET);
+}
+
+#[test]
+fn a_write_that_cannot_be_undone_is_uncertain_and_a_purge_reports_it_without_deleting() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    // An entry that is there already: the undo has to write it back, and that fails too.
+    fake.entries
+        .lock()
+        .unwrap()
+        .insert("openai".into(), "someone-elses-secret".into());
+    fake.fail_next_sets.store(2, Ordering::SeqCst);
+    let error = vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap_err();
+    assert!(error.uncertain);
+    assert!(owned_in_record(dir.path()).is_empty());
+    let purged = vault.purge(dir.path()).unwrap();
+    assert_eq!(purged.keychain_uncertain, ["openai"]);
+    assert!(!purged.complete());
+    assert!(
+        fake.entries.lock().unwrap().contains_key("openai"),
+        "an entry the app cannot vouch for is never deleted"
+    );
+    // It stays recorded, so the next purge still reports it.
+    let again = vault.purge(dir.path()).unwrap();
+    assert_eq!(again.keychain_uncertain, ["openai"]);
+}
+
+#[test]
+fn a_write_that_was_under_way_when_the_app_died_is_pending_and_never_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, SECRET, None)
+        .unwrap();
+    // What a crash between "recorded as pending" and "confirmed" leaves behind.
+    let mut record = Record::default();
+    record.set("openai", Ownership::Pending(Previous::Absent));
+    Ledger::new(dir.path()).save(&record).unwrap();
+    fake.entries
+        .lock()
+        .unwrap()
+        .insert("openai".into(), "half-written".into());
+    let purged = vault.purge(dir.path()).unwrap();
+    assert_eq!(purged.keychain_uncertain, ["openai"]);
+    assert!(!purged.complete());
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+}
+
+#[test]
+fn a_missing_record_and_a_failed_keychain_delete_do_not_lose_the_obligation_over_two_purges() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    // The record is lost (or the install is from before it existed); the vault still knows.
+    Ledger::new(dir.path()).remove_files().unwrap();
+    fake.fail_delete.store(true, Ordering::SeqCst);
+    let first = vault.purge(dir.path()).unwrap();
+    assert!(!first.complete());
+    assert_eq!(first.keychain_failed.len(), 1);
+    assert!(
+        !dir.path().join("credentials").exists(),
+        "vault metadata is gone"
+    );
+    assert_eq!(
+        owned_in_record(dir.path()),
+        ["openai"],
+        "the obligation was written down before the vault went"
+    );
+    fake.fail_delete.store(false, Ordering::SeqCst);
+    let second = vault.purge(dir.path()).unwrap();
+    assert!(second.complete(), "{second:?}");
+    assert!(fake.entries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_damaged_record_is_kept_merged_and_never_turned_into_an_empty_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    // The record is truncated mid-entry; a new key is saved before anything else happens.
+    corrupt_record(dir.path(), br#"{"v":2,"entries":{"openai":{"state":"ow"#);
+    vault
+        .save(dir.path(), "gemini", Mode::Keychain, SECRET, None)
+        .unwrap();
+    assert_eq!(
+        broken_entries(dir.path(), "keychain-ledger.json.broken-").len(),
+        1,
+        "the damaged copy is kept"
+    );
+    let mut owned = owned_in_record(dir.path());
+    owned.sort_unstable();
+    assert_eq!(
+        owned,
+        ["gemini", "openai"],
+        "nothing the damaged copy named is lost"
+    );
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(purged.complete(), "{purged:?}");
+    assert!(fake.entries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_damaged_record_survives_a_storage_reset_with_what_can_still_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    corrupt_record(dir.path(), br#"{"v":2,"entries":{"openai":{"sta"#);
+    vault.reset_storage(dir.path()).unwrap();
+    assert_eq!(owned_in_record(dir.path()), ["openai"]);
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(purged.complete(), "{purged:?}");
+    assert!(fake.entries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_damaged_record_and_an_unreadable_vault_is_unknown_and_never_reported_as_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    // Nothing left in the record can be read, and the vault cannot say either.
+    corrupt_record(dir.path(), b"\0\0 not a record at all");
+    break_the_database(dir.path());
+    for _ in 0..2 {
+        let purged = vault.purge(dir.path()).unwrap();
+        assert!(purged.keychain_unverified, "{purged:?}");
+        assert!(!purged.complete());
+    }
+    assert!(
+        fake.entries.lock().unwrap().contains_key("openai"),
+        "nothing was deleted on a guess"
+    );
+    assert!(
+        dir.path().join(ledger::FILE_NAME).exists(),
+        "the uncertainty marker stays"
+    );
+    assert!(!broken_entries(dir.path(), "keychain-ledger.json.broken-").is_empty());
+}
+
+#[test]
+fn a_reset_that_cannot_write_the_record_stops_before_the_vault_is_moved() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, _fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    // A directory where the record belongs: it can neither be read nor replaced.
+    fs::remove_file(dir.path().join(ledger::FILE_NAME)).unwrap();
+    fs::create_dir(dir.path().join(ledger::FILE_NAME)).unwrap();
+    assert!(vault.reset_storage(dir.path()).is_err());
+    assert!(
+        dir.path().join("credentials/credentials.sqlite").exists(),
+        "the vault, the only other witness, was not set aside"
+    );
+}
+
+#[test]
+fn deleting_one_key_never_deletes_an_entry_the_record_cannot_vouch_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, SECRET, None)
+        .unwrap();
+    let mut record = Record::default();
+    record.set("openai", Ownership::Uncertain);
+    Ledger::new(dir.path()).save(&record).unwrap();
+    fake.entries
+        .lock()
+        .unwrap()
+        .insert("openai".into(), "not-known-to-be-ours".into());
+    vault.delete(dir.path(), "openai").unwrap();
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+}
+
+// --- R4: the folder above the vault directories ------------------------------------------------
+
+#[test]
+fn an_application_folder_that_is_a_link_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = dir.path().join("app-data");
+    link_directory(&link, &real);
+    let error = Credentials::default()
+        .save(&link, "openai", Mode::Local, SECRET, None)
+        .unwrap_err();
+    assert_eq!(error.error.code, code::VAULT_PERMISSIONS);
+    assert!(
+        !real.join("credentials").exists(),
+        "nothing was created through the link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_application_folder_others_can_write_to_is_made_safe_before_it_is_used() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    Credentials::default()
+        .save(dir.path(), "openai", Mode::Local, SECRET, None)
+        .unwrap();
+    let mode = fs::metadata(dir.path()).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o022,
+        0,
+        "group and others can no longer write: {mode:o}"
+    );
 }
 
 // --- H1: links in place of the vault directories ----------------------------------------------

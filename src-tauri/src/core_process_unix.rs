@@ -9,7 +9,7 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-use super::{ExitInfo, RawSpawn, SpawnSpec, TreeKiller};
+use super::{ExitInfo, Leftover, RawSpawn, SpawnSpec, TreeKiller};
 
 /// The core's stdin. Closing it (dropping this) is the shell's "stop" signal.
 pub struct Stdin(ChildStdin);
@@ -77,6 +77,35 @@ impl Drop for ProcessGroup {
     }
 }
 
+/// A child that was created but could not be set up (a pipe is missing). It is killed with its
+/// group; when it is not reaped at once it is kept for the next attempt (R8) instead of being left
+/// running unseen.
+struct StrayChild {
+    child: tokio::process::Child,
+    pgid: libc::pid_t,
+}
+
+impl Leftover for StrayChild {
+    fn reap(&mut self) -> bool {
+        // SAFETY: plain syscall; the leader is not reaped yet, so the group id is still ours.
+        unsafe {
+            libc::killpg(self.pgid, libc::SIGKILL);
+        }
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+}
+
+fn stop_unsupervised(child: tokio::process::Child, pid: u32) -> io::Error {
+    let mut stray = StrayChild {
+        child,
+        pgid: pid as libc::pid_t,
+    };
+    if !stray.reap() {
+        super::retain_leftover(Box::new(stray));
+    }
+    io::Error::new(io::ErrorKind::BrokenPipe, "the core had no stdio pipe")
+}
+
 pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
     let mut command = Command::new(&spec.program);
     command
@@ -122,10 +151,11 @@ pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
     let pid = child
         .id()
         .ok_or_else(|| io::Error::other("the core exited before it was supervised"))?;
-    let take = |what: &str| io::Error::new(io::ErrorKind::BrokenPipe, format!("no {what} pipe"));
-    let stdin = child.stdin.take().ok_or_else(|| take("stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| take("stdout"))?;
-    let stderr = child.stderr.take().ok_or_else(|| take("stderr"))?;
+    let (Some(stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        return Err(stop_unsupervised(child, pid));
+    };
     let killer = Arc::new(ProcessGroup {
         pgid: pid as libc::pid_t,
         reaped: Mutex::new(false),

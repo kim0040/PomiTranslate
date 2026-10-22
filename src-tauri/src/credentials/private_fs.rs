@@ -180,9 +180,19 @@ pub fn pin_directory(path: &Path) -> Result<DirPin, FsError> {
         .map_err(|_| FsError::io("Cannot inspect credential directory"))?;
     #[cfg(unix)]
     {
+        // The checks above looked at the path; these look at the directory that was actually
+        // opened (no link was followed to reach it), so a swap in between is caught (R4).
         let metadata = handle
             .metadata()
             .map_err(|_| FsError::io("Cannot inspect credential directory"))?;
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o777 != 0o700
+        {
+            return Err(FsError::permissions(
+                "The credential directory is not a user-only directory",
+            ));
+        }
         Ok(DirPin {
             _handle: handle,
             identity: (metadata.dev(), metadata.ino()),
@@ -208,6 +218,76 @@ impl DirPin {
         }
         Ok(())
     }
+}
+
+/// The application data folder that holds the vault directories and the ownership record: a real
+/// directory (no link is followed to reach it), owned by the user, that neither the group nor
+/// others can write to. Anyone who could write there could swap the directories below it (R4).
+/// A process of the same user is outside this protection; see `docs/build.md`.
+///
+/// Many systems create folders group-writable (a umask of 002 with a private group per user). The
+/// folder is the user's own, so the write bits of group and others are taken away on the handle that
+/// was checked and the folder is looked at again; a folder that cannot be made safe is refused.
+#[cfg(unix)]
+pub fn check_root(path: &Path) -> Result<(), FsError> {
+    use std::os::unix::fs::PermissionsExt;
+    let handle = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| FsError::permissions("The application data folder cannot be trusted"))?;
+    let inspect = || {
+        handle
+            .metadata()
+            .map_err(|_| FsError::io("Cannot inspect the application data folder"))
+    };
+    let mut metadata = inspect()?;
+    if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(FsError::permissions(
+            "The application data folder must belong to the user",
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        let safe = (metadata.mode() & 0o7777) & !0o022;
+        handle
+            .set_permissions(fs::Permissions::from_mode(safe))
+            .map_err(|_| {
+                FsError::permissions("The application data folder is writable by others")
+            })?;
+        metadata = inspect()?;
+        if metadata.mode() & 0o022 != 0 {
+            return Err(FsError::permissions(
+                "The application data folder is writable by others",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// On Windows the folder inherits its access list from the user profile, so only the kind of
+/// object can be checked here: a real directory, not a link or junction.
+#[cfg(windows)]
+pub fn check_root(path: &Path) -> Result<(), FsError> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| FsError::io("Cannot inspect the application data folder"))?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(FsError::permissions(
+            "The application data folder must be a real directory, not a link",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(not(windows), not(unix)))]
+pub fn check_root(_path: &Path) -> Result<(), FsError> {
+    Err(FsError::permissions(
+        "Local credential storage requires verified native file permissions on this platform",
+    ))
 }
 
 #[cfg(not(windows))]

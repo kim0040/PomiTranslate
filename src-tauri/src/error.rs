@@ -53,11 +53,14 @@ pub mod code {
     /// The core's end could not be observed (waiting on the process failed); it may still run, so
     /// the operation slot stays occupied.
     pub const CORE_STATE_UNKNOWN: &str = "CORE_STATE_UNKNOWN";
+    /// A short request (anything that is not a world job) did not finish in time and the core was
+    /// stopped.
+    pub const CORE_TIMEOUT: &str = "CORE_TIMEOUT";
 
     pub const CREDENTIAL_UNAVAILABLE: &str = "CREDENTIAL_UNAVAILABLE";
     pub const CREDENTIAL_ENDPOINT_MISMATCH: &str = "CREDENTIAL_ENDPOINT_MISMATCH";
-    /// A Custom key saved before endpoints were recorded: it is never sent until the person
-    /// re-enters it or confirms the current endpoint (`credentials.confirmEndpoint`).
+    /// A Custom key saved before endpoints were recorded: it is never sent. The page asks the
+    /// person to enter the key again; saving it binds it to the endpoint given with it.
     pub const CREDENTIAL_ENDPOINT_UNBOUND: &str = "CREDENTIAL_ENDPOINT_UNBOUND";
     pub const CREDENTIAL_PROVIDER_INVALID: &str = "CREDENTIAL_PROVIDER_INVALID";
     pub const CREDENTIAL_SAVE_FAILED: &str = "CREDENTIAL_SAVE_FAILED";
@@ -119,6 +122,7 @@ pub const ERROR_CODES: &[&str] = &[
     code::CORE_CRASHED,
     code::CORE_PROTOCOL,
     code::CORE_STATE_UNKNOWN,
+    code::CORE_TIMEOUT,
     code::CREDENTIAL_UNAVAILABLE,
     code::CREDENTIAL_ENDPOINT_MISMATCH,
     code::CREDENTIAL_ENDPOINT_UNBOUND,

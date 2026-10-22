@@ -26,7 +26,7 @@ async fn collect(events: &mut mpsc::Receiver<CoreEvent>) -> (String, String, Opt
                     exit = Some(info);
                     break;
                 }
-                CoreEvent::Error(message) => panic!("waiting failed: {message}"),
+                CoreEvent::Error => panic!("waiting failed"),
             }
         }
     })
@@ -270,7 +270,7 @@ async fn a_failed_wait_is_not_an_exit_the_state_is_unknown_and_the_tree_is_stopp
     let pid = child.pid;
     let first = timeout(LONG, child.events.recv()).await.unwrap();
     assert!(
-        matches!(first, Some(CoreEvent::Error(_))),
+        matches!(first, Some(CoreEvent::Error)),
         "the failure is reported: {first:?}"
     );
     assert!(child.control.is_unknown());
@@ -295,7 +295,7 @@ async fn the_observation_is_retried_until_the_exit_is_seen() {
     let exit = timeout(LONG, async {
         while let Some(event) = child.events.recv().await {
             match event {
-                CoreEvent::Error(_) => saw_error = true,
+                CoreEvent::Error => saw_error = true,
                 CoreEvent::Exited(info) => return Some(info),
                 _ => {}
             }
@@ -456,16 +456,33 @@ mod windows_launch {
     }
 
     #[tokio::test]
-    async fn a_termination_that_never_works_leaves_the_child_suspended_not_running() {
+    async fn a_termination_that_never_works_keeps_the_child_in_the_cleanup_slot_and_blocks_new_cores(
+    ) {
         fault::fail(Step::Terminate, 1000);
-        let pid = spawn_failing_at(Step::Assign).await;
-        fault::fail(Step::Terminate, 0);
+        fault::fail(Step::Assign, 1);
+        let error = spawn(&spec("sleep", &[])).err().expect("the start fails");
+        let pid = fault::last_pid();
+        assert_ne!(pid, 0);
+        // The result is not "could not start": a created child is still out there (R8).
+        assert!(matches!(error, SpawnError::CleanupUnconfirmed), "{error:?}");
+        assert_eq!(
+            error.into_ipc().code,
+            crate::error::code::CORE_STATE_UNKNOWN
+        );
+        assert!(leftovers_pending());
         // It stays suspended (it never ran), and nobody pretends it is gone.
         assert!(process_alive(pid), "the unsupervised child is still there");
-        // Clean up the stuck child.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .output();
-        assert!(gone_within(pid, LONG).await);
+        // No new core starts meanwhile, and each refusal is another bounded try to stop it.
+        for _ in 0..2 {
+            let again = spawn(&spec("echo", &[])).err().expect("refused");
+            assert!(matches!(again, SpawnError::CleanupUnconfirmed));
+            assert!(process_alive(pid));
+        }
+        // Once the system lets it be stopped, the next start reaps it first and goes ahead.
+        fault::fail(Step::Terminate, 0);
+        let child = spawn(&spec("sleep", &[])).expect("the cleanup finished, so a core starts");
+        assert!(gone_within(pid, LONG).await, "the leftover is gone");
+        assert!(!leftovers_pending());
+        child.control.kill_tree();
     }
 }

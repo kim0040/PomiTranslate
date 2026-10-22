@@ -279,12 +279,14 @@ pub async fn install<R: Runtime>(
     // download is over, so it no longer counts as an active operation while the person decides.
     drop(active);
     crate::exit_gate::authorize_update_restart(app).await?;
-    // Installing replaces the program: hold the gate so no job can start halfway through.
-    let _gate = sidecar.request_gate.try_lock().map_err(|_| {
-        IpcError::new(
+    // Installing replaces the program: hold the maintenance guard so no job can start halfway
+    // through, and refuse while a core is active or its end was never confirmed (R10).
+    let _gate = sidecar.maintenance().map_err(|error| match error.code {
+        code::BUSY => IpcError::new(
             code::UPDATE_BUSY,
             "A job started while the update was downloading",
-        )
+        ),
+        _ => error,
     })?;
     update
         .install(bytes)

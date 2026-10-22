@@ -89,7 +89,7 @@ fn only_known_diagnostic_shapes_are_kept_and_the_rest_is_counted() {
     for line in [
         "The villagers of Oakhaven gather at dawn to trade wheat.",
         "Traceback (most recent call last):",
-        "  File \"C:\\Users\\someone\\secret folder\\mwt\\scan.py\", line 12, in run",
+        "  File \"C:\\Users\\someone\\secret folder\\mwt\\extract.py\", line 12, in run",
         "    translate(\"WORLD-TEXT-IN-SOURCE\")",
         "  File \"/opt/pomi/_internal/site-packages/requests/api.py\", line 59, in get",
         "ValueError: WORLD-TEXT-IN-MESSAGE",
@@ -105,14 +105,40 @@ fn only_known_diagnostic_shapes_are_kept_and_the_rest_is_counted() {
         [
             "[1 line omitted]",
             "Traceback (most recent call last):",
-            "  File \"mwt/scan.py\", line 12, in run",
+            "  File \"mwt/extract.py\", line 12, in run",
             "[1 line omitted]",
-            "  File \"site-packages/requests/api.py\", line 59, in get",
+            "  [frame]",
             "ValueError: [message omitted]",
-            "requests.exceptions.ConnectionError: [message omitted]",
+            "[exception]: [message omitted]",
             "KeyboardInterrupt",
-            "[pomi] stage=scan files=3",
+            "[pomi] [message omitted]",
             "[1 line omitted]",
+        ]
+    );
+}
+
+#[test]
+fn the_fixed_notices_keep_their_text_and_nothing_a_line_adds_to_them() {
+    let diag = Diagnostics::default();
+    for line in [
+        "[pomi] stdin closed while a request was running; cancelling",
+        "[pomi] stdin closed while a request was running; cancelling with more words",
+        "preferences were not saved: OSError",
+        "preferences were not saved: SomeLibraryError",
+        "protocol message had values that were replaced: ['non_finite_number']",
+        "protocol message had values that were replaced: ['non_finite_number', 'a story']",
+    ] {
+        diag.core_stderr(line);
+    }
+    assert_eq!(
+        diag.stderr_lines(),
+        [
+            "[pomi] stdin closed while a request was running; cancelling",
+            "[pomi] [message omitted]",
+            "preferences were not saved: OSError",
+            "preferences were not saved",
+            "protocol message had values that were replaced: ['non_finite_number']",
+            "protocol message had values that were replaced",
         ]
     );
 }
@@ -125,12 +151,12 @@ fn consecutive_omitted_lines_are_one_entry_and_the_ring_is_bounded() {
     }
     assert_eq!(diag.stderr_lines(), ["[50 lines omitted]"]);
     for n in 0..(STDERR_RING_LINES + 25) {
-        diag.core_stderr(&format!("[pomi] line {n}"));
+        diag.core_stderr(&format!("  File \"mwt/extract.py\", line {n}, in run"));
     }
     let lines = diag.stderr_lines();
     assert_eq!(lines.len(), STDERR_RING_LINES);
-    assert_eq!(lines[0], "[pomi] line 25");
-    assert!(diag.bundle("1.0.0").contains("[pomi] line 224"));
+    assert_eq!(lines[0], "  File \"mwt/extract.py\", line 25, in run");
+    assert!(diag.bundle("1.0.0").contains("line 224, in run"));
 }
 
 #[test]
@@ -160,6 +186,92 @@ fn arbitrary_key_like_strings_never_reach_the_ring_the_log_or_the_export() {
     assert!(all.contains("[message omitted]"), "{all}");
 }
 
+const SECRET: &str = "violet-lantern-castle-rose";
+const SENTENCE: &str = "The baker of Oakhaven sold violet bread to the miners at dawn";
+
+#[test]
+fn the_secret_and_a_world_sentence_reach_neither_the_log_file_nor_the_export_by_any_path() {
+    let (diag, _dir) = set_up();
+    // The request is one of the page's, so its type is untrusted too.
+    let hostile_request = format!("scan.start-{SECRET}");
+    for text in [SECRET, SENTENCE] {
+        for line in [
+            // Plain output and the prefix.
+            text.to_owned(),
+            format!("[pomi] {text}"),
+            format!("  {text}"),
+            // The fixed notices followed by more.
+            format!("[pomi] stdin closed while a request was running; cancelling {text}"),
+            format!("[pomi] stdin closed while a request was running; cancelling: {text}"),
+            format!("preferences were not saved: {text}"),
+            format!("[pomi] preferences were not saved: {text}"),
+            format!("protocol message had values that were replaced: ['{text}']"),
+            format!(
+                "protocol message had values that were replaced: ['non_finite_number', '{text}']"
+            ),
+            // A frame's file and function.
+            format!("  File \"/x/mwt/{text}.py\", line 3, in run"),
+            format!("  File \"/x/{text}/extract.py\", line 3, in run"),
+            format!("  File \"/x/mwt/extract.py\", line 3, in {text}"),
+            format!("  File \"{text}\", line 3, in run"),
+            format!("  File \"/x/mwt/extract.py\", line 3, in run {text}"),
+            // An exception class and message.
+            format!("{text}Error: {text}"),
+            format!("mwt.journal.{text}Error: {text}"),
+            format!("ValueError: {text}"),
+            format!("Traceback (most recent call last): {text}"),
+        ] {
+            diag.core_stderr(&line);
+            diag.core_stray_stdout(&line);
+        }
+    }
+    // Output split mid-word into two reads (the sink in `sidecar` joins what the pipe splits).
+    diag.core_stderr(&format!("{} {}", &SECRET[..8], &SECRET[8..]));
+    diag.end_core_output();
+    // The shell's own messages: an error's message, the source and the request it names.
+    for text in [SECRET, SENTENCE] {
+        diag.log_error(
+            "native_reset",
+            &IpcError::new("RESET_FAILED", format!("could not remove {text}")),
+        );
+        diag.log_error(
+            &format!("sidecar_request:{text}"),
+            &IpcError::new("BUSY", text),
+        );
+        diag.log_error(&format!("{text}:{text}"), &IpcError::new("BUSY", text));
+        diag.log_with(
+            "ERROR",
+            &format!("core:{text}"),
+            "a fixed message",
+            Some(text),
+            &[("pid", 7)],
+        );
+        diag.core_run(&RunRecord {
+            request: text,
+            duration_ms: 3,
+            error: None,
+            exit_code: Some(0),
+            signal: None,
+        });
+    }
+    diag.log_with(
+        "ERROR",
+        "sidecar_request",
+        "a fixed message",
+        Some(&hostile_request),
+        &[],
+    );
+    let all = everything(&diag);
+    assert!(all.contains("[message omitted]"), "{all}");
+    assert!(all.contains("[unknown request]"), "{all}");
+    assert!(!all.contains("scan.start-"), "{all}");
+    for word in [
+        SECRET, "violet", "lantern", "castle", "baker", "Oakhaven", "miners", "bread",
+    ] {
+        assert!(!all.contains(word), "{word} leaked:\n{all}");
+    }
+}
+
 #[test]
 fn a_key_straddling_the_clip_limit_is_redacted_before_the_line_is_cut() {
     let (diag, _dir) = set_up();
@@ -167,6 +279,7 @@ fn a_key_straddling_the_clip_limit_is_redacted_before_the_line_is_cut() {
     // The key starts a few characters before the 300 character limit of a logger line.
     for pad in [270, 280, 290, 295, 299] {
         diag.core_stderr(&format!("{CORE_LOG_PREFIX}{} {key} tail", "a".repeat(pad)));
+        diag.core_stderr(&format!("ValueError: {} {key} tail", "a".repeat(pad)));
     }
     let all = everything(&diag);
     for fragment in ["sk-or", "ABCDEF", "0123456789abcdef", "v1-"] {
@@ -175,7 +288,7 @@ fn a_key_straddling_the_clip_limit_is_redacted_before_the_line_is_cut() {
 }
 
 #[test]
-fn the_log_file_keeps_scrubbed_core_lines_but_no_omitted_text() {
+fn the_log_file_keeps_only_known_shapes_and_counts_the_rest() {
     let (diag, _dir) = set_up();
     diag.core_stderr("a story about the world with a secret ending");
     diag.core_stderr("[pomi] stage=scan");
@@ -183,8 +296,9 @@ fn the_log_file_keeps_scrubbed_core_lines_but_no_omitted_text() {
     diag.end_core_output();
     let log = diag.log_file_text();
     assert!(log.contains("CORE [1 line omitted]"), "{log}");
-    assert!(log.contains("CORE [pomi] stage=scan"), "{log}");
+    assert!(log.contains("CORE [pomi] [message omitted]"), "{log}");
     assert!(!log.contains("story"), "{log}");
+    assert!(!log.contains("stage=scan"), "{log}");
 }
 
 #[test]
@@ -192,9 +306,10 @@ fn the_log_file_rotates_at_the_size_limit_and_keeps_five_files() {
     let dir = tempfile::tempdir().unwrap();
     let diag = Diagnostics::default();
     diag.set_dir(dir.path().to_path_buf());
-    let line = "x".repeat(1500);
+    // Messages are compile-time text in the product; a test needs one long enough.
+    let line: &'static str = Box::leak("x".repeat(1500).into_boxed_str());
     for _ in 0..(MAX_FILE_BYTES as usize / 1500 * 7) {
-        diag.log("INFO", "test", &line);
+        diag.log("INFO", "app", line);
     }
     let mut names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
@@ -228,7 +343,7 @@ fn the_export_is_structured_metadata_only_and_never_a_log_tail_or_a_message() {
             "exit 3 while holding sk-abcdef0123456789abcdef in /home/someone/My World",
         ),
     );
-    diag.log("INFO", "app", "opened the world My Secret Castle");
+    diag.log("INFO", "app", "opened a world");
     diag.core_run(&RunRecord {
         request: "scan.start",
         duration_ms: 1234,
@@ -243,7 +358,7 @@ fn the_export_is_structured_metadata_only_and_never_a_log_tail_or_a_message() {
         exit_code: Some(0),
         signal: None,
     });
-    diag.crash("src/lib.rs:42", "boom with key sk-abcdef0123456789abcdef");
+    diag.crash("src/lib.rs:42");
     diag.core_stderr("Traceback: provider echoed Bearer sk-live-00112233445566778899");
     // A line left in the file by an older version is not exported either.
     fs::write(
@@ -262,10 +377,7 @@ fn the_export_is_structured_metadata_only_and_never_a_log_tail_or_a_message() {
         ),
         "{bundle}"
     );
-    assert!(
-        bundle.contains("request=bad?request?name?with?spaces"),
-        "{bundle}"
-    );
+    assert!(bundle.contains("request=[unknown request]"), "{bundle}");
     assert!(bundle.contains("panic at lib.rs:42"), "{bundle}");
     assert!(bundle.contains("core lines omitted: 1"), "{bundle}");
     for forbidden in [
@@ -273,11 +385,11 @@ fn the_export_is_structured_metadata_only_and_never_a_log_tail_or_a_message() {
         "sk-live-00112233445566778899",
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1",
         "second line",
-        "My Secret Castle",
+        "opened a world",
         "My World",
         "exit 3 while",
-        "boom",
         "recent events",
+        "bad request name",
     ] {
         assert!(!bundle.contains(forbidden), "{forbidden} leaked:\n{bundle}");
     }
@@ -287,9 +399,9 @@ fn the_export_is_structured_metadata_only_and_never_a_log_tail_or_a_message() {
 fn the_copy_text_is_the_export() {
     let _turn = serial();
     global().reset();
-    global().log_error("x", &IpcError::new("CORE_CRASHED", "m"));
+    global().log_error("app", &IpcError::new("CORE_CRASHED", "m"));
     let copied = global().snapshot();
-    assert!(copied.contains("x CORE_CRASHED"));
+    assert!(copied.contains("app CORE_CRASHED"));
     assert!(!copied.contains("recent events"));
     global().reset();
 }
@@ -305,14 +417,12 @@ fn the_suggested_bundle_name_is_dated_text() {
 }
 
 #[test]
-fn a_crash_record_lands_in_the_log_but_only_its_place_in_the_export() {
+fn a_crash_record_holds_only_its_place_in_the_log_and_in_the_export() {
     let (diag, dir) = set_up();
-    diag.crash("src/lib.rs:1", "boom with key sk-abcdef0123456789abcdef");
+    diag.crash("src/lib.rs:1");
     let log = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
-    assert!(log.contains("CRASH") && log.contains("boom"));
-    assert!(!log.contains("sk-abcdef0123456789abcdef"));
-    let export = diag.bundle("1.0.0");
-    assert!(export.contains("panic at lib.rs:1") && !export.contains("boom"));
+    assert!(log.contains("CRASH panic at lib.rs:1"), "{log}");
+    assert!(diag.bundle("1.0.0").contains("panic at lib.rs:1"));
 }
 
 #[test]
@@ -340,4 +450,95 @@ fn module_relative_paths_never_keep_the_persons_folders() {
         );
         assert_eq!(reduced, expected, "{path}");
     }
+}
+
+// --- the allow-lists follow the Python sources ---------------------------------------------------
+
+fn repo_file(relative: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(relative)
+}
+
+/// The core's source files, as `module_relative` writes them.
+fn core_sources_on_disk() -> Vec<String> {
+    let mut found: Vec<String> = fs::read_dir(repo_file("mwt"))
+        .expect("the Python sources are next to src-tauri")
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".py"))
+        .map(|name| format!("mwt/{name}"))
+        .collect();
+    found.extend(
+        [
+            "mc_world_translator.py",
+            "llm_backends.py",
+            "webui_server.py",
+        ]
+        .map(str::to_owned),
+    );
+    found.sort();
+    found
+}
+
+#[test]
+fn the_module_list_covers_exactly_the_core_sources() {
+    let mut listed: Vec<String> = CORE_MODULES.iter().map(|name| (*name).to_owned()).collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        core_sources_on_disk(),
+        "a Python module was added or removed: update CORE_MODULES"
+    );
+}
+
+#[test]
+fn the_exception_list_covers_every_exception_class_the_core_defines() {
+    let mut known: std::collections::BTreeSet<String> = BUILTIN_EXCEPTIONS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let mut defined: Vec<(String, Vec<String>)> = Vec::new();
+    for file in core_sources_on_disk() {
+        let text = fs::read_to_string(repo_file(&file)).unwrap();
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("class ") else {
+                continue;
+            };
+            let Some((name, bases)) = rest.split_once('(') else {
+                continue;
+            };
+            let bases = bases.split(')').next().unwrap_or("");
+            defined.push((
+                name.trim().to_owned(),
+                bases
+                    .split(',')
+                    .map(|base| base.trim().rsplit('.').next().unwrap_or("").to_owned())
+                    .collect(),
+            ));
+        }
+    }
+    // A class is an exception when a base is one; classes may be defined before their bases.
+    let mut ours: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    loop {
+        let before = known.len();
+        for (name, bases) in &defined {
+            if bases.iter().any(|base| known.contains(base)) {
+                known.insert(name.clone());
+                ours.insert(name.clone());
+            }
+        }
+        if known.len() == before {
+            break;
+        }
+    }
+    ours.retain(|name| !BUILTIN_EXCEPTIONS.contains(&name.as_str()));
+    let listed: std::collections::BTreeSet<String> = CORE_EXCEPTIONS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    assert_eq!(
+        listed, ours,
+        "an exception class was added or removed in the Python sources: update CORE_EXCEPTIONS"
+    );
 }
