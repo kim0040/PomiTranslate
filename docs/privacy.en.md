@@ -30,7 +30,7 @@ A process running with the same user permissions that can read both the database
 
 The CLI and legacy UI use the existing OS keyring/environment-variable compatibility path and do not automatically share credentials with the desktop vault. `.env.example` is a template without secrets; storing a real key in a plaintext `.env` file is not recommended.
 
-Use Settings to change or delete a key. Switching from Local to Session/Keychain removes the Local ciphertext, but does not automatically delete an existing OS keychain entry that was imported. If the key file is lost or ciphertext is damaged, you may need to enter the key again.
+Use Settings to change or delete a key. Switching from Local to Session/Keychain removes the Local ciphertext, but does not automatically delete an existing OS keychain entry that was imported. If the key file is lost or ciphertext is damaged, you may need to enter the key again. The app deletes only OS keychain entries it has confirmed it created. An entry it cannot confirm (including after its own record was damaged or lost) is never deleted and is reported as "could not confirm"; remove any PomiTranslate entries in the system keychain yourself, then tell the app so (that confirmation deletes nothing).
 
 ## Costs and Contact
 

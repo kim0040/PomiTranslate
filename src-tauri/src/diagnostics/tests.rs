@@ -105,7 +105,7 @@ fn only_known_diagnostic_shapes_are_kept_and_the_rest_is_counted() {
         [
             "[1 line omitted]",
             "Traceback (most recent call last):",
-            "  File \"mwt/extract.py\", line 12, in run",
+            "  File \"mwt/extract.py\", line 12, in [fn]",
             "[1 line omitted]",
             "  [frame]",
             "ValueError: [message omitted]",
@@ -155,8 +155,8 @@ fn consecutive_omitted_lines_are_one_entry_and_the_ring_is_bounded() {
     }
     let lines = diag.stderr_lines();
     assert_eq!(lines.len(), STDERR_RING_LINES);
-    assert_eq!(lines[0], "  File \"mwt/extract.py\", line 25, in run");
-    assert!(diag.bundle("1.0.0").contains("line 224, in run"));
+    assert_eq!(lines[0], "  File \"mwt/extract.py\", line 25, in [fn]");
+    assert!(diag.bundle("1.0.0").contains("line 224, in [fn]"));
 }
 
 #[test]
@@ -187,6 +187,8 @@ fn arbitrary_key_like_strings_never_reach_the_ring_the_log_or_the_export() {
 }
 
 const SECRET: &str = "violet-lantern-castle-rose";
+/// A secret (or a world token) that is a valid Python identifier and a valid class-name prefix.
+const IDENTIFIER_SECRET: &str = "violetlanterncastlerose";
 const SENTENCE: &str = "The baker of Oakhaven sold violet bread to the miners at dawn";
 
 #[test]
@@ -270,6 +272,95 @@ fn the_secret_and_a_world_sentence_reach_neither_the_log_file_nor_the_export_by_
     ] {
         assert!(!all.contains(word), "{word} leaked:\n{all}");
     }
+}
+
+#[test]
+fn an_identifier_shaped_secret_reaches_neither_the_log_file_nor_the_export_through_any_core_line() {
+    let (diag, _dir) = set_up();
+    let word = IDENTIFIER_SECRET;
+    for line in [
+        // A frame of an allow-listed module keeps its path and line number, never its function.
+        format!("  File \"mwt/desktop_entry.py\", line 42, in {word}"),
+        format!("  File \"/x/mwt/extract.py\", line 7, in {word}.{word}"),
+        format!("  File \"mwt/journal.py\", line 9, in <module>{word}"),
+        format!("  File \"mwt/{word}.py\", line 3, in run"),
+        // An exception class that is not allow-listed, with and without a module and a message.
+        format!("{word}Error: {word}"),
+        format!("mwt.journal.{word}Error: {word}"),
+        format!("{word}Error"),
+        // The fixed notices followed by the word, and the [pomi] prefix.
+        format!("[pomi] {word}"),
+        format!("[pomi] stdin closed while a request was running; cancelling{word}"),
+        format!("preferences were not saved: {word}Error"),
+        format!("preferences were not saved: {word}"),
+        format!("protocol message had values that were replaced: ['{word}']"),
+        format!("ValueError: {word}"),
+        word.to_owned(),
+    ] {
+        diag.core_stderr(&line);
+        diag.core_stray_stdout(&line);
+    }
+    diag.end_core_output();
+    let (file, export) = (diag.log_file_text(), diag.bundle("9.9.9"));
+    for (what, text) in [("log file", &file), ("export", &export)] {
+        assert!(
+            !text.contains(word),
+            "{what} leaked {word}:
+{text}"
+        );
+        assert!(
+            !text.contains("violet"),
+            "{what}:
+{text}"
+        );
+        assert!(
+            !text.contains("lantern"),
+            "{what}:
+{text}"
+        );
+    }
+    // What is kept is the module, the line and a fixed marker, plus allow-listed class names.
+    assert!(
+        file.contains("File \"mwt/desktop_entry.py\", line 42, in [fn]"),
+        "{file}"
+    );
+    assert!(
+        export.contains("File \"mwt/desktop_entry.py\", line 42, in [fn]"),
+        "{export}"
+    );
+    assert!(file.contains("ValueError: [message omitted]"), "{file}");
+    assert!(export.contains("ValueError: [message omitted]"), "{export}");
+}
+
+#[test]
+fn the_exception_classes_of_the_new_core_modules_and_the_counter_are_known_to_the_filter() {
+    let (diag, _dir) = set_up();
+    for class in ["GlossaryError", "mwt.glossary.GlossaryError"] {
+        diag.core_stderr(&format!("{class}: x"));
+    }
+    let lines = diag.stderr_lines();
+    assert_eq!(
+        lines,
+        [
+            "GlossaryError: [message omitted]",
+            "mwt.glossary.GlossaryError: [message omitted]",
+        ]
+    );
+    // `_UnreadableCounter` is not shaped like a printed exception line (like `_DeadlineExceeded`),
+    // but it is a class of the core, so the allow-list names it.
+    assert!(allowed_exception("_UnreadableCounter"));
+    assert!(allowed_exception("mwt.journal._UnreadableCounter"));
+    for module in ["mwt/glossary.py", "mwt/format_residue.py"] {
+        diag.core_stderr(&format!("  File \"/x/{module}\", line 4, in f"));
+    }
+    assert!(diag
+        .stderr_lines()
+        .iter()
+        .any(|line| line == "  File \"mwt/glossary.py\", line 4, in [fn]"));
+    assert!(diag
+        .stderr_lines()
+        .iter()
+        .any(|line| line == "  File \"mwt/format_residue.py\", line 4, in [fn]"));
 }
 
 #[test]
@@ -481,13 +572,25 @@ fn core_sources_on_disk() -> Vec<String> {
     found
 }
 
+/// Allow-list entries whose Python source may be absent from the tree the tests run on (a branch
+/// that has not merged the glossary core yet). Everything else must match the sources exactly.
+const MAY_BE_ABSENT_MODULES: &[&str] = &["mwt/glossary.py", "mwt/format_residue.py"];
+const MAY_BE_ABSENT_EXCEPTIONS: &[&str] = &["GlossaryError"];
+
 #[test]
 fn the_module_list_covers_exactly_the_core_sources() {
     let mut listed: Vec<String> = CORE_MODULES.iter().map(|name| (*name).to_owned()).collect();
     listed.sort();
+    let mut expected = core_sources_on_disk();
+    // Entries that are on the list but not on disk are fine only when they are the tolerated ones.
+    for name in MAY_BE_ABSENT_MODULES {
+        if !expected.iter().any(|found| found == name) {
+            expected.push((*name).to_owned());
+        }
+    }
+    expected.sort();
     assert_eq!(
-        listed,
-        core_sources_on_disk(),
+        listed, expected,
         "a Python module was added or removed: update CORE_MODULES"
     );
 }
@@ -533,6 +636,9 @@ fn the_exception_list_covers_every_exception_class_the_core_defines() {
         }
     }
     ours.retain(|name| !BUILTIN_EXCEPTIONS.contains(&name.as_str()));
+    for name in MAY_BE_ABSENT_EXCEPTIONS {
+        ours.insert((*name).to_owned());
+    }
     let listed: std::collections::BTreeSet<String> = CORE_EXCEPTIONS
         .iter()
         .map(|name| (*name).to_owned())

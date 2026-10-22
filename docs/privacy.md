@@ -30,7 +30,7 @@ DB와 암호화 key 파일을 모두 읽는 같은 사용자 권한의 프로세
 
 CLI·legacy UI는 기존 OS keyring/환경변수 호환을 사용하며 desktop vault와 자동 공유되지 않습니다. `.env.example`은 비밀 없는 형식 예시이고 실제 키를 평문 `.env`로 보관하는 사용법을 권장하지 않습니다.
 
-키를 변경·삭제하려면 환경 설정을 사용합니다. Local → Session/Keychain 전환은 앱에 남은 Local ciphertext를 제거하지만, 가져온 기존 OS keychain 원본을 자동 삭제하지 않습니다. 키 파일 분실·암호문 손상 시 재입력이 필요할 수 있습니다.
+키를 변경·삭제하려면 환경 설정을 사용합니다. Local → Session/Keychain 전환은 앱에 남은 Local ciphertext를 제거하지만, 가져온 기존 OS keychain 원본을 자동 삭제하지 않습니다. 키 파일 분실·암호문 손상 시 재입력이 필요할 수 있습니다. 앱은 자신이 만들었다고 확인한 OS keychain 항목만 삭제합니다. 확인할 수 없는 항목(기록이 손상·분실된 경우 포함)은 지우지 않고 "확인할 수 없음"으로 알립니다. 이때는 시스템 keychain에서 PomiTranslate 항목을 직접 지운 뒤 앱에서 그 사실을 확인해 주세요(확인은 항목을 삭제하지 않습니다).
 
 ## 비용과 문의
 
