@@ -5,6 +5,7 @@
   import { appVersion, dataLocations, openExternal, revealDataFolder, type DataLocations } from '../lib/native';
   import { formatBytes } from '../lib/format';
   import Icon from './Icon.svelte';
+  import SettingsHint from './SettingsHint.svelte';
   import ResetDialog from './ResetDialog.svelte';
   import { APP_VERSION } from '../lib/version';
 
@@ -45,10 +46,10 @@
   }
 </script>
 
-<section class="card settings-section maintenance" id="updates" aria-labelledby="updates-title" bind:this={section}>
-  <div class="head">
-    <span class="section-icon" aria-hidden="true"><Icon name="download" size={16} /></span>
-    <div><h2 id="updates-title">{t('settings.update.title')}</h2><p>{t('settings.update.lead')}</p></div>
+<section class="card settings-section maintenance" id="updates" tabindex="-1" aria-labelledby="updates-title" bind:this={section}>
+  <div class="section-head">
+    <span class="section-icon" aria-hidden="true"><Icon name="download" size={18} /></span>
+    <div class="head-text"><h2 id="updates-title">{t('settings.update.title')}</h2><SettingsHint text={t('settings.update.lead')} /></div>
     <span class="pill num">{t('settings.update.version', { version })}</span>
   </div>
   <div class="row">
@@ -87,10 +88,10 @@
     <span><strong>{t('settings.update.auto')}</strong><small>{t('settings.update.autoHint')}</small></span></label>
 </section>
 
-<section class="card settings-section maintenance" aria-labelledby="data-title">
-  <div class="head">
-    <span class="section-icon" aria-hidden="true"><Icon name="folder" size={16} /></span>
-    <div><h2 id="data-title">{t('settings.data.title')}</h2><p>{t('settings.data.lead')}</p></div>
+<section class="card settings-section maintenance" id="data-settings" tabindex="-1" aria-labelledby="data-title">
+  <div class="section-head">
+    <span class="section-icon" aria-hidden="true"><Icon name="folder" size={18} /></span>
+    <div class="head-text"><h2 id="data-title">{t('settings.data.title')}</h2><SettingsHint text={t('settings.data.lead')} /></div>
   </div>
   {#if locations}
     <dl class="paths">
@@ -103,14 +104,14 @@
   {/if}
   <div class="diagnostics">
     <button type="button" class="btn btn-secondary" onclick={() => app.copyDiagnostics()}>{t('diagnostics.copy')}</button>
-    <p class="hint">{t('diagnostics.help')}</p>
+    <SettingsHint text={t('diagnostics.help')} />
   </div>
 </section>
 
-<section class="card settings-section maintenance danger-zone" aria-labelledby="reset-title">
-  <div class="head">
-    <span class="section-icon danger" aria-hidden="true"><Icon name="alert-triangle" size={16} /></span>
-    <div><h2 id="reset-title">{t('settings.reset.title')}</h2><p>{t('settings.reset.lead')}</p></div>
+<section class="card settings-section maintenance danger-zone" id="reset-section" tabindex="-1" aria-labelledby="reset-title">
+  <div class="section-head">
+    <span class="section-icon danger" aria-hidden="true"><Icon name="alert-triangle" size={18} /></span>
+    <div class="head-text"><h2 id="reset-title">{t('settings.reset.title')}</h2><SettingsHint text={t('settings.reset.lead')} /></div>
     <button type="button" class="btn btn-danger" disabled={app.isBusy} onclick={() => (resetting = true)}>{t('settings.reset.button')}</button>
   </div>
 </section>
@@ -118,32 +119,31 @@
 {#if resetting}<ResetDialog onClose={() => (resetting = false)} />{/if}
 
 <style>
-  .maintenance { padding: var(--space-4) var(--space-5); display: grid; gap: var(--space-4); scroll-margin-top: var(--space-4); }
-  .head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--space-3); align-items: start; }
-  .head h2 { font-size: var(--text-lg); font-weight: 600; }
-  .head p { color: var(--text-secondary); font-size: var(--text-sm); margin-top: var(--space-1); }
-  .section-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--accent); color: var(--text-on-accent); }
-  .section-icon.danger { background: var(--danger-solid); }
+  /* The card, its header and the icon tile are shared with the settings sections (SettingsScreen). */
+  .head-text { display: grid; gap: 2px; min-width: 0; }
   .row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
   .status { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); color: var(--text-secondary); min-height: 20px; }
   .status :global(.icon) { color: var(--success-solid); }
   .bad { color: var(--danger-text); }
   .available { display: grid; gap: var(--space-3); padding: var(--space-3); border-radius: var(--radius-lg); background: var(--accent-soft); }
   .notes { margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; font-family: inherit; font-size: var(--text-sm); color: var(--text); }
-  .hint { color: var(--text-secondary); font-size: var(--text-xs); }
+  .hint { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
   .check { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-2); align-items: start; padding: 10px var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); }
   .check > span { display: grid; gap: 2px; }
-  .check strong { font-size: var(--text-sm); }
-  .check small { color: var(--text-secondary); font-size: var(--text-xs); }
+  .check strong { font-size: var(--text-md); font-weight: 600; }
+  .check small { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
   .paths { margin: 0; display: grid; gap: var(--space-2); }
   .diagnostics { display: grid; gap: var(--space-2); justify-items: start; }
   .paths > div { display: grid; grid-template-columns: minmax(140px, 0.6fr) minmax(0, 2fr); gap: var(--space-3); align-items: baseline; }
   .paths dt { color: var(--text-secondary); font-size: var(--text-sm); }
   .paths dd { margin: 0; font-size: var(--text-xs); overflow-wrap: anywhere; }
+  /* Reset stays last, outlined in red. */
   .danger-zone { border-color: var(--danger-border); }
   @media (max-width: 640px) {
-    .head { grid-template-columns: auto minmax(0, 1fr); }
-    .head > .btn, .head > .pill { grid-column: 2; justify-self: start; }
+    .paths > div { grid-template-columns: 1fr; gap: 2px; }
+  }
+  @container settings-pane (max-width: 520px) {
+    .section-head > :global(.btn), .section-head > :global(.pill) { grid-column: 2; justify-self: start; }
     .paths > div { grid-template-columns: 1fr; gap: 2px; }
   }
 </style>
