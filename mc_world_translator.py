@@ -475,6 +475,10 @@ SPLIT_NOW_KINDS = frozenset({"too_large", "filtered", "rejected"})
 FATAL_KINDS = frozenset({"redirect", "auth", "config"})
 RETRY_KINDS = frozenset({"rate_limit", "transient", "timeout", "unknown"})
 
+# Live samples in each translation_progress event: how many, and how long each side may be.
+PROGRESS_SAMPLES = 3
+PROGRESS_SAMPLE_CHARS = 160
+
 # Stable reasons a string could not be translated. The raw provider text stays in the report file;
 # the interface shows its own wording for each code.
 FAILURE_CODES = (
@@ -798,6 +802,15 @@ class BatchTranslator:
                 self.cache.update(translated)
                 done += len(batch)
                 failed = len(self.failed)
+            # A few finished sentences for the live list on the run screen, cut short; the full
+            # text stays in the report.
+            samples = [
+                {"source": source[:PROGRESS_SAMPLE_CHARS], "translated": target[:PROGRESS_SAMPLE_CHARS]}
+                for source, target in translated.items()
+                if isinstance(target, str) and target.strip() and target != source
+            ][:PROGRESS_SAMPLES]
+            usage = LLMProviderClient.usage
+            cost = usage.get("cost") if usage.get("cost_reported") else None
             self.emit(
                 "translation_progress",
                 completed=done,
@@ -806,6 +819,8 @@ class BatchTranslator:
                 batch=number,
                 batches=len(groups),
                 requests=LLMProviderClient.request_count,
+                samples=samples,
+                cost=cost if isinstance(cost, (int, float)) and math.isfinite(cost) else None,
             )
 
         workers = min(self.concurrency, len(groups))

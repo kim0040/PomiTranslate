@@ -138,6 +138,22 @@ def test_prompt_marks_world_text_untrusted() -> None:
     assert "JSON" in prompt.splitlines()[-1]
 
 
+def test_progress_carries_short_samples() -> None:
+    batch = translator(Fake(), batch_size=10)
+    events: list[dict] = []
+    batch.progress_callback = events.append
+    long_text = "word " * 100
+    batch.translate_texts([long_text] + [f"line {i}" for i in range(14)])
+    progress = [event for event in events if event["event"] == "translation_progress"]
+    assert len(progress) == 2, progress
+    for event in progress:
+        assert 0 < len(event["samples"]) <= 3, event["samples"]
+        for sample in event["samples"]:
+            assert len(sample["source"]) <= 160 and len(sample["translated"]) <= 160
+            assert sample["translated"].startswith("T:")
+        assert event["cost"] is None, "no cost is shown when the provider reported none"
+
+
 def main() -> None:
     for test in (
         test_format_errors_stay_inside_the_budget,
@@ -146,6 +162,7 @@ def main() -> None:
         test_success_resets_the_breaker,
         test_failure_codes,
         test_prompt_marks_world_text_untrusted,
+        test_progress_carries_short_samples,
     ):
         test()
         print("PASS", test.__name__)
