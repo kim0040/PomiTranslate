@@ -392,6 +392,8 @@ const CORE_MODULES: &[&str] = &[
     "mwt/discovery.py",
     "mwt/durable.py",
     "mwt/extract.py",
+    "mwt/format_residue.py",
+    "mwt/glossary.py",
     "mwt/journal.py",
     "mwt/layout.py",
     "mwt/locking.py",
@@ -490,6 +492,7 @@ const CORE_EXCEPTIONS: &[&str] = &[
     "DiskFull",
     "ExternalPackUnavailable",
     "ExternalTargetError",
+    "GlossaryError",
     "JournalError",
     "JournalWriteFailed",
     "MinecraftWorldInUse",
@@ -510,6 +513,7 @@ const CORE_EXCEPTIONS: &[&str] = &[
     "WorldChanged",
     "WorldWriteLocked",
     "_DeadlineExceeded",
+    "_UnreadableCounter",
 ];
 
 /// Standard-library exception classes that reach the core's tracebacks with their module name.
@@ -594,32 +598,11 @@ fn module_relative(path: &str) -> String {
     }
 }
 
-/// A Python function name as it prints in a frame: identifiers (dotted for a qualified name) or one
-/// of the synthetic `<...>` names.
-fn python_function(name: &str) -> bool {
-    const SYNTHETIC: &[&str] = &[
-        "<module>",
-        "<lambda>",
-        "<listcomp>",
-        "<dictcomp>",
-        "<setcomp>",
-        "<genexpr>",
-    ];
-    SYNTHETIC.contains(&name)
-        || (!name.is_empty()
-            && name.len() <= 80
-            && name.split('.').all(|part| {
-                let mut chars = part.chars();
-                chars
-                    .next()
-                    .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            }))
-}
-
-/// `File "<path>", line N, in fn`: kept (path reduced) only when the file is one of our modules and
-/// the function name is an identifier; any other frame is `[frame]`. `None` when the line is not a
-/// frame at all (the source line printed under a frame is not one and is only counted).
+/// `File "<path>", line N, in fn`: kept (path reduced) only when the file is one of our modules, and
+/// then only its module-relative path and line number. The function name is never copied: a name is
+/// free text as far as a log is concerned (any identifier can be a credential or a world token), so it
+/// is always `[fn]`. Any frame in another file is `[frame]`. `None` when the line is not a frame at
+/// all (the source line printed under a frame is not one and is only counted).
 fn parse_frame(line: &str) -> Option<String> {
     let rest = line.strip_prefix("File \"")?;
     let (path, tail) = rest.rsplit_once("\", line ")?;
@@ -628,20 +611,18 @@ fn parse_frame(line: &str) -> Option<String> {
         return None;
     }
     let after = &tail[digits.len()..];
-    let function = match after.strip_prefix(", in ") {
-        Some(name) => Some(name.trim_end()),
-        None if after.trim().is_empty() => None,
+    let has_function = match after.strip_prefix(", in ") {
+        Some(_) => true,
+        None if after.trim().is_empty() => false,
         None => return None,
     };
     let file = module_relative(path);
-    if !CORE_MODULES.contains(&file.as_str()) || function.is_some_and(|name| !python_function(name))
-    {
+    if !CORE_MODULES.contains(&file.as_str()) {
         return Some("[frame]".to_owned());
     }
     let mut out = format!("File \"{file}\", line {digits}");
-    if let Some(function) = function {
-        out.push_str(", in ");
-        out.push_str(function);
+    if has_function {
+        out.push_str(", in [fn]");
     }
     Some(out)
 }

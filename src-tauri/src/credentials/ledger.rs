@@ -13,15 +13,22 @@
 //! * `Uncertain` - an entry may exist but the app cannot say it wrote it: found in vault metadata or
 //!   in a damaged copy of this record, or left by a write that could not be undone.
 //!
-//! A record that is missing next to a vault, or damaged, is *unknown*, not empty: the damaged file is
-//! kept (never deleted), what can be recovered from it, from earlier damaged copies and from the
-//! vault's metadata is merged in as `Uncertain`, and the `unreconciled` marker is set. The marker
-//! stays until a reset has looked at every provider. Nothing here ever lets a lost record turn into
-//! "nothing to delete".
+//! A record that is missing next to a vault, or damaged, or that fails the integrity checks below, is
+//! *unknown*, not empty: the file is kept (never deleted), what can be recovered from it, from
+//! earlier copies, from the vault and from the archived vaults is merged in as `Uncertain`, and the
+//! `unreconciled` marker is set unless that evidence covers the history. The marker is durable: it is
+//! cleared only by a reconciliation that covers the history (made when the loss is found, from the
+//! archived vault metadata) or by the person's explicit acknowledgement. A fresh or replacement vault
+//! is never a witness. Nothing here ever lets a lost record turn into "nothing to delete".
+//!
+//! The record decides which OS entries may be deleted, so it is protected like the vault: created
+//! owner-only (0600; a current-user-only ACL on Windows), opened without following links, and read
+//! only when it is a regular single-link file owned by the user that nobody else can write. A record
+//! that fails those checks is not trusted (`Read::Damaged`).
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, Write},
+    io::{self, Read as _, Write},
     path::{Path, PathBuf},
 };
 
@@ -32,6 +39,8 @@ use crate::error::{code, IpcError};
 
 pub const FILE_NAME: &str = "keychain-ledger.json";
 const VERSION: u32 = 2;
+/// The record is a few hundred bytes; a bigger file is not one.
+const MAX_BYTES: u64 = 64 * 1024;
 
 /// What an entry was before an OS write started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,8 +81,25 @@ impl Previous {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Record {
     entries: BTreeMap<&'static str, Ownership>,
-    /// The record was lost or damaged and no reset has looked at every provider since.
+    /// The record was lost, damaged or untrusted and nothing has covered the history since: any
+    /// provider may have an OS entry whose origin is unknown. Durable until the person
+    /// acknowledges it or a reconciliation covers the history.
     pub unreconciled: bool,
+    /// When (ms since the epoch) the person last acknowledged an unknown history.
+    pub acknowledged_at: Option<u64>,
+}
+
+/// What the app may do about the OS entry of one provider. The single decision both deleting one key
+/// and purging go by: only a confirmed `Owned` record authorizes an OS delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Authority {
+    /// Confirmed written by the app: it may delete the entry.
+    Owned,
+    /// An entry may exist and the app cannot say it made it (pending, uncertain, or no record while
+    /// the history is unknown): no OS call, report `KEYCHAIN_UNCONFIRMED`.
+    Unconfirmed,
+    /// The history is known and holds no entry of the app for this provider: nothing to delete.
+    NotOurs,
 }
 
 impl Record {
@@ -99,9 +125,24 @@ impl Record {
         self.entries.remove(provider);
     }
 
+    /// The one ownership decision. A keychain mode in the vault is never ownership by itself: it
+    /// reaches here only as `Uncertain`.
+    pub fn authority(&self, provider: &str) -> Authority {
+        match self.get(provider) {
+            Some(Ownership::Owned) => Authority::Owned,
+            Some(Ownership::Pending(_) | Ownership::Uncertain) => Authority::Unconfirmed,
+            None if self.unreconciled => Authority::Unconfirmed,
+            None => Authority::NotOurs,
+        }
+    }
+
     /// The entries the app wrote and may delete.
     pub fn owned(&self) -> Vec<&'static str> {
-        self.with_state(|state| state == Ownership::Owned)
+        PROVIDERS
+            .iter()
+            .copied()
+            .filter(|provider| self.authority(provider) == Authority::Owned)
+            .collect()
     }
 
     /// Entries that may exist but are not established as the app's: reported, never deleted.
@@ -146,6 +187,8 @@ struct Document {
     v: u32,
     #[serde(default)]
     unreconciled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acknowledged_at: Option<u64>,
     /// Version 2.
     #[serde(default)]
     entries: BTreeMap<String, Entry>,
@@ -191,6 +234,7 @@ fn parse(bytes: &[u8]) -> Option<Record> {
     let document: Document = serde_json::from_slice(bytes).ok()?;
     let mut record = Record {
         unreconciled: document.unreconciled,
+        acknowledged_at: document.acknowledged_at,
         ..Record::default()
     };
     match document.v {
@@ -250,19 +294,48 @@ impl Ledger {
         fs::symlink_metadata(&self.path).is_ok()
     }
 
+    /// The folder the record lives in (the application data folder).
+    pub fn root(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
+    }
+
+    /// Read the record. It is trusted only when it is a regular, single-link file owned by the user
+    /// that nobody else can write (checked on the handle that is read, opened without following a
+    /// link). Anything else that is there is `Damaged`: the caller sets it aside and enters the
+    /// unknown state. Content is read from an untrusted file only to find provider names, and only
+    /// if it is a small regular file.
     pub fn read(&self) -> Result<Read, IpcError> {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
+        let metadata = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Read::Missing),
-            // A file that cannot even be read is not known to be damaged or fine.
+            // A file that cannot even be looked at is not known to be damaged or fine.
             Err(_) => return Err(unwritable()),
         };
-        Ok(match parse(&bytes) {
-            Some(record) => Read::Present(record),
-            None => Read::Damaged {
-                recovered: recover(&bytes),
-            },
-        })
+        let trusted = match private_fs::open(&self.path, false) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                match file.take(MAX_BYTES + 1).read_to_end(&mut bytes) {
+                    Ok(_) if bytes.len() as u64 <= MAX_BYTES => Some(bytes),
+                    _ => None,
+                }
+            }
+            Err(_) => None,
+        };
+        if let Some(bytes) = trusted {
+            return Ok(match parse(&bytes) {
+                Some(record) => Read::Present(record),
+                None => Read::Damaged {
+                    recovered: recover(&bytes),
+                },
+            });
+        }
+        // Not trusted. Names are looked for only in a plain small file.
+        let recovered = if metadata.is_file() && metadata.len() <= MAX_BYTES {
+            fs::read(&self.path).map_or_else(|_| Vec::new(), |bytes| recover(&bytes))
+        } else {
+            Vec::new()
+        };
+        Ok(Read::Damaged { recovered })
     }
 
     /// Replace the record, durably (written and flushed aside, then renamed over).
@@ -270,6 +343,7 @@ impl Ledger {
         let document = Document {
             v: VERSION,
             unreconciled: record.unreconciled,
+            acknowledged_at: record.acknowledged_at,
             entries: record
                 .entries
                 .iter()
@@ -288,8 +362,17 @@ impl Ledger {
         };
         let bytes = serde_json::to_vec(&document).map_err(|_| unwritable())?;
         let temporary = self.path.with_file_name(format!("{FILE_NAME}.new"));
+        // A leftover side file from an interrupted save holds nothing that matters (the record is
+        // only ever renamed over after this write) and is replaced, never reopened or trusted.
+        match fs::symlink_metadata(&temporary) {
+            Ok(_) => fs::remove_file(&temporary).map_err(|_| unwritable())?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(unwritable()),
+        }
         {
-            let mut file = fs::File::create(&temporary).map_err(|_| unwritable())?;
+            // Owner-only from the moment it exists (0600; current-user-only ACL on Windows), never
+            // following a link, and checked on the handle: this file is the deletion authority.
+            let mut file = private_fs::open(&temporary, true).map_err(|_| unwritable())?;
             file.write_all(&bytes)
                 .and_then(|()| file.sync_all())
                 .map_err(|_| unwritable())?;

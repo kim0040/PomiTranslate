@@ -312,6 +312,10 @@ fn requests_that_run_as_jobs_are_exactly_the_ones_that_write_or_scan() {
         "review.draft.get",
         "review.draft.set",
         "review.draft.clear",
+        "glossary.get",
+        "glossary.set",
+        "glossary.import",
+        "glossary.export",
         "unknown.thing",
     ] {
         assert_eq!(lane(kind), Lane::Query, "{kind}");
@@ -796,6 +800,28 @@ async fn the_deadline_covers_model_lists_and_connection_checks_but_not_world_job
     assert!(job.is_ok(), "a world job has no blanket timeout: {job:?}");
 }
 
+#[test]
+fn the_query_deadline_is_per_request_type_and_only_prompt_enhance_gets_the_long_one() {
+    assert_eq!(query_deadline("prompt.enhance"), Duration::from_secs(630));
+    // The saved provider timeout can be 600 s: the deadline must not cut a legitimate generation.
+    assert!(query_deadline("prompt.enhance") > Duration::from_secs(600));
+    for kind in [
+        "models.list",
+        "provider.usage",
+        "settings.get",
+        "candidates.page",
+        "glossary.get",
+        "unknown.thing",
+        "",
+    ] {
+        assert_eq!(query_deadline(kind), Duration::from_secs(120), "{kind:?}");
+    }
+    // World jobs have no deadline at all (the lane check), so the type table is not consulted.
+    for kind in JOB_REQUESTS {
+        assert_eq!(lane(kind), Lane::Job, "{kind}");
+    }
+}
+
 #[tokio::test]
 async fn a_same_id_unknown_event_before_the_real_result_does_not_kill_the_child() {
     let (state, dir) = (ActiveSidecar::default(), scratch());
@@ -912,7 +938,7 @@ async fn a_core_writing_every_kind_of_stderr_leaves_only_known_shapes_in_the_log
     }
     for kept in [
         "Traceback (most recent call last):",
-        "File \"mwt/extract.py\", line 12, in run",
+        "File \"mwt/extract.py\", line 12, in [fn]",
         "ValueError: [message omitted]",
         "[pomi] [message omitted]",
         "request=scan.start",

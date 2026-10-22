@@ -45,6 +45,9 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "settings.import_legacy",
     "settings.set",
     "credentials.delete",
+    // Handled by the shell, never sent to the core: the person's word that they removed any
+    // PomiTranslate entries from the system keychain themselves (clears the unknown-history marker).
+    "credentials.acknowledgeUnknownKeychain",
     "worlds.list",
     "worlds.remember",
     "worlds.forget",
@@ -71,6 +74,12 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "review.draft.get",
     "review.draft.set",
     "review.draft.clear",
+    // The glossary (global and per world) is read and written by the core itself; import and
+    // export move a file the person chose. All four are short requests, none carries a key.
+    "glossary.get",
+    "glossary.set",
+    "glossary.import",
+    "glossary.export",
 ];
 
 /// Requests whose payload gets `credentialOwner: rust`, so the sidecar never touches the keychain.
@@ -121,6 +130,17 @@ fn credential_unavailable(error: IpcError) -> IpcError {
         IpcError::new(code::CREDENTIAL_UNAVAILABLE, error.message).with_detail(error.code)
     } else {
         error
+    }
+}
+
+/// What `credentials.delete` answers with when the key could not be removed. "Could not confirm" is
+/// its own answer, not an unavailable store: the OS entry was left alone because the app cannot say it
+/// made it, and the page tells the person so.
+fn delete_error(error: IpcError) -> IpcError {
+    if error.code == code::KEYCHAIN_UNCONFIRMED {
+        error
+    } else {
+        credential_unavailable(error)
     }
 }
 
@@ -384,12 +404,25 @@ async fn handle_request(
             credentials.delete(root, &target)
         })
         .await
-        .map_err(credential_unavailable)?;
+        .map_err(delete_error)?;
         return Ok(serde_json::json!({
             "v": 1,
             "id": id,
             "type": "response.ok",
             "payload": {"provider": provider, "deleted": true, "apiKeyStored": false}
+        }));
+    }
+    if kind == "credentials.acknowledgeUnknownKeychain" {
+        let cleared = vault(app, |credentials, root| {
+            credentials.acknowledge_unknown(root)
+        })
+        .await
+        .map_err(credential_unavailable)?;
+        return Ok(serde_json::json!({
+            "v": 1,
+            "id": id,
+            "type": "response.ok",
+            "payload": {"acknowledged": cleared}
         }));
     }
     if CREDENTIAL_OWNER_REQUESTS.contains(&kind.as_str()) {
@@ -875,7 +908,12 @@ mod tests {
             "review.draft.get",
             "review.draft.set",
             "review.draft.clear",
+            "glossary.get",
+            "glossary.set",
+            "glossary.import",
+            "glossary.export",
             "credentials.delete",
+            "credentials.acknowledgeUnknownKeychain",
         ] {
             assert!(is_allowed_request(kind), "{kind} must be allowed");
         }
@@ -913,9 +951,18 @@ mod tests {
             assert_eq!(sidecar::lane(kind), sidecar::Lane::Job, "{kind}");
             assert!(is_allowed_request(kind), "{kind}");
         }
-        for kind in ["review.draft.get", "review.draft.set", "review.draft.clear"] {
+        for kind in [
+            "review.draft.get",
+            "review.draft.set",
+            "review.draft.clear",
+            "glossary.get",
+            "glossary.set",
+            "glossary.import",
+            "glossary.export",
+        ] {
             assert_eq!(sidecar::lane(kind), sidecar::Lane::Query, "{kind}");
             assert!(!KEY_INJECTED_REQUESTS.contains(&kind));
+            assert!(!CREDENTIAL_OWNER_REQUESTS.contains(&kind));
         }
     }
 
@@ -1075,7 +1122,17 @@ mod tests {
         }
         assert!(ALLOWED_REQUESTS
             .iter()
-            .all(|kind| !kind.starts_with("credentials.") || *kind == "credentials.delete"));
+            .all(|kind| !kind.starts_with("credentials.")
+                || matches!(
+                    *kind,
+                    "credentials.delete" | "credentials.acknowledgeUnknownKeychain"
+                )));
+        // The acknowledgement is answered by the shell and never reaches the core or a key.
+        let kind = "credentials.acknowledgeUnknownKeychain";
+        assert!(is_allowed_request(kind));
+        assert!(!KEY_INJECTED_REQUESTS.contains(&kind));
+        assert!(!CREDENTIAL_OWNER_REQUESTS.contains(&kind));
+        assert_eq!(sidecar::lane(kind), sidecar::Lane::Query);
     }
 
     // --- M6: the reset reports what it did, whatever failed --------------------------------------
@@ -1103,6 +1160,56 @@ mod tests {
         );
         assert!(fake.entries.lock().unwrap().is_empty());
         assert!(!dir.path().join("credentials").exists());
+    }
+
+    #[test]
+    fn an_unknown_keychain_history_keeps_keys_deleted_false_until_the_person_acknowledges_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        credentials
+            .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
+            .unwrap();
+        credentials.reset_storage(dir.path()).unwrap();
+        // The record is lost and the archived vault that could have rebuilt it is gone too.
+        fs::write(dir.path().join("keychain-ledger.json"), b"  not a record").unwrap();
+        for entry in fs::read_dir(dir.path()).unwrap().flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("credentials.broken-")
+            {
+                fs::remove_dir_all(entry.path()).unwrap();
+            }
+        }
+        for _ in 0..2 {
+            let outcome = reset_native(&credentials, dir.path(), true);
+            assert!(!outcome.keys_deleted, "{outcome:?}");
+            assert!(
+                outcome.errors.contains(&code::KEYCHAIN_UNCONFIRMED),
+                "{outcome:?}"
+            );
+            // A new vault between the resets is not a witness.
+            credentials
+                .save(dir.path(), "gemini", credentials::Mode::Keychain, KEY, None)
+                .unwrap();
+        }
+        assert!(fake.entries.lock().unwrap().contains_key("openai"));
+        // The acknowledgement clears the marker and deletes nothing.
+        assert!(credentials.acknowledge_unknown(dir.path()).unwrap());
+        assert!(fake.entries.lock().unwrap().contains_key("openai"));
+        let outcome = reset_native(&credentials, dir.path(), true);
+        assert!(outcome.keys_deleted, "{outcome:?}");
+        assert!(outcome.errors.is_empty(), "{outcome:?}");
+    }
+
+    #[test]
+    fn deleting_a_key_reports_could_not_confirm_as_its_own_code_and_other_storage_errors_as_before()
+    {
+        let unconfirmed = delete_error(IpcError::new(code::KEYCHAIN_UNCONFIRMED, "x"));
+        assert_eq!(unconfirmed.code, code::KEYCHAIN_UNCONFIRMED);
+        let failed = delete_error(IpcError::new(code::KEYCHAIN_FAILED, "x"));
+        assert_eq!(failed.code, code::CREDENTIAL_UNAVAILABLE);
+        assert_eq!(failed.detail, Some(code::KEYCHAIN_FAILED));
     }
 
     #[test]

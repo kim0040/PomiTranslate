@@ -291,7 +291,11 @@ fn delete_on_a_vault_that_cannot_be_opened_sets_it_aside_instead_of_failing() {
         b"garbage",
     )
     .unwrap();
-    vault.delete(dir.path(), "openrouter").unwrap();
+    // The vault is set aside either way. With no record and a vault that cannot say what it wrote,
+    // the history is unknown: the answer says an OS entry could not be ruled out (nothing is sent to
+    // the OS store).
+    let error = vault.delete(dir.path(), "openrouter").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
     assert_eq!(vault.state(dir.path(), "openrouter").stored, Some(false));
     assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
 }
@@ -311,7 +315,9 @@ fn delete_and_reset_work_when_the_permission_check_fails() {
         vault.state(dir.path(), "openrouter").error,
         Some(code::VAULT_PERMISSIONS)
     );
-    vault.delete(dir.path(), "openrouter").unwrap();
+    // Set aside either way; the unknown history is reported (no OS call was made).
+    let error = vault.delete(dir.path(), "openrouter").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
     assert!(vault.state(dir.path(), "openrouter").error.is_none());
 }
 
@@ -960,9 +966,10 @@ fn a_reset_that_cannot_write_the_record_stops_before_the_vault_is_moved() {
     vault
         .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
         .unwrap();
-    // A directory where the record belongs: it can neither be read nor replaced.
+    // The record is gone and its side file cannot be replaced (a directory sits there), so the
+    // rebuilt record cannot be written.
     fs::remove_file(dir.path().join(ledger::FILE_NAME)).unwrap();
-    fs::create_dir(dir.path().join(ledger::FILE_NAME)).unwrap();
+    fs::create_dir(dir.path().join(format!("{}.new", ledger::FILE_NAME))).unwrap();
     assert!(vault.reset_storage(dir.path()).is_err());
     assert!(
         dir.path().join("credentials/credentials.sqlite").exists(),
@@ -984,7 +991,8 @@ fn deleting_one_key_never_deletes_an_entry_the_record_cannot_vouch_for() {
         .lock()
         .unwrap()
         .insert("openai".into(), "not-known-to-be-ours".into());
-    vault.delete(dir.path(), "openai").unwrap();
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
     assert!(fake.entries.lock().unwrap().contains_key("openai"));
 }
 
@@ -1195,4 +1203,399 @@ fn a_directory_swapped_for_a_link_after_the_check_cannot_be_renamed_from_under_t
         assert!(dir.is_dir(), "the pinned directory stayed where it was");
         pin.confirm(&dir).unwrap();
     }
+}
+
+// --- F2: one ownership decision for deleting a key and for a purge ----------------------------
+
+use std::sync::atomic::Ordering;
+
+fn put_foreign(fake: &Fake, provider: &str) {
+    fake.entries
+        .lock()
+        .unwrap()
+        .insert(provider.into(), "foreign-original".into());
+}
+
+fn write_record(root: &Path, provider: &'static str, state: Ownership) {
+    let ledger = Ledger::new(root);
+    let mut record = match ledger.read().unwrap() {
+        ledger::Read::Present(record) => record,
+        _ => Record::default(),
+    };
+    record.set(provider, state);
+    ledger.save(&record).unwrap();
+}
+
+#[test]
+fn a_keychain_mode_alone_is_never_ownership_so_a_foreign_entry_is_not_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    put_foreign(&fake, "openai");
+    // Keychain mode chosen with no key supplied and none to move: nothing is written to the OS.
+    let saved = vault
+        .save(dir.path(), "openai", Mode::Keychain, "", None)
+        .unwrap();
+    assert!(!saved.stored);
+    let calls = fake.calls.load(Ordering::SeqCst);
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        calls,
+        "the OS store was not reached"
+    );
+    assert_eq!(
+        fake.entries.lock().unwrap().get("openai").unwrap(),
+        "foreign-original"
+    );
+    // A purge makes the same decision.
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(!purged.complete());
+    assert_eq!(purged.keychain_uncertain, ["openai"]);
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+}
+
+#[test]
+fn a_pending_entry_is_never_deleted_and_reports_unconfirmed_with_a_readable_unrelated_vault() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, "local", None)
+        .unwrap();
+    put_foreign(&fake, "openai");
+    write_record(dir.path(), "openai", Ownership::Pending(Previous::Absent));
+    let calls = fake.calls.load(Ordering::SeqCst);
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+    // The unrelated provider is unaffected, and the pending record is still there.
+    assert_eq!(
+        vault.state(dir.path(), "gemini").stored,
+        Some(true),
+        "the other key was not touched"
+    );
+    let purged = vault.purge(dir.path()).unwrap();
+    assert_eq!(purged.keychain_uncertain, ["openai"], "{purged:?}");
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+}
+
+#[test]
+fn a_pending_entry_reports_unconfirmed_with_no_vault_and_with_an_unreadable_one_too() {
+    // Absent vault.
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    put_foreign(&fake, "openai");
+    write_record(dir.path(), "openai", Ownership::Pending(Previous::Absent));
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+    // Unreadable vault (it is set aside, the entry still is not touched).
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, "local", None)
+        .unwrap();
+    put_foreign(&fake, "openai");
+    write_record(dir.path(), "openai", Ownership::Pending(Previous::Absent));
+    break_the_database(dir.path());
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+    assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
+}
+
+#[test]
+fn only_a_confirmed_owned_record_authorizes_an_os_delete_of_one_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    put_foreign(&fake, "gemini");
+    vault.delete(dir.path(), "openai").unwrap();
+    assert!(!fake.entries.lock().unwrap().contains_key("openai"));
+    // A provider the (known) history holds nothing for: nothing to delete, nothing claimed.
+    vault.delete(dir.path(), "gemini").unwrap();
+    assert!(fake.entries.lock().unwrap().contains_key("gemini"));
+}
+
+// --- F3: the record is owner-only, opened without following links, and validated -------------
+
+#[test]
+fn the_record_is_created_owner_only_and_a_stale_side_file_does_not_block_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, _fake) = with_fake();
+    // An interrupted save left its side file, with permissions nobody checked.
+    fs::write(
+        dir.path().join(format!("{}.new", ledger::FILE_NAME)),
+        b"stale",
+    )
+    .unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    let path = dir.path().join(ledger::FILE_NAME);
+    private_fs::check(&path, false).expect("owner-only record");
+    assert_eq!(owned_in_record(dir.path()), ["openai"]);
+    assert!(!dir
+        .path()
+        .join(format!("{}.new", ledger::FILE_NAME))
+        .exists());
+}
+
+#[test]
+fn a_record_that_is_not_a_regular_file_is_set_aside_and_the_history_becomes_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, SECRET, None)
+        .unwrap();
+    put_foreign(&fake, "openai");
+    write_record(dir.path(), "openai", Ownership::Owned);
+    // The record is replaced by a directory (a link would behave the same way: never followed).
+    fs::remove_file(dir.path().join(ledger::FILE_NAME)).unwrap();
+    fs::create_dir(dir.path().join(ledger::FILE_NAME)).unwrap();
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(purged.keychain_unverified, "{purged:?}");
+    assert!(!purged.complete(), "{purged:?}");
+    assert!(
+        fake.entries.lock().unwrap().contains_key("openai"),
+        "an entry is never deleted on the word of an untrusted record"
+    );
+    assert!(!broken_entries(dir.path(), "keychain-ledger.json.broken-").is_empty());
+}
+
+/// A record written by anything but this app has the default permissions of the folder (an
+/// inherited access list on Windows), not the owner-only ones, so it is not trusted.
+#[test]
+fn a_record_this_app_did_not_create_is_not_trusted_and_cannot_forge_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, SECRET, None)
+        .unwrap();
+    put_foreign(&fake, "openai");
+    fs::write(
+        dir.path().join(ledger::FILE_NAME),
+        br#"{"v":2,"entries":{"openai":{"state":"owned"}}}"#,
+    )
+    .unwrap();
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(purged.keychain_unverified, "{purged:?}");
+    assert!(!purged.complete(), "{purged:?}");
+    assert!(
+        fake.entries.lock().unwrap().contains_key("openai"),
+        "the forged record did not authorize a delete"
+    );
+}
+
+/// A record anyone could have written: the file is there with a forged `owned`, but it was not
+/// created by this app, so it fails the owner-only checks wherever they are enforced.
+#[cfg(unix)]
+#[test]
+fn a_group_writable_record_is_not_trusted_and_cannot_forge_ownership() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, SECRET, None)
+        .unwrap();
+    put_foreign(&fake, "openai");
+    let path = dir.path().join(ledger::FILE_NAME);
+    fs::write(&path, br#"{"v":2,"entries":{"openai":{"state":"owned"}}}"#).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(!purged.complete(), "{purged:?}");
+    assert!(
+        fake.entries.lock().unwrap().contains_key("openai"),
+        "the forged record did not authorize a delete"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_record_with_a_second_name_is_not_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "gemini", Mode::Local, SECRET, None)
+        .unwrap();
+    put_foreign(&fake, "openai");
+    write_record(dir.path(), "openai", Ownership::Owned);
+    let path = dir.path().join(ledger::FILE_NAME);
+    fs::hard_link(&path, dir.path().join("second-name")).unwrap();
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(!purged.complete(), "{purged:?}");
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+}
+
+// --- F4: an unknown history stays unknown until reconciled from the archives or acknowledged --
+
+fn archives(root: &Path) -> Vec<PathBuf> {
+    broken_entries(root, "credentials.broken-")
+}
+
+/// save owned openai, reset the storage (the old vault becomes an archive), then lose the record.
+fn lose_the_record_after_a_reset(root: &Path, vault: &Credentials) {
+    vault
+        .save(root, "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    vault.reset_storage(root).unwrap();
+    corrupt_record(root, b"\0\0 not a record at all");
+}
+
+#[test]
+fn a_lost_record_is_reconciled_from_the_archived_vault_when_that_covers_the_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    lose_the_record_after_a_reset(dir.path(), &vault);
+    assert_eq!(archives(dir.path()).len(), 1);
+    // The archive of the old vault knows openai was written by the app.
+    vault
+        .save(dir.path(), "gemini", Mode::Keychain, SECRET, None)
+        .unwrap();
+    let mut owned = owned_in_record(dir.path());
+    owned.sort_unstable();
+    assert_eq!(owned, ["gemini", "openai"]);
+    let purged = vault.purge(dir.path()).unwrap();
+    assert!(purged.complete(), "{purged:?}");
+    assert!(fake.entries.lock().unwrap().is_empty());
+}
+
+#[test]
+fn reviewer_sequence_one_a_fresh_vault_after_a_lost_record_does_not_clear_the_unknown_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    lose_the_record_after_a_reset(dir.path(), &vault);
+    // The archive that could have said what the keychain held is gone.
+    for archive in archives(dir.path()) {
+        fs::remove_dir_all(archive).unwrap();
+    }
+    vault
+        .save(dir.path(), "gemini", Mode::Keychain, SECRET, None)
+        .unwrap();
+    let purged = vault.purge(dir.path()).unwrap();
+    assert_eq!(purged.keychain_deleted, ["gemini"], "{purged:?}");
+    assert!(purged.keychain_unverified, "{purged:?}");
+    assert!(!purged.complete(), "reported complete with openai alive");
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+    assert!(
+        Ledger::new(dir.path()).exists(),
+        "the marker is durable: it outlives the purge"
+    );
+}
+
+#[test]
+fn reviewer_sequence_two_a_save_into_a_fresh_vault_between_purges_does_not_clear_it_either() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    lose_the_record_after_a_reset(dir.path(), &vault);
+    // The archived vault cannot be read, so it cannot cover the history.
+    for archive in archives(dir.path()) {
+        fs::write(
+            archive.join("credentials.sqlite"),
+            b"not a database, just bytes",
+        )
+        .unwrap();
+    }
+    let first = vault.purge(dir.path()).unwrap();
+    assert!(first.keychain_unverified && !first.complete(), "{first:?}");
+    vault
+        .save(dir.path(), "gemini", Mode::Keychain, SECRET, None)
+        .unwrap();
+    for _ in 0..2 {
+        let last = vault.purge(dir.path()).unwrap();
+        assert!(
+            !last.complete(),
+            "marker cleared by a fresh vault: {last:?}"
+        );
+        assert!(last.keychain_unverified);
+        assert!(
+            fake.entries.lock().unwrap().contains_key("openai"),
+            "openai was never deleted on a guess"
+        );
+        // Saving again and purging again changes nothing.
+        vault
+            .save(dir.path(), "gemini", Mode::Keychain, SECRET, None)
+            .unwrap();
+    }
+}
+
+#[test]
+fn an_unknown_history_is_cleared_only_by_the_acknowledgement_which_deletes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    lose_the_record_after_a_reset(dir.path(), &vault);
+    for archive in archives(dir.path()) {
+        fs::remove_dir_all(archive).unwrap();
+    }
+    let first = vault.purge(dir.path()).unwrap();
+    assert!(first.keychain_unverified && !first.complete());
+    // The saved marker is cleared once; a second acknowledgement finds nothing to clear.
+    let before = fake.calls.load(Ordering::SeqCst);
+    assert!(vault.acknowledge_unknown(dir.path()).unwrap());
+    assert!(!vault.acknowledge_unknown(dir.path()).unwrap());
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        before,
+        "the acknowledgement never reaches the OS store"
+    );
+    assert!(fake.entries.lock().unwrap().contains_key("openai"));
+    match Ledger::new(dir.path()).read().unwrap() {
+        ledger::Read::Present(record) => {
+            assert!(!record.unreconciled);
+            assert!(record.acknowledged_at.is_some(), "the time is recorded");
+        }
+        _ => panic!("the record stays"),
+    }
+    let after = vault.purge(dir.path()).unwrap();
+    assert!(after.complete(), "{after:?}");
+}
+
+#[test]
+fn acknowledging_changes_nothing_when_there_is_no_saved_marker_and_keeps_every_other_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    assert!(!vault.acknowledge_unknown(dir.path()).unwrap(), "no record");
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    write_record(dir.path(), "gemini", Ownership::Pending(Previous::Absent));
+    assert!(!vault.acknowledge_unknown(dir.path()).unwrap());
+    // A saved marker is cleared, but a pending entry is still reported and never deleted.
+    let ledger = Ledger::new(dir.path());
+    let ledger::Read::Present(mut record) = ledger.read().unwrap() else {
+        panic!("record")
+    };
+    record.unreconciled = true;
+    ledger.save(&record).unwrap();
+    assert!(vault.acknowledge_unknown(dir.path()).unwrap());
+    let purged = vault.purge(dir.path()).unwrap();
+    assert_eq!(purged.keychain_deleted, ["openai"]);
+    assert_eq!(purged.keychain_uncertain, ["gemini"]);
+    assert!(!purged.keychain_unverified);
+    assert!(!fake.entries.lock().unwrap().contains_key("openai"));
+}
+
+#[test]
+fn while_the_history_is_unknown_a_provider_without_a_record_is_unconfirmed_and_an_owned_one_is_not()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    put_foreign(&fake, "gemini");
+    let ledger = Ledger::new(dir.path());
+    let ledger::Read::Present(mut record) = ledger.read().unwrap() else {
+        panic!("record")
+    };
+    record.unreconciled = true;
+    ledger.save(&record).unwrap();
+    let error = vault.delete(dir.path(), "gemini").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert!(fake.entries.lock().unwrap().contains_key("gemini"));
+    vault.delete(dir.path(), "openai").unwrap();
+    assert!(!fake.entries.lock().unwrap().contains_key("openai"));
 }
