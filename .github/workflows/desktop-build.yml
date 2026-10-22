@@ -37,7 +37,7 @@ jobs:
           entries = [
               {"name": "Linux x64", "os": "ubuntu-24.04", "bundles": "appimage,deb",
                "artifact": "src-tauri/target/release/bundle/appimage/*"},
-              {"name": "macOS", "os": "macos-14", "bundles": "app,dmg",
+              {"name": "macOS", "os": "macos-15", "bundles": "app,dmg",
                "artifact": "src-tauri/target/release/bundle/macos/*.app\nsrc-tauri/target/release/bundle/macos/*.tar.gz*\nsrc-tauri/target/release/bundle/dmg/*.dmg"},
               {"name": "Windows x64", "os": "windows-2025", "bundles": "nsis",
                "artifact": "src-tauri/target/release/bundle/nsis/*"},
