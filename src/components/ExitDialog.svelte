@@ -5,7 +5,8 @@
 
   // The one question the desktop shell asks before the app ends (window close, Alt+F4, Quit, Cmd+Q).
   // A running job and unsaved settings are different questions: a job offers "cancel and quit" or
-  // "keep working"; unsaved settings offer save, discard or stay.
+  // "keep working"; unsaved settings offer save, discard or stay. An update that restarts the app
+  // asks the settings question in its own words (reason "update"): going on lets the install finish.
   const prompt = $derived(app.exitPrompt);
   let working = $state(false);
 
@@ -21,11 +22,21 @@
       <p role="status" aria-live="polite">{t('exit.waitingBody')}</p>
     </Dialog>
   {:else if prompt.phase === 'stuck'}
-    <Dialog showClose={false} title={t('exit.stuckTitle')} tone="danger" onClose={() => app.exitStay()}>
+    <!-- Closing this dialog with Escape means "keep waiting": the wait is over, so nothing else could carry on. -->
+    <Dialog showClose={false} title={t('exit.stuckTitle')} tone="danger" onClose={() => run(() => app.exitKeepWaiting())}>
       <p>{t('exit.stuckBody')}</p>
       {#snippet actions()}
-        <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.exitStay()}>{t('exit.keepWaiting')}</button>
+        <button type="button" class="btn btn-secondary" data-autofocus disabled={working} onclick={() => run(() => app.exitKeepWaiting())}>{t('exit.keepWaiting')}</button>
         <button type="button" class="btn btn-danger-solid" disabled={working} onclick={() => run(() => app.exitNow())}>{t('exit.quitNow')}</button>
+      {/snippet}
+    </Dialog>
+  {:else if prompt.reason === 'update'}
+    <Dialog showClose={false} title={t('exit.updateTitle')} onClose={() => app.exitStay()}>
+      <p>{t('exit.updateBody')}</p>
+      {#snippet actions()}
+        <button type="button" class="btn btn-quiet" onclick={() => app.exitStay()}>{t('common.cancel')}</button>
+        <button type="button" class="btn btn-secondary" disabled={working} onclick={() => run(() => app.exitQuit())}>{t('exit.updateWithoutSaving')}</button>
+        <button type="button" class="btn btn-primary" data-autofocus disabled={working} onclick={() => run(() => app.exitSaveAndQuit())}>{t('exit.updateSave')}</button>
       {/snippet}
     </Dialog>
   {:else if prompt.job}

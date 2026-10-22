@@ -2,6 +2,9 @@ import type { ProgressEvent } from './api';
 
 /** The last few sentences a run translated, newest last, for the live feed on the run screen. */
 export const SAMPLE_LIMIT = 5;
+/** What one progress event may add, and how long each side of a sample may be (the core cuts them the same way). */
+export const EVENT_SAMPLE_LIMIT = 3;
+export const SAMPLE_CHARS = 160;
 export type ProgressSample = { source: string; translated: string };
 
 export type JobProgress = {
@@ -80,9 +83,13 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
       next.requests = event.requests ?? next.requests;
       next.retry = null;
       if (!next.translateStartedAt) next.translateStartedAt = now;
+      // null means the provider reported no cost: nothing is shown, and it never turns into 0.
       if (typeof event.cost === 'number' && Number.isFinite(event.cost) && event.cost >= 0) next.cost = event.cost;
-      if (event.samples?.length) {
-        const fresh = event.samples.filter((item) => typeof item?.source === 'string' && typeof item?.translated === 'string');
+      if (Array.isArray(event.samples) && event.samples.length) {
+        const fresh = event.samples
+          .filter((item) => typeof item?.source === 'string' && typeof item?.translated === 'string')
+          .slice(0, EVENT_SAMPLE_LIMIT)
+          .map((item) => ({ source: item.source.slice(0, SAMPLE_CHARS), translated: item.translated.slice(0, SAMPLE_CHARS) }));
         next.samples = [...next.samples, ...fresh].slice(-SAMPLE_LIMIT);
       } else if (typeof event.source === 'string' && typeof event.translated === 'string') {
         next.samples = [...next.samples, { source: event.source, translated: event.translated }].slice(-SAMPLE_LIMIT);

@@ -33,7 +33,10 @@
   const errorText = $derived.by(() => {
     if (!app.updateError) return '';
     const key = `update.error.${app.updateError}`;
-    return hasMessage(key) ? t(key as MessageKey) : t('update.error.unknown');
+    if (hasMessage(key)) return t(key as MessageKey);
+    // The install can also be refused by the shell for a reason that is not about updates (the core's end is unconfirmed).
+    const shellKey = `error.${app.updateError}`;
+    return hasMessage(shellKey) ? t(shellKey as MessageKey) : t('update.error.unknown');
   });
   const percent = $derived(app.updateProgress?.total ? `${Math.round((app.updateProgress.downloaded / app.updateProgress.total) * 100)}%`
     : app.updateProgress ? formatBytes(app.updateProgress.downloaded, app.locale) : '');

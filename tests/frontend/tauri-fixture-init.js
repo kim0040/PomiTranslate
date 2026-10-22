@@ -57,9 +57,13 @@
     appBytes: 123456789, appBytesApproximate: new URLSearchParams(location.search).get('scenario') === 'backups-many', lastCopyIds: lastCopyIds()
   });
   // Interrupted jobs the core lists on bootstrap (?scenario=interrupted).
-  const interruptedJobs = () => ((['interrupted', 'interrupted-partial'].includes(scenario()) || (scenario() === 'recovery-required' && sessionStorage.getItem('pomi.fixture.rr') === 'true')) && sessionStorage.getItem('pomi.fixture.recovered') !== 'true' ? [
+  const recoveryMode = () => new URLSearchParams(location.search).get('recovery');
+  const undoneResume = () => sessionStorage.getItem('pomi.fixture.undone') === 'true';
+  const interruptedJobs = () => (undoneResume() ? [
+    { jobId: 'job-earlier', kind: 'translate', worldPath: worldDir, worldName: 'Roguefire', createdAt: '2026-09-29T09:12:00+09:00', unitsTotal: 69, unitsVerified: 30, unitsUnknown: 0, needsAttention: true, legacy: false, state: 'partial', blocking: true }
+  ] : ((['interrupted', 'interrupted-partial'].includes(scenario()) || (scenario() === 'recovery-required' && sessionStorage.getItem('pomi.fixture.rr') === 'true')) && sessionStorage.getItem('pomi.fixture.recovered') !== 'true' ? [
     { jobId: 'job-interrupted-1', kind: 'translate', worldPath: worldDir, worldName: 'Roguefire', createdAt: '2026-09-30T09:12:00+09:00', unitsTotal: 69, unitsVerified: 41, unitsUnknown: 3, needsAttention: true, legacy: false, state: scenario() === 'interrupted-partial' ? 'partial' : 'committing', blocking: true }
-  ] : []);
+  ] : []));
   const drafts = JSON.parse(sessionStorage.getItem('pomi.fixture.drafts') || '{}');
   const saveDrafts = () => sessionStorage.setItem('pomi.fixture.drafts', JSON.stringify(drafts));
   const credentialModes = new Map();
@@ -70,6 +74,10 @@
     max_batch_retries: 3, concurrency: 4, resource_pack_enabled: false,
     skip_target_language_text: true, ui_language: previewLocale, last_world_dir: worldDir
   };
+  // ?provider=custom: a Custom endpoint. ?key=unbound: its saved key predates address binding, so the
+  // shell refuses it (CREDENTIAL_ENDPOINT_UNBOUND) until a key is typed again.
+  if (new URLSearchParams(location.search).get('provider') === 'custom') Object.assign(settings, { provider: 'custom', base_url: 'https://llm.example/v1', model: 'custom-model' });
+  const keyUnbound = () => new URLSearchParams(location.search).get('key') === 'unbound' && sessionStorage.getItem('pomi.fixture.bound') !== 'true';
   // A fresh install: no model chosen and no key saved yet.
   const fresh = new URLSearchParams(location.search).get('fresh') === '1';
   if (fresh) Object.assign(settings, { provider: 'openai', model: '' });
@@ -231,7 +239,7 @@
         if (key !== 'apiKey' && key !== 'credentialMode') settings[aliases[key] || key] = value;
       }
       credentialModes.set(body.provider, body.credentialMode || 'local');
-      if (body.apiKey) freshKeySaved = true;
+      if (body.apiKey) { freshKeySaved = true; sessionStorage.setItem('pomi.fixture.bound', 'true'); (window.__pomiKeySaves ||= []).push(body.provider); }
       return ok(request, { settings: { ...settings }, apiKeyStored: !fresh || freshKeySaved, credentialMode: body.credentialMode || 'local' });
     }
     if (type === 'prefs.set') {
@@ -297,6 +305,18 @@
       (window.__pomiRecoveries ||= []).push({ jobId: body.jobId, mode: body.mode, ...(body.acceptConflicts ? { acceptConflicts: true } : {}) });
       setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'recovery.progress', payload: { event: 'recovery_progress', phase: 'recovery', done: 20, total: 69 } }), 40);
       await new Promise((resolve) => setTimeout(resolve, 250));
+      // ?recovery=undone-resume: the named job was an unpublished resume, so undoing it lists the earlier job again.
+      if (recoveryMode() === 'undone-resume') {
+        sessionStorage.setItem('pomi.fixture.undone', 'true');
+        return ok(request, { jobId: body.jobId, mode: body.mode, state: 'rolled_back', settledBy: 'unpublished_continuation', restoredFiles: 0, keptFiles: 0, conflicts: [], quarantineDir: null });
+      }
+      // ?recovery=quarantine-failed: moving the conflicts aside failed (full disk), so the job stays open.
+      if (recoveryMode() === 'quarantine-failed') {
+        return ok(request, {
+          jobId: body.jobId, mode: body.mode, state: 'recovery_conflict', errorCode: 'DISK_FULL', restoredFiles: 0, keptFiles: 0,
+          conflicts: [{ path: 'region/r.0.0.mca', rootKind: 'world', code: 'UNIT_INCONSISTENT' }], quarantineDir: '/Users/fixture/quarantine/job-interrupted-1'
+        });
+      }
       sessionStorage.setItem('pomi.fixture.recovered', 'true');
       const conflicts = new URLSearchParams(location.search).get('conflict') === '1' && !body.acceptConflicts
         ? [{ path: 'region/r.0.0.mca', rootKind: 'world', code: 'RECOVERY_CONFLICT' }, { path: 'resources.zip', rootKind: 'external_pack', code: 'UNIT_INCONSISTENT' }] : [];
@@ -330,9 +350,19 @@
       return ok(request, scan);
     }
     if (type === 'translate.start' || type === 'translate.resume') {
+      if (keyUnbound()) throw { code: 'CREDENTIAL_ENDPOINT_UNBOUND', message: 'raw shell text that must not be shown' };
       if (current === 'run-progress') {
         setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'phase_start', phase: 'translate', total: 6, requests_estimate: 1 } }), 50);
-        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1, cost: 0.000123, samples: [{ source: 'Welcome to Roguefire', translated: '로그파이어에 오신 것을 환영합니다' }, { source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }] } }), 120);
+        // ?progress=nocost: the provider reports no cost (null). ?progress=many: more samples than the list keeps.
+        const progressMode = new URLSearchParams(location.search).get('progress');
+        const sentence = (n) => ({ source: `Sentence ${n} ${'x'.repeat(200)}`, translated: `문장 ${n}` });
+        if (progressMode === 'many') {
+          for (let round = 0; round < 3; round++) {
+            setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 2 + round, total: 6, failed: 0, batch: round + 1, batches: 3, requests: round + 1, cost: null, samples: [1, 2, 3].map((n) => sentence(round * 3 + n)) } }), 120 + round * 30);
+          }
+        } else {
+          setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1, cost: progressMode === 'nocost' ? null : 0.000123, samples: [{ source: 'Welcome to Roguefire', translated: '로그파이어에 오신 것을 환영합니다' }, { source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }] } }), 120);
+        }
         return new Promise((resolve) => setTimeout(() => resolve(ok(request, resultPayload('completed'))), 60000));
       }
       if (current === 'interrupted-partial') {
@@ -384,15 +414,48 @@
       if (command === 'credential_reset_storage') { sessionStorage.setItem('pomi.fixture.vaultReset', 'true'); (window.__pomiShell ||= []).push('credential_reset_storage'); return null; }
       if (command === 'native_reset') {
         (window.__pomiShell ||= []).push(`native_reset:${args.deleteKeys}`);
+        // ?reset=busy|state-unknown: the shell refuses. ?reset=unconfirmed-once: the keychain could not be
+        // confirmed the first time (some stores are already empty); a retry finishes the job.
+        const resetMode = new URLSearchParams(location.search).get('reset');
+        if (resetMode === 'busy') throw { code: 'BUSY', message: 'raw' };
+        if (resetMode === 'state-unknown') throw { code: 'CORE_STATE_UNKNOWN', message: 'raw' };
+        if (resetMode === 'unconfirmed-once' && sessionStorage.getItem('pomi.fixture.resetTried') !== 'true') {
+          sessionStorage.setItem('pomi.fixture.resetTried', 'true');
+          return { keysDeleted: false, keysPartiallyDeleted: true, reportsCleared: true, errors: ['KEYCHAIN_UNCONFIRMED'] };
+        }
         if (args.deleteKeys) sessionStorage.setItem('pomi.fixture.cleared', JSON.stringify(['openai', 'gemini', 'anthropic', 'openrouter', 'comet', 'custom']));
-        return null;
+        return { keysDeleted: !!args.deleteKeys, keysPartiallyDeleted: false, reportsCleared: true, errors: [] };
       }
       if (command === 'diagnostics_snapshot') return 'PomiTranslate diagnostics\nversion 0.1.0\nevents: none';
       if (command === 'exit_set_settings_dirty') { window.__pomiDirty = args.dirty; return null; }
+      // The shell requires the intent id of the question on every answer, and refuses one that is gone.
+      // ?exit=gone answers UPDATE_CANCELLED, ?exit=gone-quit answers INVALID_REQUEST.
+      if (command === 'exit_confirm' || command === 'exit_cancel') {
+        (window.__pomiCalls ||= []).push({ command, args });
+        if (typeof args.intent !== 'number') throw { code: 'INVALID_REQUEST', message: 'missing intent' };
+        const exitMode = new URLSearchParams(location.search).get('exit');
+        if (exitMode === 'gone') throw { code: 'UPDATE_CANCELLED', message: 'raw' };
+        if (exitMode === 'gone-quit') throw { code: 'INVALID_REQUEST', message: 'raw' };
+        if (window.__pomiInstallWait && args.intent === window.__pomiInstallWait.intent) {
+          const wait = window.__pomiInstallWait;
+          window.__pomiInstallWait = null;
+          (window.__pomiShell ||= []).push(command);
+          if (command === 'exit_cancel') wait.reject({ code: 'UPDATE_CANCELLED', message: 'raw' });
+          else window.__pomiInstalled = true; // the real app restarts here
+          return null;
+        }
+      }
+      if (command === 'exit_cancel') { (window.__pomiShell ||= []).push('exit_cancel'); return null; }
+      if (command === 'exit_keep_waiting') {
+        (window.__pomiShell ||= []).push('exit_keep_waiting');
+        setTimeout(() => emit('pomi-exit-waiting', null), 20);
+        if (new URLSearchParams(location.search).get('exit') === 'stuck-again') setTimeout(() => emit('pomi-exit-stuck', null), 150);
+        return null;
+      }
       if (command === 'exit_confirm') {
         (window.__pomiShell ||= []).push('exit_confirm');
         // ?exit=stuck: the job ignores the cancel, so the shell reports it after its wait.
-        if (new URLSearchParams(location.search).get('exit') === 'stuck') {
+        if (['stuck', 'stuck-again'].includes(new URLSearchParams(location.search).get('exit'))) {
           setTimeout(() => emit('pomi-exit-waiting', null), 20);
           setTimeout(() => emit('pomi-exit-stuck', null), 150);
         }
@@ -416,6 +479,18 @@
         return { status: 'available', currentVersion: '0.1.0', version: '0.2.0', notes: 'Faster scans.\nFixes.', date: '2026-10-20', canInstall: mode !== 'unsigned', releaseUrl };
       }
       if (command === 'update_install') {
+        // ?install=busy|cancelled|state-unknown: the shell refuses. ?install=ask: unsaved settings make it ask first
+        // (reason "update", intent 7) and the install waits for the answer.
+        const installMode = new URLSearchParams(location.search).get('install');
+        if (installMode === 'busy') throw { code: 'UPDATE_BUSY', message: 'raw' };
+        if (installMode === 'cancelled') throw { code: 'UPDATE_CANCELLED', message: 'raw' };
+        if (installMode === 'state-unknown') throw { code: 'CORE_STATE_UNKNOWN', message: 'raw' };
+        if (installMode === 'ask') {
+          return new Promise((resolve, reject) => {
+            window.__pomiInstallWait = { intent: 7, resolve, reject };
+            emit('pomi-exit-confirm', { job: false, dirty: true, reason: 'update', intent: 7 });
+          });
+        }
         window.__pomiInstalled = true;
         emit('pomi-update-progress', { downloaded: 512, total: 1024 });
         return new Promise(() => {}); // the real app restarts here

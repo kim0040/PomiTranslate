@@ -99,26 +99,29 @@ describe('the exit and reset flows', () => {
     backend.mockReset();
   });
 
-  it('quits through the shell after the person confirms', async () => {
+  const ask = { job: true, dirty: false, reason: 'quit', intent: 4, phase: 'ask' } as const;
+
+  it('quits through the shell with the intent of the question after the person confirms', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = { job: true, dirty: false, phase: 'ask' };
+    app.exitPrompt = { ...ask };
     await app.exitQuit();
-    expect(invokeMock).toHaveBeenCalledWith('exit_confirm');
+    expect(invokeMock).toHaveBeenCalledWith('exit_confirm', { intent: 4 });
     app.exitStay();
     expect(app.exitPrompt).toBeNull();
+    expect(invokeMock).toHaveBeenCalledWith('exit_cancel', { intent: 4 });
   });
 
   it('saves the settings draft first and stays open when the save fails', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = { job: false, dirty: true, phase: 'ask' };
+    app.exitPrompt = { job: false, dirty: true, reason: 'quit', intent: 9, phase: 'ask' };
     app.saveDraft = async () => false;
     await app.exitSaveAndQuit();
-    expect(invokeMock).not.toHaveBeenCalledWith('exit_confirm');
+    expect(invokeMock).not.toHaveBeenCalledWith('exit_confirm', expect.anything());
     app.saveDraft = async () => true;
     await app.exitSaveAndQuit();
-    expect(invokeMock).toHaveBeenCalledWith('exit_confirm');
+    expect(invokeMock).toHaveBeenCalledWith('exit_confirm', { intent: 9 });
   });
 
   it('quit now asks the shell to end the core', async () => {
@@ -128,10 +131,13 @@ describe('the exit and reset flows', () => {
     expect(invokeMock).toHaveBeenCalledWith('exit_force');
   });
 
+  const complete = { keysDeleted: true, keysPartiallyDeleted: false, reportsCleared: true, errors: [] };
+
   it('resets the shell half first and says what is already gone if the core half fails', async () => {
     const calls: string[] = [];
     invokeMock.mockImplementation(async (command: string) => {
       calls.push(command);
+      if (command === 'native_reset') return complete;
       if (command === 'sidecar_request') return { v: 1, id: 'x', type: 'response.error', error: { code: 'OPERATION_FAILED', message: 'x' } };
       return undefined;
     });

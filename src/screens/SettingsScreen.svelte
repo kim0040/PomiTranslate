@@ -2,6 +2,7 @@
   import { tick, untrack } from 'svelte';
   import Dialog from '../components/Dialog.svelte';
   import AppMaintenance from '../components/AppMaintenance.svelte';
+  import Callout from '../components/Callout.svelte';
   import Icon from '../components/Icon.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import SettingsHint from '../components/SettingsHint.svelte';
@@ -186,6 +187,19 @@
   });
 
   const isCustom = $derived(draft.provider === 'custom');
+
+  // The banner's "Enter the key" lands here: open the key field of the Custom provider and focus it.
+  $effect(() => {
+    if (!app.focusKeyField) return;
+    app.focusKeyField = false;
+    if (draft.provider !== 'custom') return;
+    editingKey = true;
+    void tick().then(() => {
+      const field = document.getElementById('api-key');
+      field?.scrollIntoView({ block: 'center' });
+      field?.focus();
+    });
+  });
   const models = $derived(app.modelsFor(draft));
   const reasoningModel = $derived(models.find((model) => model.id === draft.model.trim()));
   const reasoningMetadata = $derived(reasoningModel?.reasoning);
@@ -721,6 +735,10 @@
             {:else if stored === true}<span class="pill pill-success"><Icon name="check" size={13} /> {t('settings.apiKey.stored')}</span>
             {:else if stored === false}<span class="pill">{t('settings.apiKey.missing')}</span>{/if}
           </div>
+          <!-- A key an older version saved is tied to no address, so it is never sent. The key itself is never shown. -->
+          {#if isCustom && app.keyReentry}
+            <Callout tone="warning" title={t('settings.apiKey.reenterTitle')} role="status">{t('settings.apiKey.reenterBody')}</Callout>
+          {/if}
           {#if stored}<span class="hint">{t(savedCredentialMode === 'local' ? 'settings.vault.local' : savedCredentialMode === 'session' ? 'settings.vault.session' : 'settings.vault.keychain')}</span>{/if}
           {#if stored && !editingKey}
             <div class="model-actions">
