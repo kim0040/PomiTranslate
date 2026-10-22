@@ -104,7 +104,13 @@
   ];
   // Category and sort live in a popover; the badge says how many of them are not at their default.
   const activeFilters = $derived((source.kind ? 1 : 0) + (source.sort !== 'order' ? 1 : 0));
-  const kindEntries = $derived(Object.entries(source.kinds).sort((a, b) => b[1] - a[1]));
+  // A refetch empties the source's counts for a moment; the chips keep the last list so the one just
+  // pressed is not rebuilt (which would drop keyboard focus out of the popover).
+  let kindEntries = $state<[string, number][]>([]);
+  $effect(() => {
+    const entries = Object.entries(source.kinds).sort((a, b) => b[1] - a[1]);
+    if (entries.length) kindEntries = entries;
+  });
 
   function setQuery(value: string): void {
     query = value;
