@@ -114,6 +114,7 @@ export const ko = {
   'step.list': '작업 단계',
   'step.done': '완료',
   'step.current': '진행 중',
+  'step.compact': '{n}/{total}단계 · {name}',
 
   'common.cancel': '취소',
   'common.close': '닫기',
@@ -250,6 +251,9 @@ export const ko = {
   'review.state.excluded': '제외됨',
   'review.state.manual': '직접 번역',
   'review.allKinds': '모든 유형',
+  'review.filters': '필터',
+  'review.filtersActive': '적용 중',
+  'review.bulk': '일괄 작업',
   'review.col.include': '포함',
   'review.col.source': '원문',
   'review.col.kind': '유형',

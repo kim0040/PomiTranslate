@@ -9,6 +9,8 @@
   import CandidateDetail from '../components/CandidateDetail.svelte';
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import Popover from '../components/Popover.svelte';
 
   const source = app.candidates;
   // Why Start will not be available on the next screen, said here while it can still be fixed.
@@ -100,6 +102,8 @@
     { value: 'excluded', key: 'review.state.excluded' },
     { value: 'manual', key: 'review.state.manual' }
   ];
+  // Category and sort live in a popover; the badge says how many of them are not at their default.
+  const activeFilters = $derived((source.kind ? 1 : 0) + (source.sort !== 'order' ? 1 : 0));
   const kindEntries = $derived(Object.entries(source.kinds).sort((a, b) => b[1] - a[1]));
 
   function setQuery(value: string): void {
@@ -139,17 +143,7 @@
 </script>
 
 <div class="review">
-  <header class="head">
-    <div class="titles">
-      <h1>{t('review.title')}</h1>
-      <p class="lead">{t('review.lead')}</p>
-    </div>
-    <div class="counts" role="status" aria-live="polite">
-      <span class="pill pill-success num">{t('review.included', { count: formatNumber(app.includedCount, app.locale) })}</span>
-      <span class="pill num">{t('review.excluded', { count: formatNumber(app.excluded.size, app.locale) })}</span>
-      <span class="pill pill-accent num">{t('review.manual', { count: formatNumber(app.manualCount, app.locale) })}</span>
-    </div>
-  </header>
+  <PageHeader title={t('review.title')} lead={t('review.lead')} />
 
   <div class="toolbar">
     <div class="search">
@@ -169,26 +163,29 @@
         <button type="button" aria-pressed={source.state === item.value} onclick={() => setState(item.value)}>{t(item.key)}</button>
       {/each}
     </div>
-    <label class="sort">
-      <span class="sr-only">{t('review.sort')}</span>
-      <select class="select" value={source.sort} onchange={(event) => setSort(event.currentTarget.value as SortMode)}>
-        <option value="order">{t('review.sort')}: {t('review.sort.order')}</option>
-        <option value="source">{t('review.sort')}: {t('review.sort.source')}</option>
-        <option value="count">{t('review.sort')}: {t('review.sort.count')}</option>
-        <option value="kind">{t('review.sort')}: {t('review.sort.kind')}</option>
-      </select>
-    </label>
-  </div>
-
-  <div class="chips" role="group" aria-label={t('scan.summary.kinds')}>
-    <button type="button" class="chip" aria-pressed={!source.kind} onclick={() => setKind('')}>
-      {t('review.allKinds')}
-    </button>
-    {#each kindEntries as [kind, count] (kind)}
-      <button type="button" class="chip" aria-pressed={source.kind === kind} onclick={() => setKind(kind)}>
-        {t(`kind.${kind}` as MessageKey)} <span class="num n">{formatNumber(count, app.locale)}</span>
-      </button>
-    {/each}
+    <Popover label={t('review.filters')} icon="sliders" badge={activeFilters} badgeLabel={t('review.filtersActive')}>
+      <div class="field">
+        <span class="label">{t('scan.summary.kinds')}</span>
+        <div class="kinds" role="group" aria-label={t('scan.summary.kinds')}>
+          <button type="button" class="chip" aria-pressed={!source.kind} onclick={() => setKind('')}>{t('review.allKinds')}</button>
+          {#each kindEntries as [kind, count] (kind)}
+            <button type="button" class="chip" aria-pressed={source.kind === kind} onclick={() => setKind(kind)}>
+              {t(`kind.${kind}` as MessageKey)} <span class="num n">{formatNumber(count, app.locale)}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+      <div class="field">
+        <label class="label" for="review-sort">{t('review.sort')}</label>
+        <select id="review-sort" class="select" value={source.sort} onchange={(event) => setSort(event.currentTarget.value as SortMode)}>
+          <option value="order">{t('review.sort.order')}</option>
+          <option value="source">{t('review.sort.source')}</option>
+          <option value="count">{t('review.sort.count')}</option>
+          <option value="kind">{t('review.sort.kind')}</option>
+        </select>
+      </div>
+      {#if source.filtered}<button type="button" class="btn btn-quiet btn-sm reset" onclick={clearFilters}>{t('review.clearFilters')}</button>{/if}
+    </Popover>
   </div>
 
   <div class="workarea" class:wide class:compact={workareaWidth < PANEL_FULL} bind:this={workarea}>
@@ -198,11 +195,13 @@
 
   <footer class="foot">
     <div class="meta">
-      <span class="num muted">{t('review.rows', { total: formatNumber(source.total, app.locale) })}</span>
-      {#if source.filtered}<button type="button" class="btn btn-quiet btn-sm" onclick={clearFilters}>{t('review.clearFilters')}</button>{/if}
-      <button type="button" class="btn btn-secondary btn-sm" disabled={busyBulk || source.total === 0} onclick={() => bulk(false)}>{t('review.excludeVisible')}</button>
-      <button type="button" class="btn btn-secondary btn-sm" disabled={busyBulk || source.total === 0} onclick={() => bulk(true)}>{t('review.includeVisible')}</button>
-      <span class="hint">{t('review.bulkNote', { count: formatNumber(source.total, app.locale) })}</span>
+      <!-- The three counts are the state of the whole review, so they sit beside the button that leaves it. -->
+      <span class="counts num" role="status" aria-live="polite">
+        <span class="included">{t('review.included', { count: formatNumber(app.includedCount, app.locale) })}</span>
+        <span>{t('review.excluded', { count: formatNumber(app.excluded.size, app.locale) })}</span>
+        <span>{t('review.manual', { count: formatNumber(app.manualCount, app.locale) })}</span>
+      </span>
+      <span class="num muted rows">{t('review.rows', { total: formatNumber(source.total, app.locale) })}</span>
       <!-- Always present, so the footer does not change height as the draft is saved. -->
       <span class="hint draft" class:error={app.draftState === 'error'} aria-live="off">{draftText}</span>
     </div>
@@ -214,6 +213,11 @@
           <button type="button" class="btn btn-secondary btn-sm" disabled={app.busy === 'settings'} onclick={() => app.openSettingsFor('review')}>{t('setup.open')}</button>
         {/if}
       {/if}
+      <Popover label={t('review.bulk')} placement="up">
+        <p class="hint">{t('review.bulkNote', { count: formatNumber(source.total, app.locale) })}</p>
+        <button type="button" class="btn btn-secondary btn-sm" disabled={busyBulk || source.total === 0} onclick={() => bulk(false)}>{t('review.excludeVisible')}</button>
+        <button type="button" class="btn btn-secondary btn-sm" disabled={busyBulk || source.total === 0} onclick={() => bulk(true)}>{t('review.includeVisible')}</button>
+      </Popover>
       <button type="button" class="btn btn-primary btn-lg" disabled={app.includedCount === 0} onclick={() => app.goStep('run')}>
         {t('review.toRun')} <Icon name="chevron-right" size={16} />
       </button>
@@ -229,37 +233,36 @@
 {/if}
 
 <style>
-  .review { animation: pomi-enter var(--dur-base) var(--ease-out) backwards; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: var(--space-3); height: 100%; min-height: 460px; }
-  .head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
-  h1 { font-size: var(--text-2xl); }
-  .lead { color: var(--text-secondary); margin-top: var(--space-1); }
-  .counts { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+  .review { animation: pomi-enter var(--dur-base) var(--ease-out) backwards; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: var(--space-3); height: 100%; min-height: 440px; max-width: var(--page-max); }
   .toolbar { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
-  .search { position: relative; flex: 1 1 260px; min-width: 200px; }
+  .search { position: relative; flex: 1 1 180px; min-width: 160px; }
   .search :global(.icon) { position: absolute; inset-inline-start: 9px; top: 50%; translate: 0 -50%; color: var(--text-secondary); pointer-events: none; }
   .search .input { padding-inline-start: 32px; }
-  .sort { flex: 0 0 auto; }
-  .sort .select { width: auto; min-width: 200px; }
-  .chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-  .chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 10px; border-radius: var(--radius-full); border: 1px solid var(--border-control); background: var(--bg-surface); color: var(--text); font-size: var(--text-sm); font-weight: 600; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
+  .kinds { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--radius-full); border: 1px solid var(--border-control); background: var(--bg-surface); color: var(--text); font-size: var(--text-sm); font-weight: 500; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease); }
   .chip .n { color: var(--text-secondary); font-weight: 500; }
-  .chip[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-soft-text); }
+  .chip[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-soft-text); font-weight: 600; }
   .chip[aria-pressed='true'] .n { color: inherit; }
   @media (hover: hover) { .chip[aria-pressed='false']:hover { background: var(--bg-hover); } }
+  .reset { justify-self: start; }
   .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; }
-  .workarea.wide { grid-template-columns: minmax(0, 1fr) 340px; }
-  .workarea.wide.compact { grid-template-columns: minmax(0, 1fr) 280px; }
+  .workarea.wide { grid-template-columns: minmax(0, 1fr) 360px; }
+  .workarea.wide.compact { grid-template-columns: minmax(0, 1fr) 300px; }
   .tablewrap, .detailwrap { min-height: 0; height: 100%; }
-  .foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; padding-top: var(--space-3); border-top: 1px solid var(--border); }
-  .meta { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
-  .draft { min-width: 9em; }
+  .foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; padding-top: var(--space-3); border-top: 1px solid var(--border); }
+  .meta { display: flex; align-items: center; gap: var(--space-2) var(--space-4); flex-wrap: wrap; min-width: 0; }
+  .counts { display: inline-flex; gap: var(--space-3); font-size: var(--text-sm); color: var(--text-secondary); }
+  .counts .included { color: var(--success-text); font-weight: 600; }
+  .rows { font-size: var(--text-sm); }
+  .draft { min-width: 7em; }
   .draft.error { color: var(--danger-text); }
   .blocked { color: var(--warning-text); }
   .next { display: flex; align-items: center; gap: var(--space-3); margin-inline-start: auto; }
-  /* Only the bulk note gives way; the "nothing included" alert explains the disabled button. */
-  @media (max-width: 1100px) { .meta .hint { display: none; } }
-  @media (max-width: 640px), (max-height: 650px) {
-    .review { height: auto; min-height: 0; grid-template-rows: auto auto auto minmax(300px, 1fr) auto; }
+  /* Short windows: the lead is a nicety, the rows are the work. */
+  @media (max-height: 700px) { .review :global(.page-head .lead) { display: none; } }
+  @media (max-width: 1100px) { .rows { display: none; } }
+  @media (max-width: 640px), (max-height: 520px) {
+    .review { height: auto; min-height: 0; grid-template-rows: auto auto minmax(300px, 1fr) auto; }
     .workarea { min-height: 300px; }
     /* The page scrolls here, so the next-step button stays pinned to the bottom of the pane. */
     .foot { position: sticky; inset-block-end: calc(-1 * var(--pane-pad-bottom, var(--space-3))); z-index: 2; padding-block-end: var(--space-3); background: var(--bg-page); }

@@ -29,10 +29,15 @@
       <p>{t('review.detail.empty')}</p>
     </div>
   {:else}
-    {#if showHeading}<header class="top">
-      <h2>{t('review.detail.title')}</h2>
+    <!-- Pinned: what this is and whether it is part of the translation stay in view while the rest scrolls. -->
+    <header class="top">
+      {#if showHeading}<h2>{t('review.detail.title')}</h2>{/if}
+      <label class="check include">
+        <input type="checkbox" checked={included} onchange={(event) => app.setIncluded(candidate.id, event.currentTarget.checked)} />
+        <span class="label">{t('review.detail.include')}</span>
+      </label>
       {#if onClose}<button type="button" class="btn btn-quiet btn-icon btn-sm" aria-label={t('review.detail.close')} onclick={onClose}><Icon name="x" size={18} /></button>{/if}
-    </header>{/if}
+    </header>
 
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
@@ -46,18 +51,11 @@
     </section>
 
     <section class="block">
-      <label class="check">
-        <input type="checkbox" checked={included} onchange={(event) => app.setIncluded(candidate.id, event.currentTarget.checked)} />
-        <span class="label">{t('review.detail.include')}</span>
-      </label>
-    </section>
-
-    <section class="block">
       <h3><label for="manual-translation">{t('review.detail.manual')}</label></h3>
       <textarea
         id="manual-translation"
         class="textarea"
-        rows="4"
+        rows="3"
         value={manual}
         maxlength={MAX_MANUAL_LENGTH}
         disabled={!included}
@@ -114,14 +112,18 @@
 </aside>
 
 <style>
-  .detail { display: grid; align-content: start; gap: var(--space-4); padding: var(--space-4); overflow: auto; height: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+  .detail { display: grid; align-content: start; gap: var(--space-4); padding: 0 var(--space-4) var(--space-4); overflow: auto; height: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-card); container-type: inline-size; }
   .blank { display: grid; justify-items: center; align-content: center; gap: var(--space-3); min-height: 240px; padding: var(--space-5); text-align: center; color: var(--text-secondary); }
-  .top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-  .top h2 { font-size: var(--text-lg); }
+  .top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: var(--space-3); min-height: 44px; margin: 0 calc(-1 * var(--space-4)); padding: var(--space-2) var(--space-4); background: var(--bg-surface); border-bottom: 1px solid var(--border); }
+  .top h2 { font-size: var(--text-lg); font-weight: 600; margin-inline-end: auto; white-space: nowrap; }
+  @container (max-width: 380px) { .top h2 { display: none; } }
+  .top .include { margin-inline-start: auto; align-items: center; }
+  .top h2 + .include { margin-inline-start: 0; }
+  .top .check .label { font-weight: 500; font-size: var(--text-sm); }
   .block { display: grid; gap: var(--space-2); }
-  h3 { font-size: var(--text-xs); font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); }
+  h3 { font-size: var(--text-overline); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); }
   h3 label { cursor: pointer; }
-  .source { margin: 0; padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; max-height: 220px; overflow: auto; font-size: var(--text-md); }
+  .source { margin: 0; padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; max-height: 160px; overflow: auto; font-size: var(--text-md); }
   .tokens { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); margin: 0; }
   .tokens code { padding: 1px 6px; border-radius: 4px; background: var(--warning-soft); color: var(--warning-text); font-weight: 700; }
   .counter { margin: 0; font-size: var(--text-xs); color: var(--text-secondary); text-align: end; }

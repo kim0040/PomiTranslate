@@ -113,6 +113,7 @@ export const en: Record<MessageKey, string> = {
   'step.list': 'Steps',
   'step.done': 'Completed',
   'step.current': 'In Progress',
+  'step.compact': 'Step {n} of {total} · {name}',
 
   'common.cancel': 'Cancel',
   'common.close': 'Close',
@@ -249,6 +250,9 @@ export const en: Record<MessageKey, string> = {
   'review.state.excluded': 'Excluded',
   'review.state.manual': 'Manual Translation',
   'review.allKinds': 'All Categories',
+  'review.filters': 'Filters',
+  'review.filtersActive': 'active',
+  'review.bulk': 'Bulk actions',
   'review.col.include': 'Include',
   'review.col.source': 'Original Text',
   'review.col.kind': 'Category',

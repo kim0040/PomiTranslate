@@ -113,6 +113,7 @@ export const ja: Record<MessageKey, string> = {
   'step.list': '手順一覧',
   'step.done': '完了',
   'step.current': '進行中',
+  'step.compact': 'ステップ {n}/{total} · {name}',
 
   'common.cancel': 'キャンセル',
   'common.close': '閉じる',
@@ -249,6 +250,9 @@ export const ja: Record<MessageKey, string> = {
   'review.state.excluded': '対象外',
   'review.state.manual': '手動翻訳',
   'review.allKinds': 'すべての種類',
+  'review.filters': 'フィルター',
+  'review.filtersActive': '適用中',
+  'review.bulk': '一括操作',
   'review.col.include': '対象',
   'review.col.source': '原文',
   'review.col.kind': '種類',

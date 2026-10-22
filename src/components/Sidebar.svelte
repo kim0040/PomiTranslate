@@ -5,6 +5,7 @@
   import { clock, holdClock } from '../lib/clock.svelte';
   import { milestone, percentDone } from '../lib/workflow';
   import Icon, { type IconName } from './Icon.svelte';
+  import Brand from './Brand.svelte';
 
   const items: { page: Page; icon: IconName; label: 'nav.workspace' | 'nav.backups' | 'nav.settings' | 'nav.help' | 'nav.about' }[] = [
     { page: 'workspace', icon: 'language', label: 'nav.workspace' },
@@ -54,8 +55,8 @@
 <aside class="sidebar" class:rail={app.railCollapsed}>
   <div class="titlebar" data-tauri-drag-region></div>
   <div class="brand" data-tauri-drag-region>
-    <img class="wordmark" src="/images/wordmark.png" alt="PomiTranslate" width="176" />
-    <span class="dark-wordmark" role="img" aria-label="PomiTranslate">Pomi<span>Translate</span></span>
+    <span class="full"><Brand height={22} /></span>
+    <span class="mini"><Brand variant="mark" height={28} /></span>
   </div>
 
   <nav aria-label={t('nav.main')}>
@@ -110,28 +111,22 @@
   .titlebar { flex: none; height: var(--titlebar-inset); margin: calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) 0; }
   .sidebar.rail { padding-inline: var(--space-2); }
   .brand { padding-inline: var(--space-2); min-height: 40px; display: flex; align-items: center; }
-  .wordmark { width: 132px; height: auto; margin-top: -4px; pointer-events: none; }
-  .dark-wordmark { display: none; font-size: var(--text-lg); font-weight: 800; letter-spacing: -0.03em; color: var(--text); white-space: nowrap; pointer-events: none; }
-  .dark-wordmark span { color: var(--accent-text); }
-  :global([data-theme='dark']) .wordmark { display: none; }
-  :global([data-theme='dark']) .sidebar:not(.rail) .dark-wordmark { display: inline; }
-  @media (max-width: 1000px) { :global([data-theme='dark']) .sidebar:not(.rail) .dark-wordmark { display: none; } }
-  .rail .brand { justify-content: center; padding: 0; }
-  .rail .wordmark { display: none; }
-  .rail .brand::before { content: ''; width: 24px; height: 24px; border-radius: 6px; background: var(--accent); mask: url('/images/pomi.png') center / contain no-repeat; }
+  .brand .mini { display: none; }
   nav { display: grid; gap: 2px; }
   .update { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; padding: 0 var(--space-2); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent-soft-text); font-size: var(--text-sm); font-weight: 600; animation: pomi-fade var(--dur-base) var(--ease-out); }
+  /* Neutral icons and labels; only the page you are on is coloured, and it also carries a bar, so
+     colour is never the only signal. */
   .nav {
-    display: flex; align-items: center; gap: var(--space-2); min-height: 30px; padding: 0 var(--space-2);
-    border: 0; border-radius: var(--radius-md); background: transparent; color: var(--text);
+    position: relative; display: flex; align-items: center; gap: var(--space-2); min-height: 34px; padding: 0 var(--space-3);
+    border: 0; border-radius: var(--radius-md); background: transparent; color: var(--text-secondary);
     font-size: var(--text-md); font-weight: 500; text-align: start;
     transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   }
-  .nav :global(.icon) { color: var(--accent-text); flex: none; }
-  .nav.active { background: color-mix(in srgb, var(--text) 10%, transparent); font-weight: 600; }
-  .rail .nav { justify-content: center; padding: 0; min-height: 36px; }
-  .rail .label { display: none; }
-  @media (hover: hover) { .nav:not(.active):hover { background: color-mix(in srgb, var(--text) 5%, transparent); } }
+  .nav :global(.icon) { flex: none; }
+  .nav.active { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+  .nav.active::before { content: ''; position: absolute; inset-block: 7px; inset-inline-start: 0; width: 2px; border-radius: 2px; background: var(--accent); }
+  .nav:disabled { opacity: 0.5; }
+  @media (hover: hover) { .nav:not(.active):not(:disabled):hover { background: var(--bg-hover); color: var(--text); } }
   .foot { margin-top: auto; display: grid; gap: var(--space-2); }
   .state { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2); border-radius: var(--radius-lg); }
   .pomi { width: 32px; height: 32px; object-fit: contain; flex: none; pointer-events: none; }
@@ -141,17 +136,31 @@
   .dot { width: 7px; height: 7px; border-radius: var(--radius-full); background: var(--success-solid); }
   .dot.busy { background: var(--accent); animation: pomi-pulse-dot 1.4s ease-in-out infinite; }
   .dot.failed { background: var(--danger-solid); }
-  .rail .state { justify-content: center; padding: var(--space-2); }
-  .rail .text, .rail .pomi { display: none; }
-  .rail .state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--success-solid); }
   .task-link { justify-self: stretch; }
-  .rail .task-link { display: none; }
   .collapse { justify-self: start; }
   /* The collapsed rail shows only the dot, so it carries the busy colour too. */
   .sidebar .state.busy::before { background: var(--accent); animation: pomi-pulse-dot 1.4s ease-in-out infinite; }
   .sidebar .state.failed::before { background: var(--danger-solid); }
+
+  /* Collapsed (by choice, or because the window is narrow): marks only, labels in the title tooltip. */
+  .rail .brand { justify-content: center; padding: 0; }
+  .rail .brand .full, .rail .label, .rail .text, .rail .pomi, .rail .task-link { display: none; }
+  .rail .brand .mini { display: block; }
+  .rail .nav { justify-content: center; padding: 0; min-height: 38px; }
+  .rail .nav.active::before { inset-block: 9px; }
+  .rail .state { justify-content: center; padding: var(--space-2); }
+  .rail .state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--success-solid); }
   .rail .collapse { justify-self: center; }
-  @media (max-width: 1000px) { .sidebar { padding-inline: var(--space-2); } .sidebar .label, .sidebar .wordmark, .sidebar .text, .sidebar .pomi, .sidebar .collapse, .sidebar .task-link { display: none; } .sidebar .nav { justify-content: center; padding: 0; min-height: 36px; } .sidebar .brand { justify-content: center; padding: 0; } .sidebar .brand::before { content: ''; width: 24px; height: 24px; border-radius: 6px; background: var(--accent); mask: url('/images/pomi.png') center / contain no-repeat; } .sidebar .state { justify-content: center; } .sidebar .state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--success-solid); } }
+  @media (max-width: 1000px) {
+    .sidebar { padding-inline: var(--space-2); }
+    .sidebar .brand { justify-content: center; padding: 0; }
+    .sidebar .brand .full, .sidebar .label, .sidebar .text, .sidebar .pomi, .sidebar .collapse, .sidebar .task-link { display: none; }
+    .sidebar .brand .mini { display: block; }
+    .sidebar .nav { justify-content: center; padding: 0; min-height: 38px; }
+    .sidebar .nav.active::before { inset-block: 9px; }
+    .sidebar .state { justify-content: center; }
+    .sidebar .state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--success-solid); }
+  }
   @media (max-width: 640px) {
     .sidebar { height: auto; flex-direction: row; align-items: center; gap: var(--space-2); padding: var(--space-2); border-inline-end: 0; border-block-end: 1px solid var(--border); overflow: visible; }
     .titlebar { display: none; }

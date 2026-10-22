@@ -2,15 +2,36 @@
  * PomiTranslate design tokens.
  *
  * Primitives name a value and are never used in a component. Semantic tokens name a job and are
- * the only tier components reference. Ramps are generated in OKLCH (docs/design-system.md) and
- * every text pair below was measured: body text 4.5:1, control borders 3:1.
+ * the only tier components reference. Neutrals are cool and low-chroma (hue 260) so the brand blue
+ * is the only colour on a calm page. Every text pair below was measured (scripts in the visual
+ * report): body text 4.5:1, control borders and icons 3:1, in both themes.
  * Brand: the wordmark's blue is blue-600, its ink is neutral-900.
  */
+
+/* One variable font for Hangul and Latin (Pretendard Variable 1.3.9, SIL OFL 1.1, public/fonts). The
+   Japanese stack uses it for Latin and digits only (the second face), so kanji never fall to a
+   Korean face. */
+@font-face {
+  font-family: 'Pomi Sans';
+  src: url('/fonts/PretendardVariable.woff2') format('woff2-variations');
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Pomi Latin';
+  src: url('/fonts/PretendardVariable.woff2') format('woff2-variations');
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0020-007E, U+00A0-024F, U+2010-2027, U+2030-2044, U+20A0-20CF, U+2190-21FF;
+}
+
 :root {
-  /* neutral, warm (hue 72) */
-  --neutral-50: #f9f8f7; --neutral-100: #f2f0ed; --neutral-200: #e6e2dd; --neutral-300: #d6d0c8;
-  --neutral-400: #beb6ac; --neutral-500: #a39a8e; --neutral-600: #867b6f; --neutral-700: #6b6257;
-  --neutral-800: #524a41; --neutral-900: #3a342e; --neutral-950: #25211d;
+  /* neutral, cool and low chroma */
+  --neutral-50: #fafafa; --neutral-100: #f4f4f5; --neutral-200: #e7e7ea; --neutral-300: #d4d4d9;
+  --neutral-400: #b4b4bc; --neutral-500: #8f8f99; --neutral-600: #6f6f7a; --neutral-700: #52525c;
+  --neutral-800: #3b3b44; --neutral-900: #1d1d23; --neutral-950: #121216;
   /* accent: the brand blue */
   --blue-50: #eff7ff; --blue-100: #e0efff; --blue-200: #c4e1ff; --blue-300: #a3ceff; --blue-400: #78afff;
   --blue-500: #508eff; --blue-600: #2c6cec; --blue-700: #1b55cb; --blue-800: #1343a3; --blue-900: #0f3278;
@@ -19,16 +40,17 @@
   --amber-100: #fceeda; --amber-300: #f1ca90; --amber-600: #ad6f00; --amber-800: #6e4000; --amber-900: #4f2d00;
   --red-50: #fff4f2; --red-100: #ffe7e3; --red-300: #ffb5aa; --red-600: #d73f39; --red-700: #b32423; --red-800: #8c1717;
 
-  /* type */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Pretendard', 'Noto Sans KR', 'Malgun Gothic',
-    'Segoe UI', Roboto, 'Hiragino Sans', 'Yu Gothic UI', sans-serif;
+  /* type: Pretendard (Hangul and Latin); Windows and macOS system faces only as a fallback */
+  --font-sans: 'Pomi Sans', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Noto Sans Mono CJK KR', monospace;
-  /* Desktop scale: 13px body like the platform's own controls, not a web page's 16px. */
-  --text-xs: 11px; --text-sm: 12px; --text-md: 13px; --text-lg: 15px; --text-xl: 17px; --text-2xl: 22px;
+  /* Desktop scale: 13px body like the platform's own controls. Small text is never below 12px,
+     because Hangul and kana strokes go thin under that. */
+  --text-xs: 12px; --text-sm: 12.5px; --text-md: 13px; --text-lg: 15px; --text-xl: 18px; --text-2xl: 24px; --text-stat: 28px;
+  --text-overline: 11px;
 
   /* space (4px grid) and shape */
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 28px; --space-7: 40px;
-  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 10px; --radius-full: 999px;
+  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 10px; --radius-xl: 12px; --radius-full: 999px;
   /* Motion: three durations for the whole app. Hover/press feedback is fast, things that appear
      (screens, dialogs, toasts) use base, progress uses slow. Reduced motion turns all of it off. */
   --ease: cubic-bezier(0.2, 0, 0, 1);
@@ -36,72 +58,81 @@
   --dur-fast: 100ms;
   --dur-base: 160ms;
   --dur-slow: 240ms;
-  --sidebar-width: 220px;
+  --sidebar-width: 224px;
   --sidebar-rail: 60px;
   --toolbar-height: 52px;
-  --control-height: 30px;
+  --control-height: 32px;
+  /* Every screen shares one content width. */
+  --page-max: 1040px;
   /* Space the macOS traffic lights need when the title bar is drawn by the page. */
   --titlebar-inset: 0px;
+}
+
+:root:lang(ja) {
+  --font-sans: 'Pomi Latin', 'Yu Gothic UI', 'Meiryo UI', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', system-ui, sans-serif;
 }
 
 /* semantic, light */
 :root, :root[data-theme='light'] {
   color-scheme: light;
-  --bg-page: var(--neutral-50);
+  --bg-page: #fafafa;
   --bg-surface: #ffffff;
-  --bg-sidebar: color-mix(in srgb, var(--neutral-100) 92%, transparent);
-  --bg-toolbar: color-mix(in srgb, var(--neutral-50) 88%, transparent);
-  --bg-sunken: var(--neutral-100);
-  --bg-hover: var(--neutral-100);
-  --bg-selected: var(--blue-50);
+  --bg-sidebar: #f4f4f5;
+  --bg-toolbar: color-mix(in srgb, #fafafa 88%, transparent);
+  --bg-sunken: #f1f1f3;
+  --bg-hover: #f1f1f3;
+  --bg-selected: color-mix(in srgb, var(--accent) 8%, var(--bg-surface));
   --border: var(--neutral-200);
   --border-strong: var(--neutral-300);
   --border-control: var(--neutral-600);
   --text: var(--neutral-900);
-  --text-secondary: var(--neutral-700);
+  --text-secondary: #5b5b66;
   --text-on-accent: #ffffff;
   --accent: var(--blue-600);
   --accent-hover: var(--blue-700);
   --accent-text: var(--blue-700);
+  --brand: var(--blue-600);
   --accent-soft: var(--blue-100);
   --accent-soft-text: var(--blue-800);
   --focus-ring: var(--blue-600);
   --success-soft: var(--green-100); --success-text: var(--green-800); --success-solid: var(--green-700);
   --warning-soft: var(--amber-100); --warning-text: var(--amber-900); --warning-solid: var(--amber-600);
   --danger-soft: var(--red-50); --danger-text: var(--red-700); --danger-solid: var(--red-700); --danger-border: var(--red-300);
-  --shadow-card: none;
-  --shadow-control: 0 0.5px 1px rgb(58 52 46 / 0.12);
-  --shadow-pop: 0 2px 6px rgb(58 52 46 / 0.10), 0 16px 48px rgb(58 52 46 / 0.18);
-  --scrim: rgb(37 33 29 / 0.55);
+  --shadow-card: 0 1px 0 rgb(18 18 22 / 0.03), 0 1px 3px rgb(18 18 22 / 0.05);
+  --shadow-control: 0 0.5px 1px rgb(18 18 22 / 0.12);
+  --shadow-pop: 0 2px 6px rgb(18 18 22 / 0.08), 0 16px 48px rgb(18 18 22 / 0.16);
+  --scrim: rgb(18 18 22 / 0.55);
   --image-outline: rgb(0 0 0 / 0.1);
 }
 
 /* semantic, dark. A token swap, not a reversal: surfaces darken, vividness drops, text lightens. */
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --bg-page: #120f0b;
-  --bg-surface: #1d1914;
-  --bg-sidebar: color-mix(in srgb, #1a1612 92%, transparent);
-  --bg-toolbar: color-mix(in srgb, #120f0b 88%, transparent);
-  --bg-sunken: #27221d;
-  --bg-hover: #27221d;
-  --bg-selected: #132b5a;
-  --border: #37322c;
-  --border-strong: #4a443d;
-  --border-control: #6d6862;
-  --text: #f1eeea;
-  --text-secondary: #b5b0aa;
-  --text-on-accent: #ffffff;
-  --accent: var(--blue-600);
-  --accent-hover: var(--blue-500);
-  --accent-text: var(--blue-300);
-  --accent-soft: #132b5a;
-  --accent-soft-text: var(--blue-300);
-  --focus-ring: var(--blue-400);
-  --success-soft: #112d1a; --success-text: var(--green-300); --success-solid: var(--green-600);
-  --warning-soft: #362508; --warning-text: var(--amber-300); --warning-solid: var(--amber-300);
-  --danger-soft: #451915; --danger-text: var(--red-300); --danger-solid: var(--red-600); --danger-border: #7a2c26;
-  --shadow-card: none;
+  --bg-page: #0e0f11;
+  --bg-surface: #17181c;
+  --bg-sidebar: #121316;
+  --bg-toolbar: color-mix(in srgb, #0e0f11 88%, transparent);
+  --bg-sunken: #1e1f24;
+  --bg-hover: #22232a;
+  --bg-selected: color-mix(in srgb, var(--accent) 16%, var(--bg-surface));
+  --border: #2a2c33;
+  --border-strong: #3a3d46;
+  --border-control: #6b6d78;
+  --text: #ececef;
+  --text-secondary: #a3a3ad;
+  /* The primary fill is the brightest blue and carries dark text, so it is not the dimmest thing on the page. */
+  --text-on-accent: #0a0f1f;
+  --accent: #3d7bff;
+  --accent-hover: #5a90ff;
+  --accent-text: #8db6ff;
+  --brand: #8db6ff;
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--bg-surface));
+  --accent-soft-text: #8db6ff;
+  --focus-ring: #78afff;
+  --success-soft: #11291a; --success-text: var(--green-300); --success-solid: #2fb36a;
+  --warning-soft: #2e2208; --warning-text: var(--amber-300); --warning-solid: var(--amber-300);
+  --danger-soft: #3a1815; --danger-text: var(--red-300); --danger-solid: #d73f39; --danger-border: #7a2c26;
+  --shadow-card: inset 0 1px 0 rgb(255 255 255 / 0.04);
   --shadow-control: 0 0.5px 1px rgb(0 0 0 / 0.5);
   --shadow-pop: 0 2px 6px rgb(0 0 0 / 0.5), 0 16px 48px rgb(0 0 0 / 0.6);
   --scrim: rgb(0 0 0 / 0.65);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { app } from './lib/app.svelte';
-  import { LOCALES, t, type Locale, type MessageKey } from './lib/i18n/index.svelte';
+  import { LOCALES, t, type Locale } from './lib/i18n/index.svelte';
   import { keepWindowOnScreen } from './lib/plugins';
   import CrashScreen from './components/CrashScreen.svelte';
   import DiscardReviewDialog from './components/DiscardReviewDialog.svelte';
@@ -12,6 +12,7 @@
   import Stepper from './components/Stepper.svelte';
   import Dialog from './components/Dialog.svelte';
   import Callout from './components/Callout.svelte';
+  import StatusScreen from './components/StatusScreen.svelte';
   import Toasts from './components/Toasts.svelte';
   import Icon from './components/Icon.svelte';
   import WorldScreen from './screens/WorldScreen.svelte';
@@ -132,7 +133,6 @@
   // The shell holds a window close or Quit while settings are unsaved, so it must know.
   $effect(() => { void setSettingsDirty(app.settingsDirty); });
 
-  const pageTitles: Record<string, MessageKey> = { backups: 'nav.backups', settings: 'nav.settings', about: 'nav.about', help: 'nav.help' };
 </script>
 
 <svelte:boundary onerror={(error) => app.reportCrash(error)}>
@@ -142,19 +142,21 @@
   <Sidebar />
 
   <div class="workspace">
-    <header class="toolbar" data-tauri-drag-region>
-      {#if app.page === 'workspace'}
+    <!-- The step bar belongs to the workspace; other pages say what they are in their own heading, so the
+         bar only carries the world chip, and is not drawn at all when there is nothing to put in it. -->
+    {#if app.page === 'workspace' && !app.startupFailed}
+      <header class="toolbar" data-tauri-drag-region>
         <Stepper />
-      {:else}
-        <span class="toolbar-title" data-tauri-drag-region>{t(pageTitles[app.page])}</span>
-      {/if}
-      <span class="toolbar-fill" data-tauri-drag-region></span>
-      {#if worldName && app.page !== 'workspace'}
+        <span class="toolbar-fill" data-tauri-drag-region></span>
+      </header>
+    {:else if worldName && !app.startupFailed}
+      <header class="toolbar" data-tauri-drag-region>
+        <span class="toolbar-fill" data-tauri-drag-region></span>
         <button type="button" class="world-chip" title={app.worldDir} onclick={() => app.goto('workspace')}>
           <Icon name="folder" size={14} /><span class="truncate">{worldName}</span>
         </button>
-      {/if}
-    </header>
+      </header>
+    {/if}
 
     <main id="main-content" tabindex="-1" bind:this={pane} class:review-page={app.page === 'workspace' && app.step === 'review'}>
       {#if !app.ready}
@@ -163,20 +165,30 @@
           <span>{t('common.loading')}</span>
         </div>
       {:else if app.startupFailed}
-        <!-- Help and About need nothing from the core: they stay reachable, under the same retry. -->
-        <div class:banner={app.page === 'help' || app.page === 'about'}>
-          <Callout tone="danger" title={t('startup.failed')} role="alert">
+        <!-- Help and About need nothing from the core: they stay reachable, under a slim retry banner.
+             Every other page is replaced by one full-pane state instead of a banner above blank space. -->
+        {#if app.page === 'help' || app.page === 'about'}
+          <div class="banner">
+            <Callout tone="danger" title={t('startup.failed')} role="alert">
+              <p>{app.banner?.message}</p>
+              <p>{t('startup.help')}</p>
+              {#snippet actions()}
+                <button type="button" class="btn btn-primary" onclick={() => app.boot()}>{t('common.retry')}</button>
+              {/snippet}
+            </Callout>
+          </div>
+          {#if app.page === 'help'}<HelpScreen />{:else}<AboutScreen />{/if}
+        {:else}
+          <StatusScreen icon="alert-triangle" tone="danger" title={t('startup.failed')} role="alert">
             <p>{app.banner?.message}</p>
             <p>{t('startup.help')}</p>
             {#snippet actions()}
               <button type="button" class="btn btn-primary" onclick={() => app.boot()}>{t('common.retry')}</button>
-              {#if app.page !== 'help'}
-                <button type="button" class="btn btn-secondary" onclick={() => app.goto('help')}>{t('startup.openHelp')}</button>
-              {/if}
+              <button type="button" class="btn btn-secondary" onclick={() => app.copyDiagnostics()}>{t('diagnostics.copy')}</button>
+              <button type="button" class="btn btn-secondary" onclick={() => app.goto('help')}>{t('startup.openHelp')}</button>
             {/snippet}
-          </Callout>
-        </div>
-        {#if app.page === 'help'}<HelpScreen />{:else if app.page === 'about'}<AboutScreen />{/if}
+          </StatusScreen>
+        {/if}
       {:else}
         {#if app.banner}
           <div class="banner">
@@ -276,15 +288,14 @@
   /* One window-sized grid: the sidebar and toolbar stay put, only the content pane scrolls. */
   .shell { height: 100vh; height: 100dvh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); overflow: hidden; }
   .shell.rail { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
-  .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: var(--toolbar-height) minmax(0, 1fr); background: var(--bg-page); }
+  .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--bg-page); }
   .toolbar {
-    z-index: 20; min-width: 0; display: flex; align-items: center; gap: var(--space-3); overflow-x: auto; overflow-y: hidden;
+    z-index: 20; min-width: 0; min-height: var(--toolbar-height); display: flex; align-items: center; gap: var(--space-3); overflow-x: auto; overflow-y: hidden;
     padding: 0 clamp(var(--space-3), 2.4vw, var(--space-6));
     background: var(--bg-toolbar); border-block-end: 1px solid var(--border);
     backdrop-filter: saturate(1.6) blur(16px); -webkit-backdrop-filter: saturate(1.6) blur(16px);
   }
   :global(.mac-chrome) .shell.rail .toolbar { padding-inline-start: calc(var(--space-6) + 24px); }
-  .toolbar-title { font-size: var(--text-md); font-weight: 600; white-space: nowrap; }
   .toolbar-fill { flex: 1; align-self: stretch; }
   .world-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; min-height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--bg-surface); color: var(--text-secondary); font-size: var(--text-sm); }
   @media (hover: hover) { .world-chip:hover { color: var(--text); border-color: var(--border-strong); } }
