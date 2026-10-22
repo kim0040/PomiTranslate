@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -47,12 +48,15 @@ from mwt.journal import (
     TargetSpec,
     UnitResult,
     UnitSpec,
+    TargetChanged,
     WorldChanged,
     WriteTransaction,
+    blocking_journals,
+    check_resume,
     clear_staging,
     is_disk_full,
     staging_dir,
-    unsettled_for_world,
+    supersede,
 )
 from mwt.safety import (
     DigestCache,
@@ -313,6 +317,8 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
     if args.dry_run:
         result["dry_run"] = True
     if args.no_backup:
+        # Accepted for old scripts, ignored: a world write without a backup set cannot be recovered.
+        print("Notice: --no-backup is ignored. World writes always make a verified backup first.", file=sys.stderr)
         result["backup"] = False
     if args.resource_pack_zip:
         result["resource_pack"]["zip_paths"] = args.resource_pack_zip
@@ -991,6 +997,11 @@ class WorldTranslator(TextExtractionMixin):
         self._session_locks = None
         self._target_locks = None
         self._journal: Journal | None = None
+        # The job a resumed run continues (from its checkpoint), where its record is, and whether the
+        # new record has already taken over from it.
+        self._resume_job_id = ""
+        self._resume_old_path: Path | None = None
+        self._resume_superseded = False
         # What the world looked like when this run took its locks: {relative path: (size, sha256)}.
         # Every file a write replaces must still match it, and no file may appear or vanish.
         self._baseline: dict[str, tuple[int, str]] = {}
@@ -1161,14 +1172,9 @@ class WorldTranslator(TextExtractionMixin):
                 str(path): {"before": str(item.get("before") or ""), "after": str(item.get("after") or "")}
                 for path, item in writes.items() if isinstance(item, dict)
             }
-        backup_set_id = str(self.report.get("backup_set_id") or "")
-        if backup_set_id:
-            from mwt.safety import BackupSet
-
-            self._run_backup = BackupSet.open_existing(
-                Path(self.config["world_dir"]), backup_set_id, self._backup_store(),
-                external_files=self._external_backup_files(),
-            )
+        # A resumed run is a new job with its own backup set and record; the job it continues is only
+        # remembered here. It is checked and closed (superseded) once this run holds the guards.
+        self._resume_job_id = str(self.report.get("backup_set_id") or "")
         if self.batch_log is not None:
             answered, _counts = BatchLog.read(self.batch_log.path)
             for source, translated in answered.items():
@@ -1310,13 +1316,13 @@ class WorldTranslator(TextExtractionMixin):
                     self.write_report()
                     self.release_write_lock()
                     return self.report
-                blocking = self._blocking_interrupted_jobs(world_dir)
+                blocking = self._reconcile_gate(world_dir)
                 if blocking:
                     self.report["status"] = "failed"
                     self.report["error"] = "An earlier write to this world was interrupted. Finish or undo it first."
                     self.report["errors"].append({
                         "scope": "recovery", "code": "RECOVERY_REQUIRED",
-                        "message": self.report["error"], "jobIds": [item["jobId"] for item in blocking],
+                        "message": self.report["error"], "jobIds": blocking,
                     })
                     self.refresh_report_counts()
                     self.write_report()
@@ -1338,11 +1344,13 @@ class WorldTranslator(TextExtractionMixin):
                 self.write_report()
                 self.release_write_lock()
                 return self.report
-            if (
-                not self.config["dry_run"]
-                and self.config["backup"]
-                and self.config["resource_pack"]["enabled"]
+            if not self.config["dry_run"] and not self.config["backup"] and not any(
+                item.get("code") == "backup_always_on" for item in self.report["warnings"]
             ):
+                # Writes need a backup set to be recoverable, so the setting is accepted and ignored.
+                # The checks below never depended on it and still do not.
+                self._warn("backup_always_on", message="Backups cannot be turned off for world writes")
+            if not self.config["dry_run"] and self.config["resource_pack"]["enabled"]:
                 self._preflight_resource_pack_backup_paths(world_dir)
             if (
                 not self.config["dry_run"]
@@ -1437,7 +1445,7 @@ class WorldTranslator(TextExtractionMixin):
                 return self._finish(self.stopped_status)
             return self._finish("partial" if self._left_untranslated() else "completed")
         except PlanInvalidated as exc:
-            self.report["errors"].append({"scope": "plan", "code": "WORLD_CHANGED", "message": str(exc)})
+            self.report["errors"].append({"scope": "plan", "code": exc.code, "message": str(exc)})
             return self._finish("invalidated")
         except TranslationCancelled:
             self.report["status"] = "cancelled"
@@ -1621,7 +1629,7 @@ class WorldTranslator(TextExtractionMixin):
                     and written.get("after") == digest
                 )  # a resumed job finds the pack exactly as its earlier run left it
                 if (expected_hash is not None and expected_hash != digest and not own_write) or (expected_parent is not None and expected_parent != identity):
-                    raise PlanInvalidated("An external resource pack changed after scan")
+                    raise PlanInvalidated("An external resource pack changed after scan", "TARGET_CHANGED")
                 self.external_pack_inputs[str(resolved)] = digest
                 self.external_pack_parents[str(resolved)] = identity
                 self.external_pack_identity[str(resolved)] = object_identity(resolved)
@@ -1632,10 +1640,10 @@ class WorldTranslator(TextExtractionMixin):
             parent = target.parent.stat() if target.parent.is_dir() else None
             identity = f"{parent.st_dev}:{parent.st_ino}" if parent else None
             if target.is_symlink() or not target.is_file() or identity != self.external_pack_parents[path] or file_sha256(target) != digest:
-                raise PlanInvalidated("An external resource pack changed during translation. Rescan before writing.")
+                raise PlanInvalidated("An external resource pack changed during translation. Rescan before writing.", "TARGET_CHANGED")
             known = self.external_pack_identity.get(path)
             if known is not None and object_identity(target) != known:
-                raise PlanInvalidated("An external resource pack was replaced during translation. Rescan before writing.")
+                raise PlanInvalidated("An external resource pack was replaced during translation. Rescan before writing.", "TARGET_CHANGED")
 
     def _external_backup_files(self) -> list[Path]:
         if not self.config["resource_pack"]["enabled"]:
@@ -1843,13 +1851,16 @@ class WorldTranslator(TextExtractionMixin):
         return self._run_backup
 
     def _job(self) -> tuple[Journal, Any]:
-        """The recovery record of this run, next to its backup set. A resumed run continues its own."""
+        """The recovery record of this run, next to its backup set. A resumed run gets a new one that
+        names the job it continues (``supersedes``); that job is closed once the new intent is on disk."""
         backup = self._ensure_backup()
         if self._journal is None:
             path = backup.root / JOURNAL_NAME
             world_dir = Path(self.config["world_dir"]).resolve()
+            stores, _own = self._world_stores(world_dir)
             self._journal = Journal.load(path) if path.is_file() else Journal.create(
-                path, job_id=backup.backup_id, kind="translate", world_dir=world_dir)
+                path, job_id=backup.backup_id, kind="translate", world_dir=world_dir, stores=stores,
+                supersedes=self._resume_job_id if self._resume_old_path is not None else "")
         return self._journal, backup
 
     def _acquire_target_locks(self) -> None:
@@ -1864,13 +1875,70 @@ class WorldTranslator(TextExtractionMixin):
         locks.acquire(float(self.runtime_config.get("target_lock_wait", 0) or 0))
         self._target_locks = locks
 
-    def _blocking_interrupted_jobs(self, world_dir: Path) -> list[dict]:
-        """Jobs of this world that died in the middle of a write. A new write waits for their recovery."""
-        from mwt.journal import BLOCKING_STATES
-        from mwt.safety import legacy_backup_store
+    def _world_stores(self, world_dir: Path) -> tuple[list[Path], list[Path]]:
+        """Every store that may hold a record of this world, and the ones that are this world's own."""
+        from mwt.safety import backup_store, legacy_backup_store
 
-        stores = [self._backup_store() or legacy_backup_store(world_dir)]
-        return [item for item in unsettled_for_world(world_dir, stores) if item.get("journalState") in BLOCKING_STATES]
+        configured = self._backup_store()
+        everything: list[Path] = [configured] if configured else []
+        own: list[Path] = list(everything)
+        data_dir = self.runtime_config.get("data_dir")
+        if data_dir:
+            app_store = backup_store(world_dir, Path(data_dir))
+            own.append(app_store)
+            everything.append(app_store)
+            try:
+                everything.extend(sorted(path for path in (Path(data_dir) / "backups").iterdir() if path.is_dir()))
+            except OSError:
+                pass
+        legacy = legacy_backup_store(world_dir)
+        own.append(legacy)
+        everything.append(legacy)
+        return everything, own
+
+    def _resume_authorized(self) -> set[str]:
+        return {str(Path(path).resolve(strict=False)) for path in self._external_backup_files()}
+
+    def _reconcile_gate(self, world_dir: Path) -> list[str]:
+        """The ids of the unsettled jobs that forbid this run, or ``[]``.
+
+        Every unsettled record of this world in any store blocks (a partial run included): nothing
+        may write on top of work that has not been rolled back or kept. The one exception is the job
+        this run resumes - and only if its world state passes the Keep consistency check; it is then
+        superseded by this run's own record once that record's intent is on disk.
+        """
+        stores, own = self._world_stores(world_dir)
+        old = self._resume_job_id
+        blockers = [item["jobId"] for item in blocking_journals(world_dir, stores, own=own, ignore=[old] if old else [])]
+        if blockers:
+            return blockers
+        if not old:
+            return []
+        from mwt.journal import find_journal
+
+        try:
+            path = find_journal(old, stores)
+            conflicts = check_resume(path, self._resume_authorized())
+        except JournalError as exc:
+            if exc.code == "JOURNAL_NOT_FOUND":
+                return []  # no record (an older release): nothing to reconcile
+            return [old]
+        except (OSError, RuntimeError):
+            return [old]  # an external pack that cannot be checked: do not guess
+        if conflicts:
+            return [old]
+        if Journal.load(path).settled:
+            return []
+        self._resume_old_path = path
+        return []
+
+    def _supersede_old_job(self) -> None:
+        """Close the resumed job (durably) now that this run's own record holds the whole intent."""
+        if self._resume_old_path is None or self._resume_superseded or self._journal is None:
+            return
+        stores, _own = self._world_stores(Path(self.config["world_dir"]).resolve())
+        supersede(self._resume_old_path, self._journal.job_id, self._resume_authorized(), stores=stores)
+        self._resume_superseded = True
 
     def _revalidate_world(self) -> None:
         """Stop with ``WorldChanged`` if files appeared, vanished or changed size since this run
@@ -1918,12 +1986,18 @@ class WorldTranslator(TextExtractionMixin):
         transaction = WriteTransaction(
             journal, backup, Path(self.config["world_dir"]).resolve(), retries=1,
             write_bytes=self._write_world_bytes, should_stop=self.is_cancelled,
+            after_intent=self._supersede_old_job if self._resume_old_path is not None else None,
         )
         try:
             outcome = transaction.run(units, stop_on_error=stop_on_error, on_unit_done=on_unit_done)
         finally:
             self._backup_published = True
         self.report["write_state"] = outcome.state
+        unknown = [str(path) for result in outcome.units for path in result.unknown]
+        if unknown:
+            # Files whose result could not be read back: reported as unknown, never as success.
+            known = self.report.setdefault("unknown_outcomes", [])
+            known.extend(path for path in unknown if path not in known)
         return outcome
 
     def _unit_failure(self, result: UnitResult, label: str) -> BaseException:
@@ -1965,7 +2039,7 @@ class WorldTranslator(TextExtractionMixin):
                     stop_on_error=not self.runtime_config["continue_on_file_error"],
                 )
             except WorldChanged as exc:
-                raise PlanInvalidated(str(exc)) from exc
+                raise PlanInvalidated(str(exc), exc.code) from exc
             except DiskFull as exc:
                 # Stopped before the first publish (the backup or staging did not fit): nothing changed.
                 entry = {"scope": "write", "code": "DISK_FULL", "message": str(exc)[:300]}
@@ -1975,11 +2049,19 @@ class WorldTranslator(TextExtractionMixin):
                 return
             if outcome.stopped == "CANCELLED":
                 self.ensure_not_cancelled()
-            if outcome.stopped == "WORLD_CHANGED":
-                failed = next((r for r in outcome.units if r.error_code == "WORLD_CHANGED"), None)
-                raise PlanInvalidated(str(failed.error) if failed and failed.error else "The world changed during the write.")
+            if outcome.stopped in {"WORLD_CHANGED", "TARGET_CHANGED"}:
+                failed = next((r for r in outcome.units if r.error_code == outcome.stopped), None)
+                raise PlanInvalidated(str(failed.error) if failed and failed.error else "The world changed during the write.",
+                                      outcome.stopped)
             if outcome.stopped == "DISK_FULL":
                 entry = {"scope": "write", "code": "DISK_FULL", "message": "The disk is full. Free some space and resume."}
+                self.report["errors"].append(entry)
+                self.file_errors.append(entry)
+            elif outcome.stopped == "JOURNAL_WRITE_FAILED":
+                # The files above were written and are counted; the record could not follow, so nothing
+                # more was published. The job stays open (unsettled) for recovery or a resume.
+                entry = {"scope": "write", "code": "JOURNAL_WRITE_FAILED",
+                         "message": "The recovery record could not be saved, so no further file was written."}
                 self.report["errors"].append(entry)
                 self.file_errors.append(entry)
             if first_error and not self.runtime_config["continue_on_file_error"]:
@@ -2208,6 +2290,15 @@ class WorldTranslator(TextExtractionMixin):
         self.report["status"] = status
         self.report["provider_requests"] = LLMProviderClient.request_count
         self.report["usage"] = dict(LLMProviderClient.usage)
+        if status == "completed" and self._resume_old_path is not None and not self._resume_superseded:
+            # Nothing was left to write, so no record took over: the job this run continued is closed
+            # as kept (its state was verified when the run began).
+            try:
+                supersede(self._resume_old_path, "", self._resume_authorized(),
+                          stores=self._world_stores(Path(self.config["world_dir"]).resolve())[0])
+                self._resume_superseded = True
+            except Exception as exc:
+                self._warn("resume_job_not_closed", message=type(exc).__name__)
         self.write_report()
         if status in {"partial", "needs_retry"} and not self.config["dry_run"]:
             # Only a fully completed job (or an explicit discard) clears its checkpoint. A partial run,
@@ -2530,7 +2621,7 @@ class WorldTranslator(TextExtractionMixin):
             try:
                 self._verify_external_pack_inputs()
             except PlanInvalidated as exc:
-                raise WorldChanged(str(exc)) from exc
+                raise (TargetChanged if exc.code == "TARGET_CHANGED" else WorldChanged)(str(exc)) from exc
 
         if external:
             label = f"{resolved.name}~{_hashlib.sha256(key.encode('utf-8')).hexdigest()[:8]}"
@@ -2541,11 +2632,23 @@ class WorldTranslator(TextExtractionMixin):
         spec = TargetSpec(
             path=resolved, root_kind="external_pack" if external else "world", source=staged, role="pack",
             expected_pre=expected, discard_source=True,
+            identity=self._validated_identity(key) if external else None,
         )
         unit = UnitSpec(unit_id=f"pack:{label}", kind="resource_pack", label=label, targets=[spec],
                         precheck=precheck if external else None)
         meta = {"key": key, "before": self.external_pack_inputs.get(key), "after": file_sha256(staged)}
         return result, unit, meta
+
+    def _validated_identity(self, key: str) -> dict | None:
+        """The file and folder identity this run checked for an external pack, in the form a plan takes."""
+        file_id, parent_id = self.external_pack_identity.get(key), self.external_pack_parents.get(key)
+        if file_id is None or parent_id is None:
+            return None
+        try:
+            dev, ino = (int(part) for part in file_id.split(":"))
+        except ValueError:
+            return None
+        return {"file": {"dev": dev, "ino": ino}, "parent": parent_id}
 
     def translate_resource_pack_zip(self, zip_path: Path) -> dict[str, Any]:
         """Translate one pack and write it as a one-unit job (the whole run uses ``write_resource_packs``)."""
@@ -2718,7 +2821,7 @@ def main(argv: list[str] | None = None) -> None:
 
         try:
             source.restore(recovery_store=store)  # holds the write lock and the game's session locks
-        except (WorldWriteLocked, MinecraftWorldInUse) as exc:
+        except (WorldWriteLocked, MinecraftWorldInUse, JournalError) as exc:
             raise SystemExit(f"Nothing was restored: {exc}") from exc
         print(json.dumps({"status": "restored", "world_dir": config["world_dir"]}, ensure_ascii=False))
         return

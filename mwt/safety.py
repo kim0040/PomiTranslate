@@ -30,7 +30,11 @@ class ExternalTargetError(BackupError):
 
 
 class PlanInvalidated(RuntimeError):
-    pass
+    """The world (or an external pack) is not what the scan saw. ``code``: WORLD_CHANGED or TARGET_CHANGED."""
+
+    def __init__(self, message: str = "", code: str = "WORLD_CHANGED") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def iter_data_files(world_dir: Path) -> list[Path]:
@@ -357,7 +361,8 @@ class BackupSet:
             resolved = path.resolve()
             self._written.add(resolved.relative_to(self.world_dir).as_posix() if resolved.is_relative_to(self.world_dir) else self._external_archive_path(resolved))
 
-    def restore(self, recovery_store: Path | None = None, *, hold_guards: bool = True, lock_dir: Path | None = None) -> str:
+    def restore(self, recovery_store: Path | None = None, *, hold_guards: bool = True, lock_dir: Path | None = None,
+                stores: list[Path] | None = None) -> str:
         """Put the backed-up files back. The files they replace are kept as a recovery set first.
 
         The world write lock, the game's session locks and the lock of every external pack are
@@ -366,19 +371,36 @@ class BackupSet:
         ``hold_guards=False`` only when the caller already holds all of them.
 
         The restore is a job like a translation: its recovery set carries a journal, so a restore
-        that is cut off shows up as an interrupted job and can be rolled back.
+        that is cut off shows up as an interrupted job and can be rolled back. It is also a writer
+        like any other: while an earlier job of this world is unsettled in ANY store (``stores``
+        names the stores to look in besides this set's own and the legacy one inside the world),
+        it is refused with ``RECOVERY_REQUIRED``.
         """
         if not hold_guards:
-            return self._restore(recovery_store)
+            return self._restore(recovery_store, stores)
         from mwt.locking import hold_world
 
         with hold_world(self.world_dir, "restore", external_targets=[Path(path) for path in self.external_files],
                         lock_dir=lock_dir):
-            return self._restore(recovery_store)
+            return self._restore(recovery_store, stores)
 
-    def _restore(self, recovery_store: Path | None) -> str:
+    def _restore(self, recovery_store: Path | None, stores: list[Path] | None = None) -> str:
         from mwt import journal as journal_module
 
+        known, own = journal_module.default_stores(self.world_dir, recovery_store or self.store)
+        known = [*(stores or []), self.store, *known]
+        # Restoring a job's own backup set is how that job is undone, so its record is not a blocker.
+        own_record = self.root / journal_module.JOURNAL_NAME
+        own_id = ""
+        if own_record.is_file():
+            head = journal_module.peek_header(own_record)
+            own_id = head["jobId"] if head else ""
+        blockers = journal_module.blocking_journals(
+            self.world_dir, known, own=[*own, self.store], ignore=[own_id] if own_id else [], family_of=own_id)
+        if blockers:
+            raise journal_module.JournalError(
+                "RECOVERY_REQUIRED", "An earlier write to this world is unsettled. Roll it back or keep it first.",
+                [item["jobId"] for item in blockers])
         payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         entries = self._validated_manifest_entries(payload)
         if not payload.get("verified") or not entries:
@@ -398,7 +420,8 @@ class BackupSet:
         recovery = BackupSet.new(self.world_dir, kind="recovery", store=recovery_store or self.store,
                                  external_files=[Path(path) for path in self.external_files])
         record = journal_module.Journal.create(
-            recovery.root / journal_module.JOURNAL_NAME, job_id=recovery.backup_id, kind="restore", world_dir=self.world_dir)
+            recovery.root / journal_module.JOURNAL_NAME, job_id=recovery.backup_id, kind="restore",
+            world_dir=self.world_dir, stores=known)
         outcome = journal_module.WriteTransaction(record, recovery, self.world_dir).run(units)
         if outcome.state != "committed":
             failed = next((result for result in outcome.units if result.attempted and not result.verified), None)
@@ -406,10 +429,33 @@ class BackupSet:
             label = failed.label if failed else "a file"
             message = (f"Restore stopped at {label} ({code}). The files it replaced are saved in recovery set "
                        f"{recovery.backup_id}, which can undo what was restored.")
-            if code in {"WORLD_CHANGED", "DISK_FULL"}:
+            if code in {"WORLD_CHANGED", "TARGET_CHANGED", "DISK_FULL"}:
                 raise journal_module.JournalError(code, message)
             raise BackupError(message)
+        if own_id:
+            self._settle_restored_record(own_record)
         return recovery.backup_id
+
+    def _settle_restored_record(self, record_path: Path) -> None:
+        """After a restore, close the record of the job whose set was restored - but only when every
+        file of it now holds its preimage again (proved by rehashing), never on trust."""
+        from mwt import journal as journal_module
+
+        try:
+            record = journal_module.Journal.load(record_path)
+            if record.settled:
+                return
+            for _unit, target in record.targets():
+                if target["rootKind"] == "external_pack":
+                    live = Path(target["externalTarget"])
+                else:
+                    live = record.world_dir / Path(*PurePosixPath(target["path"]).parts)
+                if not journal_module.same_state(journal_module.state_of(live), target["preimage"]):
+                    return
+            record.doc["settledBy"] = "restore"
+            record.set_state("rolled_back")
+        except (OSError, journal_module.JournalError):
+            return  # the record stays listed; the restore itself already succeeded
 
     def _restore_units(self, entries: list[dict[str, str]]) -> list:
         """One unit per region file with the ``.mcc`` payloads that belong to it, one per other file.
@@ -418,7 +464,7 @@ class BackupSet:
         removed last. That is the order this module always used; it keeps a region from pointing
         at a payload that is not there yet or was already deleted.
         """
-        from mwt.journal import TargetSpec, UnitSpec
+        from mwt.journal import TargetSpec, UnitSpec, file_identity
 
         groups: dict[str, list[tuple[int, TargetSpec]]] = {}
         labels: dict[str, str] = {}
@@ -444,6 +490,7 @@ class BackupSet:
                 root_kind="external_pack" if external else "world",
                 source=None if remove else self.root / entry["path"],
                 role=role,
+                identity=file_identity(destination),  # what was validated is the only object this write may replace
             )))
             labels[key] = Path(key).name if external else key
         return [
