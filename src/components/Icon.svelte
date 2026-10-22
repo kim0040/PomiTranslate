@@ -13,7 +13,8 @@
     folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
     search: 'M11 4.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.2-4.2',
     list: 'M9 6h11M9 12h11M9 18h11M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5',
-    language: 'M4 5h9M8.5 3v2M6 5c.5 3 2.5 6 6 8M12 5c-.8 3.5-3 6-7 8M13 20l4-9 4 9M14.5 17h5',
+    // Two arrows passing each other: lighter than a letter pair, and the same 1.75 line as the rest.
+    language: 'M7.5 4L3.5 8l4 4M3.5 8H16M16.5 12l4 4-4 4M20.5 16H8',
     'check-circle': 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12.5l2.7 2.7L16 9.5',
     archive: 'M3 4h18v4H3zM5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12.5h4',
     sliders: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 5a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM9 15a2 2 0 1 0 0 4 2 2 0 0 0 0-4z',

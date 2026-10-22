@@ -43,7 +43,8 @@
     {#if app.isBusy}<p class="busy" role="alert">{t('reset.busy')}</p>{/if}
     {#snippet actions()}
       <button type="button" class="btn btn-secondary" data-autofocus onclick={onClose}>{t('common.cancel')}</button>
-      <button type="button" class="btn btn-danger" disabled={app.isBusy} onclick={() => (stage = 'confirm')}>{t('reset.continue')}</button>
+      <!-- Cancel keeps the focus; this is the heavier of the two, with the danger colour and an arrow for "more to come". -->
+      <button type="button" class="btn btn-danger go" disabled={app.isBusy} onclick={() => (stage = 'confirm')}>{t('reset.continue')} <Icon name="chevron-right" size={15} /></button>
     {/snippet}
   </Dialog>
 {:else}
@@ -69,6 +70,8 @@
   .keys .label { color: var(--text); }
   .keys small { font-size: var(--text-xs); }
   .busy { color: var(--danger-text); }
+  .go { background: var(--danger-soft); font-weight: 650; }
+  .go:disabled { background: var(--bg-sunken); }
   .warn { display: grid; grid-template-columns: auto 1fr; gap: var(--space-3); align-items: start; }
   .warn :global(.icon) { color: var(--danger-text); }
   .warn strong { color: var(--text); }

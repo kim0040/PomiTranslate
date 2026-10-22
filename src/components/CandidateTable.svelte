@@ -10,11 +10,19 @@
   // `open` is true when the user asked to see the row (click, Enter), not when the selection just moved.
   let { selectedId, onSelect }: { selectedId: string; onSelect: (candidate: Candidate, open: boolean) => void } = $props();
 
-  const ROW = 60;
+  // One line per row: the work is scanning many of them, so the rows are short.
+  const ROW = 44;
   const source = app.candidates;
   let viewport: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
   let height = $state(420);
+  let width = $state(640);
+  // Columns are left out of the markup, not hidden with CSS: a hidden cell still reserves its width in a
+  // fixed-layout table, and the spacer rows would then stop short of the right edge.
+  const showKind = $derived(width >= 360);
+  const showState = $derived(width >= 560);
+  const showWhere = $derived(width >= 860);
+  const cols = $derived(2 + (showKind ? 1 : 0) + (showState ? 1 : 0) + (showWhere ? 1 : 0));
   let active = $state(0);
 
   const win = $derived(visibleWindow({ scrollTop, viewportHeight: height, rowHeight: ROW, total: source.total }));
@@ -64,7 +72,7 @@
     active = next;
     if (viewport) {
       const top = next * ROW;
-      const header = 40;
+      const header = 32;
       if (top < viewport.scrollTop) viewport.scrollTop = top;
       else if (top + ROW > viewport.scrollTop + viewport.clientHeight - header) viewport.scrollTop = top + ROW - viewport.clientHeight + header;
     }
@@ -110,20 +118,28 @@
   class="viewport"
   bind:this={viewport}
   bind:clientHeight={height}
+  bind:clientWidth={width}
   onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
 >
-  <table role="grid" aria-label={t('review.title')} aria-rowcount={source.total + 1} aria-colcount="5">
+  <table role="grid" aria-label={t('review.title')} aria-rowcount={source.total + 1} aria-colcount={cols}>
+    <colgroup>
+      <col class="k-include" />
+      <col class="k-source" />
+      {#if showKind}<col class="k-kind" />{/if}
+      {#if showWhere}<col class="k-where" />{/if}
+      {#if showState}<col class="k-state" />{/if}
+    </colgroup>
     <thead>
       <tr aria-rowindex="1">
         <th class="c-include" scope="col"><span class="sr-only">{t('review.col.include')}</span></th>
         <th class="c-source" scope="col">{t('review.col.source')}</th>
-        <th class="c-kind" scope="col">{t('review.col.kind')}</th>
-        <th class="c-where" scope="col">{t('review.col.where')}</th>
-        <th class="c-state" scope="col">{t('review.col.state')}</th>
+        {#if showKind}<th class="c-kind" scope="col">{t('review.col.kind')}</th>{/if}
+        {#if showWhere}<th class="c-where" scope="col">{t('review.col.where')}</th>{/if}
+        {#if showState}<th class="c-state" scope="col">{t('review.col.state')}</th>{/if}
       </tr>
     </thead>
     <tbody>
-      {#if win.padTop > 0}<tr aria-hidden="true" class="pad" style:height="{win.padTop}px"><td colspan="5"></td></tr>{/if}
+      {#if win.padTop > 0}<tr aria-hidden="true" class="pad" style:height="{win.padTop}px"><td colspan={cols}></td></tr>{/if}
       {#each indexes as index (index)}
         {@const candidate = source.rowAt(index)}
         {#if candidate}
@@ -153,32 +169,37 @@
                 onchange={(event) => app.setIncluded(candidate.id, event.currentTarget.checked)}
               />
             </td>
-            <td class="c-source"><span class="src">{candidate.source}</span></td>
-            <td class="c-kind">
-              <span class="kind">{kindLabel(candidate.kind)}</span>
-              {#if detailText(candidate)}<span class="detail">{detailText(candidate)}</span>{/if}
+            <td class="c-source">
+              <span class="line" title={candidate.source}>
+                {#if state === 'manual'}<span class="mark" title={t('review.state.manual.label')}><Icon name="pencil" size={13} /></span>{/if}
+                <span class="src">{candidate.source}</span>
+              </span>
             </td>
-            <td class="c-where">
-              <span class="where">{placeText(candidate)}</span>
-              {#if candidate.occurrences > 1}<span class="detail num">{t('common.places', { count: formatNumber(candidate.occurrences, app.locale) })}</span>{/if}
-            </td>
-            <td class="c-state">
-              {#if state === 'manual'}<span class="pill pill-accent"><Icon name="pencil" size={12} /> {t('review.state.manual.label')}</span>
-              {:else if state === 'excluded'}<span class="pill"><Icon name="minus" size={12} /> {t('review.state.excluded.label')}</span>
-              {:else}<span class="pill pill-success"><Icon name="check" size={12} /> {t('review.state.included.label')}</span>{/if}
-            </td>
+            {#if showKind}
+              <td class="c-kind"><span class="kind" title={detailText(candidate) ? `${kindLabel(candidate.kind)} · ${detailText(candidate)}` : kindLabel(candidate.kind)}>{kindLabel(candidate.kind)}</span></td>
+            {/if}
+            {#if showWhere}
+              <td class="c-where"><span class="where" title={placeText(candidate)}>{placeText(candidate)}</span></td>
+            {/if}
+            {#if showState}
+              <!-- Only a state worth noticing gets a word. "Included" is what almost every row is. -->
+              <td class="c-state">
+                {#if state === 'manual'}<span class="pill pill-accent pill-dot">{t('review.state.manual.label')}</span>
+                {:else if state === 'excluded'}<span class="pill pill-dot">{t('review.state.excluded.label')}</span>{/if}
+              </td>
+            {/if}
           </tr>
         {:else}
           <tr class="skeleton" aria-rowindex={index + 2} aria-busy="true" style:height="{ROW}px">
             <td class="c-include"></td>
             <td class="c-source"><span class="bone" style:width="{50 + ((index * 37) % 40)}%"></span></td>
-            <td class="c-kind"><span class="bone short"></span></td>
-            <td class="c-where"><span class="bone short"></span></td>
-            <td class="c-state"></td>
+            {#if showKind}<td class="c-kind"><span class="bone short"></span></td>{/if}
+            {#if showWhere}<td class="c-where"><span class="bone short"></span></td>{/if}
+            {#if showState}<td class="c-state"></td>{/if}
           </tr>
         {/if}
       {/each}
-      {#if win.padBottom > 0}<tr aria-hidden="true" class="pad" style:height="{win.padBottom}px"><td colspan="5"></td></tr>{/if}
+      {#if win.padBottom > 0}<tr aria-hidden="true" class="pad" style:height="{win.padBottom}px"><td colspan={cols}></td></tr>{/if}
     </tbody>
   </table>
   {#if source.total === 0 && !source.loading && !source.error}
@@ -197,33 +218,30 @@
 </div>
 
 <style>
-  /* Columns follow the table's own width, not the window's: the detail pane takes 360px of it. */
-  .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); overscroll-behavior: contain; container: candidates / inline-size; }
-  table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-sm); }
-  th { position: sticky; top: 0; z-index: 2; height: 30px; padding: 0 var(--space-3); text-align: start; font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); background: var(--bg-sunken); border-bottom: 1px solid var(--border); }
+  .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--bg-surface); box-shadow: var(--shadow-card); overscroll-behavior: contain; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-md); }
+  .k-include { width: 44px; }
+  .k-kind { width: 132px; }
+  .k-where { width: 200px; }
+  .k-state { width: 108px; }
+  th { position: sticky; top: 0; z-index: 2; height: 32px; padding: 0 var(--space-3); text-align: start; font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); background: var(--bg-sunken); border-bottom: 1px solid var(--border); }
   td { padding: 0 var(--space-3); border-bottom: 1px solid var(--border); vertical-align: middle; overflow: hidden; }
   tbody tr:not(.pad):not(.skeleton) { cursor: default; }
   tr.selected td { background: var(--bg-selected); }
+  tr.selected td.c-include { box-shadow: inset 2px 0 0 var(--accent); }
   tr.excluded .src { color: var(--text-secondary); text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
   tr:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
-  .c-include { width: 44px; text-align: center; padding: 0; }
+  .c-include { text-align: center; padding: 0; }
   .c-include input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; vertical-align: middle; }
-  .c-source { width: auto; }
-  .c-kind { width: 130px; }
-  .c-where { width: 190px; }
-  .c-state { width: 104px; }
-  .src { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-line; }
-  .kind, .where { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .where { font-weight: 500; font-family: var(--font-mono); font-size: var(--text-xs); }
-  .detail { display: block; font-size: var(--text-xs); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .mark { flex: none; display: inline-flex; color: var(--accent-text); }
+  .src { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kind, .where { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: var(--text-sm); }
+  .where { font-family: var(--font-mono); font-size: var(--text-xs); }
   @media (hover: hover) { tbody tr:not(.pad):not(.skeleton):not(.selected):hover td { background: var(--bg-hover); } }
   .bone { display: block; height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--bg-sunken), var(--bg-hover), var(--bg-sunken)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
   .bone.short { width: 60%; }
   @keyframes shimmer { to { background-position: -200% 0; } }
-  .empty { position: absolute; inset: 40px 0 0; display: grid; place-content: center; text-align: center; gap: var(--space-1); padding: var(--space-5); }
-  .strong { font-weight: 700; }
-  /* The source column always keeps at least ~280px; lower-value columns give way first. */
-  @container candidates (max-width: 760px) { .c-where { display: none; } .c-kind { width: 120px; } }
-  @container candidates (max-width: 480px) { .c-kind { display: none; } .c-state { width: 96px; } }
-  @container candidates (max-width: 400px) { .c-state { display: none; } }
+  .empty { position: absolute; inset: 32px 0 0; display: grid; place-content: center; text-align: center; gap: var(--space-1); padding: var(--space-5); }
+  .strong { font-weight: 600; }
 </style>

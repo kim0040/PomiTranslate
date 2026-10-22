@@ -211,7 +211,7 @@
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
-        ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '' } } : {}),
+        ...(current === 'first-run' ? { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true } } : {}),
         apiKeyStored: vaultBroken() ? false : !fresh || freshKeySaved, credentialMode: 'local',
         ...(vaultBroken() ? { credentialState: { mode: 'local', error: 'VAULT_CORRUPT' } } : {}),
         worlds: empty ? [] : [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }],
@@ -236,7 +236,7 @@
     }
     if (type === 'prefs.set') {
       window.__pomiPrefs = { ...(window.__pomiPrefs || {}), ...(body.prefs || {}) };
-      return ok(request, { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', ...window.__pomiPrefs } });
+      return ok(request, { prefs: { theme: 'system', notice_accepted: false, tutorial_seen: false, update_auto_check: true, update_last_check: 0, update_skipped_version: '', notify_on_finish: true, ...window.__pomiPrefs } });
     }
     if (type === 'app.reset') {
       if (body.confirm !== 'reset') return { v: 1, id: request.id, type: 'response.error', error: { code: 'INVALID_REQUEST', message: 'Reset needs an explicit confirmation' } };

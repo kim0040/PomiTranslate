@@ -26,17 +26,17 @@ test('settings switch light, dark and system at once and keep the choice', async
 
   await section.getByRole('radio', { name: '다크' }).check();
   expect(await theme(page)).toBe('dark');
-  expect(await background(page)).toBe('rgb(18, 15, 11)');
+  expect(await background(page)).toBe('rgb(14, 15, 17)');
   await expect.poll(() => page.evaluate(() => (window as any).__pomiPrefs?.theme)).toBe('dark');
   await expect.poll(async () => (await chrome(page, 'plugin:window|set_theme')).at(-1)?.value).toBe('dark');
   await expect.poll(async () => (await chrome(page, 'set_menu_theme')).at(-1)?.choice).toBe('dark');
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#120f0b');
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled(); // nothing to save
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0e0f11');
+  await expect(page.locator('.action-bar')).toHaveCount(0); // nothing to save: no save bar
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 
   await section.getByRole('radio', { name: '라이트' }).check();
   expect(await theme(page)).toBe('light');
-  expect(await background(page)).toBe('rgb(249, 248, 247)');
+  expect(await background(page)).toBe('rgb(250, 250, 250)');
   await expect.poll(() => page.evaluate(() => (window as any).__pomiPrefs?.theme)).toBe('light');
 });
 
@@ -52,7 +52,7 @@ test('system follows the operating system while the app is open', async ({ page 
   await page.emulateMedia({ colorScheme: 'dark' });
   await expect.poll(() => theme(page)).toBe('dark');
   await expect(section).toContainText('지금: 다크');
-  await expect.poll(async () => (await chrome(page, 'plugin:window|set_background_color')).at(-1)?.value).toBe('#120f0b');
+  await expect.poll(async () => (await chrome(page, 'plugin:window|set_background_color')).at(-1)?.value).toBe('#0e0f11');
 
   await page.emulateMedia({ colorScheme: 'light' });
   await expect.poll(() => theme(page)).toBe('light');
@@ -81,7 +81,7 @@ test('the saved mode is on the page before the app code runs, so a dark start ne
   await page.addInitScript(() => localStorage.setItem('pomi.theme.v1', 'dark'));
   await page.goto('/');
   expect(await theme(page)).toBe('dark');
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#120f0b');
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0e0f11');
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.addInitScript(() => localStorage.removeItem('pomi.theme.v1'));
   await page.goto('/');
@@ -99,5 +99,9 @@ test('every screen passes contrast checks in dark mode', async ({ page }) => {
     await page.getByRole('button', { name, exact: true }).click();
     expect((await new AxeBuilder({ page }).analyze()).violations, name).toEqual([]);
   }
-  await expect(page.locator('.dark-wordmark').first()).toBeVisible();
+  // The About hero's lockup is an SVG that recolours with the theme: its ink must be light on the dark surface.
+  const lockup = page.locator('.about .hero h1 svg');
+  await expect(lockup).toBeVisible();
+  const ink = await lockup.evaluate((el) => getComputedStyle(el).color.match(/\d+/g)!.slice(0, 3).map(Number));
+  expect(Math.min(...ink)).toBeGreaterThan(180);
 });

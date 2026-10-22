@@ -1,30 +1,20 @@
 /**
- * Preferences this web view keeps itself. The core's preference file accepts only the keys it
- * knows, so a new switch lives here until the core learns it. Losing it (cleared web storage)
- * falls back to the default, which is the safe side for every switch below.
+ * Browser-side leftovers. The finish-notification switch used to live here; it is now an app
+ * preference (`notify_on_finish`) kept by the core, so this file only reads the old value once.
  */
-const KEY = 'pomi.local-prefs.v1';
+const LEGACY_KEY = 'pomi.local-prefs.v1';
 
-export type LocalPrefs = {
-  /** Tell the person with a system notification when a job ends while the window is in the back. */
-  notify_on_finish: boolean;
-};
-
-export const DEFAULT_LOCAL_PREFS: LocalPrefs = { notify_on_finish: true };
-
-export function loadLocalPrefs(): LocalPrefs {
+/** The switch an earlier build kept in web storage, or null. Reading it removes it (a one-time migration). */
+export function takeLegacyNotifyPref(): boolean | null {
   try {
-    const parsed = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<LocalPrefs>;
-    return { notify_on_finish: typeof parsed.notify_on_finish === 'boolean' ? parsed.notify_on_finish : DEFAULT_LOCAL_PREFS.notify_on_finish };
+    const raw = localStorage.getItem(LEGACY_KEY);
+    if (raw === null) return null;
+    localStorage.removeItem(LEGACY_KEY);
+    const parsed = JSON.parse(raw) as { notify_on_finish?: unknown };
+    return typeof parsed.notify_on_finish === 'boolean' ? parsed.notify_on_finish : null;
   } catch {
-    return { ...DEFAULT_LOCAL_PREFS };
+    return null;
   }
-}
-
-export function saveLocalPrefs(prefs: LocalPrefs): void {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(prefs));
-  } catch { /* no storage: the switch lasts until the window closes */ }
 }
 
 // --- send-to-provider consent --------------------------------------------------------------

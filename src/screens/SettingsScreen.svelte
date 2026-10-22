@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Dialog from '../components/Dialog.svelte';
   import AppMaintenance from '../components/AppMaintenance.svelte';
   import Icon from '../components/Icon.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import SettingsHint from '../components/SettingsHint.svelte';
   import ScanScopeSettings from '../components/ScanScopeSettings.svelte';
   import ResourcePackSettings from '../components/ResourcePackSettings.svelte';
   import ExternalResourcePacks from '../components/ExternalResourcePacks.svelte';
@@ -322,11 +324,39 @@
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (await saveSettings() && app.returnStep) app.returnFromSettings();
+    // Nothing to save means no save bar; an Enter key must not write the settings anyway.
+    if (!dirty) return;
+    if (await saveSettings()) {
+      if (app.returnStep) app.returnFromSettings();
+      else void focusNav();
+    }
+  }
+
+  // The save bar disappears with the last change. Focus must not fall to the page, so it goes to the
+  // section list, which stays on screen.
+  async function focusNav(): Promise<void> {
+    await tick();
+    const target = navEl?.querySelector<HTMLElement>('a[aria-current="true"]') ?? navEl?.querySelector<HTMLElement>('a');
+    target?.focus({ preventScroll: true });
+  }
+
+  function discardChanges(): void {
+    discardDraft();
+    void focusNav();
   }
 
   // Leaving with unsaved changes asks first (AppState holds the move until it is answered).
   $effect(() => { app.settingsDirty = dirty; });
+  // The save bar appears with the first change and covers the bottom of the pane. A field being edited
+  // down there is brought back above it.
+  $effect(() => {
+    if (!dirty) return;
+    const frame = requestAnimationFrame(() => requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.closest('.settings-form')) active.scrollIntoView({ block: 'nearest' });
+    }));
+    return () => cancelAnimationFrame(frame);
+  });
   // "Save and quit" in the exit dialog saves this draft.
   $effect(() => {
     app.saveDraft = saveSettings;
@@ -444,19 +474,145 @@
   function rangeText(label: MessageKey, minimum: string, maximum: string): string {
     return `${t(label)}: ${minimum}–${maximum}`;
   }
+
+  // The section list: it follows the scroll (aria-current marks where the reader is) and moves the
+  // page when used. The ids that menu commands and tests rely on stay on the sections themselves.
+  const sections = [
+    { key: 'provider', id: 'provider-settings', label: 'settings.nav.provider' },
+    { key: 'translation', id: 'translation-settings', label: 'settings.nav.translation' },
+    { key: 'scope', id: 'scope-section', label: 'settings.nav.scope' },
+    { key: 'speed', id: 'speed-settings', label: 'settings.nav.speed' },
+    { key: 'app', id: 'application-settings', label: 'settings.nav.app' },
+    { key: 'manage', id: 'manage-section', label: 'settings.nav.manage' },
+    { key: 'updates', id: 'updates', label: 'settings.nav.updates' },
+    { key: 'data', id: 'data-settings', label: 'settings.nav.data' },
+    { key: 'reset', id: 'reset-section', label: 'settings.nav.reset' }
+  ] as const satisfies readonly { key: string; id: string; label: MessageKey }[];
+  type SectionKey = (typeof sections)[number]['key'];
+
+  let navEl: HTMLElement | undefined = $state();
+  let current = $state<SectionKey>('provider');
+  let wide = $state(typeof matchMedia === 'function' && matchMedia('(min-width: 900px)').matches);
+  let spyLocked = false;
+  let spyTimer: ReturnType<typeof setTimeout> | undefined;
+  let paneEl: HTMLElement | undefined;
+  // Where the last click ended: until the reader scrolls on from there, that entry stays marked, even
+  // when it is a short section at the end of the page that can never reach the top.
+  let pinned: { key: SectionKey; top: number } | null = null;
+  const reducedMotion = (): boolean => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Which section the reader is in: the last one whose top has passed a line a little below the top
+  // of the pane. At the very bottom the last section wins, since a short one can never reach the line.
+  function sectionInView(scroller: HTMLElement): SectionKey {
+    const stripHeight = !wide && navEl ? navEl.offsetHeight : 0;
+    const line = scroller.getBoundingClientRect().top + stripHeight + Math.min(96, scroller.clientHeight * 0.25);
+    let found: SectionKey = sections[0].key;
+    for (const section of sections) {
+      const element = document.getElementById(section.id);
+      if (element && element.getBoundingClientRect().top <= line) found = section.key;
+    }
+    if (scroller.scrollTop > 0 && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) found = sections[sections.length - 1].key;
+    return found;
+  }
+
+  $effect(() => {
+    const scroller = navEl?.closest('main') as HTMLElement | null | undefined;
+    if (!scroller) return;
+    let frame = 0;
+    paneEl = scroller;
+    const update = () => {
+      frame = 0;
+      if (spyLocked) return;
+      if (pinned && Math.abs(scroller.scrollTop - pinned.top) < 4) { current = pinned.key; return; }
+      pinned = null;
+      current = sectionInView(scroller);
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
+    const media = matchMedia('(min-width: 900px)');
+    const onMedia = () => { wide = media.matches; schedule(); };
+    scroller.addEventListener('scroll', schedule, { passive: true });
+    scroller.addEventListener('scrollend', settleSpy);
+    media.addEventListener('change', onMedia);
+    window.addEventListener('resize', schedule);
+    update();
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      clearTimeout(spyTimer);
+      scroller.removeEventListener('scroll', schedule);
+      scroller.removeEventListener('scrollend', settleSpy);
+      paneEl = undefined;
+      media.removeEventListener('change', onMedia);
+      window.removeEventListener('resize', schedule);
+    };
+  });
+
+  // In the compact strip the current entry is kept in view, so the strip itself never hides it.
+  $effect(() => {
+    void current;
+    if (wide || !navEl) return;
+    const link = navEl.querySelector<HTMLElement>('a[aria-current="true"]');
+    if (!link) return;
+    const left = link.offsetLeft - (navEl.clientWidth - link.offsetWidth) / 2;
+    navEl.scrollTo({ left: Math.max(0, left), behavior: reducedMotion() ? 'auto' : 'smooth' });
+  });
+
+  // The move a click started has ended: remember where, and let the scroll position drive the highlight again.
+  function settleSpy(): void {
+    clearTimeout(spyTimer);
+    if (!spyLocked || !paneEl) return;
+    spyLocked = false;
+    pinned = { key: current, top: paneEl.scrollTop };
+  }
+
+  function goToSection(event: MouseEvent, section: (typeof sections)[number]): void {
+    event.preventDefault();
+    const element = document.getElementById(section.id);
+    if (!element) return;
+    current = section.key;
+    // The scroll that follows must not hand the highlight back to the section it passes.
+    spyLocked = true;
+    pinned = null;
+    clearTimeout(spyTimer);
+    spyTimer = setTimeout(settleSpy, reducedMotion() ? 80 : 1000);
+    // A collapsed section is opened, since opening it is why it was chosen.
+    if (section.key === 'scope' || section.key === 'speed') element.querySelector('details')?.setAttribute('open', '');
+    element.scrollIntoView({ block: 'start', behavior: reducedMotion() ? 'auto' : 'smooth' });
+    element.focus({ preventScroll: true });
+  }
 </script>
 
-<div class="page settings" style:--settings-save-height={`${saveBarHeight}px`}>
-  <header class="page-head">
-    <h1>{t('settings.title')}</h1>
-    <p class="lead">{t('settings.lead')}</p>
-  </header>
+<div class="page settings" style:--settings-save-height={`${dirty ? saveBarHeight : 0}px`}>
+  <PageHeader title={t('settings.title')} lead={t('settings.lead')}>
+    {#snippet actions()}
+      {#if app.returnStep && !dirty}
+        <!-- Settings were opened to fix something a step needs: with nothing to save, the way back is the next move. -->
+        <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={() => app.returnFromSettings()}>
+          <Icon name="chevron-left" size={15} /> {t('settings.returnTo', { step: t(`step.${app.returnStep}` as MessageKey) })}
+        </button>
+      {/if}
+      <!-- Always present, so a change of state is announced; the save bar itself only exists while there is something to save. -->
+      <span class="state" class:dirty role="status" aria-live="polite">
+        {#if app.busy === 'settings'}{t('settings.saving')}
+        {:else if dirty}<span class="state-dot" aria-hidden="true"></span>{t('settings.dirty')}
+        {:else}<Icon name="check" size={14} />{t('settings.savedState')}{/if}
+      </span>
+    {/snippet}
+  </PageHeader>
 
-  <form class="settings-form" onsubmit={submit} novalidate>
+  <div class="layout">
+    <nav class="section-nav" aria-label={t('settings.nav.label')} bind:this={navEl}>
+      <ul>
+        {#each sections as section (section.key)}
+          <li><a href={`#${section.id}`} aria-current={current === section.key ? 'true' : undefined} onclick={(event) => goToSection(event, section)}>{t(section.label)}</a></li>
+        {/each}
+      </ul>
+    </nav>
+
+  <form class="settings-form" id="settings-form" onsubmit={submit} novalidate>
     <fieldset disabled={!!app.busy} aria-busy={app.busy === 'settings'}>
-    <section class="card settings-section" aria-labelledby="provider-title">
+    <section class="card settings-section" id="provider-settings" tabindex="-1" aria-labelledby="provider-title">
       <div class="section-head">
-        <div class="section-icon" aria-hidden="true"><Icon name="shield" size={20} /></div>
+        <div class="section-icon" aria-hidden="true"><Icon name="shield" size={18} /></div>
         <div><h2 id="provider-title">{t('settings.provider.title')}</h2><p>{t('settings.provider.help')}</p></div>
       </div>
       <div class="fields two">
@@ -579,7 +735,7 @@
                 <input id="api-key" class="input" type={showApiKey ? 'text' : 'password'} bind:value={apiKey} autocomplete="new-password" placeholder={t('settings.apiKey.placeholder')} spellcheck="false" />
                 <button type="button" class="btn btn-secondary btn-icon" aria-label={showApiKey ? t('settings.apiKey.hide') : t('settings.apiKey.show')} title={showApiKey ? t('settings.apiKey.hide') : t('settings.apiKey.show')} onclick={() => (showApiKey = !showApiKey)}><Icon name={showApiKey ? 'eye-off' : 'eye'} size={18} /></button>
               </div>
-              <span class="hint">{t('settings.apiKey.help')}</span>
+              <SettingsHint text={t('settings.apiKey.help')} />
               {#if stored}<button type="button" class="btn btn-quiet btn-sm key-cancel" onclick={() => { editingKey = false; apiKey = ''; showApiKey = false; }}>{t('settings.apiKey.cancelChange')}</button>{/if}
             </div>
           {/if}
@@ -595,16 +751,18 @@
             <option value="session">{t('settings.vault.session')}</option>
             <option value="keychain">{t('settings.vault.keychain')}</option>
           </select>
-          <span class="hint">{t('settings.vault.help')}</span>
+          <SettingsHint text={t('settings.vault.help')} />
           </div>
-          <button type="button" class="btn btn-secondary" disabled={importing || !!app.busy} onclick={importExisting}>{importing ? t('common.loading') : t('settings.vault.import')}</button>
-          <span class="hint">{t('settings.vault.importHelp')}</span>
+          <div class="field import-key">
+            <div><button type="button" class="btn btn-secondary" disabled={importing || !!app.busy} onclick={importExisting}>{importing ? t('common.loading') : t('settings.vault.import')}</button></div>
+            <SettingsHint text={t('settings.vault.importHelp')} />
+          </div>
         </details>
       </div>
       {#if draft.provider === 'openrouter'}
         <div class="usage-panel">
           <button type="button" class="btn btn-secondary" disabled={!!app.busy || !stored || !!apiKey.trim()} onclick={checkUsage}>{app.busy === 'usage' ? t('common.loading') : t('settings.usage.check')}</button>
-          <p class="hint">{t('settings.usage.help')}</p>
+          <SettingsHint text={t('settings.usage.help')} />
           {#if usageError}<p class="field-error" role="alert">{usageError}</p>{/if}
           <div role="status" aria-live="polite">
             {#each usageSnapshots as usage}
@@ -615,9 +773,9 @@
       {/if}
     </section>
 
-    <section class="card settings-section" aria-labelledby="translation-title">
+    <section class="card settings-section" id="translation-settings" tabindex="-1" aria-labelledby="translation-title">
       <div class="section-head">
-        <div class="section-icon" aria-hidden="true"><Icon name="language" size={20} /></div>
+        <div class="section-icon" aria-hidden="true"><Icon name="language" size={18} /></div>
         <div><h2 id="translation-title">{t('settings.language.title')}</h2><p>{t('settings.language.subtitle')}</p></div>
       </div>
       <div class="fields two">
@@ -640,7 +798,7 @@
           <summary>{t('settings.styleAssist.title')}</summary>
           <label class="label" for="style-brief">{t('settings.styleAssist.brief')}</label>
           <textarea id="style-brief" class="textarea" rows="2" maxlength="4000" bind:value={styleBrief}></textarea>
-          <p class="hint">{t('settings.styleAssist.help')}</p>
+          <SettingsHint text={t('settings.styleAssist.help')} />
           {#if styleError}<p class="field-error" role="alert">{styleError}</p>{/if}
           <button type="button" class="btn btn-secondary" disabled={!!app.busy || !styleBrief.trim() || !draft.model.trim() || !!apiKey.trim() || !credentialState || hasBlockingError} onclick={() => (showStyleConfirm = true)}>{t('settings.styleAssist.action')}</button>
         </details>
@@ -653,11 +811,11 @@
       </div>
     </section>
 
-    <section class="card settings-section" aria-labelledby="scope-title">
+    <section class="card settings-section" id="scope-section" tabindex="-1" aria-labelledby="scope-title">
       <details class="advanced" id="scope-settings">
       <summary>
         <span class="section-head compact">
-          <span class="section-icon" aria-hidden="true"><Icon name="search" size={20} /></span>
+          <span class="section-icon" aria-hidden="true"><Icon name="search" size={18} /></span>
           <span><strong id="scope-title">{t('settings.scope.title')}</strong><small>{t('settings.scope.categoriesHelp')}</small></span>
         </span>
         <Icon name="chevron-down" size={18} />
@@ -683,11 +841,11 @@
       </details>
     </section>
 
-    <section class="card settings-section" aria-labelledby="performance-title">
+    <section class="card settings-section" id="speed-settings" tabindex="-1" aria-labelledby="performance-title">
         <details class="advanced" open={hasRangeError}>
         <summary>
           <span class="section-head compact">
-            <span class="section-icon" aria-hidden="true"><Icon name="sliders" size={20} /></span>
+            <span class="section-icon" aria-hidden="true"><Icon name="clock" size={18} /></span>
             <span><strong id="performance-title">{t('settings.speed.title')}</strong><small>{t('settings.advanced')}</small></span>
           </span>
           <Icon name="chevron-down" size={18} />
@@ -742,9 +900,9 @@
       </details>
     </section>
 
-    <section class="card settings-section" id="application-settings" aria-labelledby="app-title">
+    <section class="card settings-section" id="application-settings" tabindex="-1" aria-labelledby="app-title">
       <div class="section-head">
-        <span class="section-icon" aria-hidden="true"><Icon name="sliders" size={20} /></span>
+        <span class="section-icon" aria-hidden="true"><Icon name="sliders" size={18} /></span>
         <div><h2 id="app-title">{t('settings.app.title')}</h2><p>{t('settings.app.subtitle')}</p></div>
       </div>
       <!-- The mode applies the moment it is picked, like the system's own appearance setting. -->
@@ -754,8 +912,12 @@
           {#each themes as theme (theme.value)}
             <label class="theme-option" class:selected={app.theme === theme.value}>
               <input type="radio" name="theme" value={theme.value} checked={app.theme === theme.value} onchange={() => app.setTheme(theme.value)} />
-              <span class="preview {theme.value}" aria-hidden="true"><span class="bar"></span><span class="line"></span><span class="line short"></span></span>
-              <span class="name">{t(theme.short)}</span>
+              <span class="preview {theme.value}" aria-hidden="true">
+                <!-- Fixed colours on purpose: each tile shows its mode whatever the current one is. "System" is split along a diagonal. -->
+                {#if theme.value !== 'dark'}<span class="mini light"><span class="side"></span><span class="body"><span class="line accent"></span><span class="line"></span><span class="line short"></span></span></span>{/if}
+                {#if theme.value !== 'light'}<span class="mini dark"><span class="side"></span><span class="body"><span class="line accent"></span><span class="line"></span><span class="line short"></span></span></span>{/if}
+              </span>
+              <span class="name">{#if app.theme === theme.value}<Icon name="check" size={13} />{/if}{t(theme.short)}</span>
             </label>
           {/each}
         </div>
@@ -774,7 +936,7 @@
         {#if app.notificationsSupported}
           <div class="field">
             <label class="check">
-              <input type="checkbox" checked={app.localPrefs.notify_on_finish} onchange={(event) => app.setNotifyOnFinish(event.currentTarget.checked)} />
+              <input type="checkbox" checked={app.prefs.notify_on_finish !== false} onchange={(event) => app.setNotifyOnFinish(event.currentTarget.checked)} />
               <span class="label">{t('settings.notify.label')}</span>
             </label>
             <span class="hint">{t('settings.notify.help')}</span>
@@ -783,41 +945,47 @@
       </div>
     </section>
 
-    <section class="card settings-section">
-      <details class="field" id="settings-management">
-        <summary>{t('settings.manage')}</summary>
-        <div class="actions">
-      <input type="file" accept="application/json,.json,.py" bind:this={importInput} onchange={importDraft} hidden />
-      <button type="button" class="btn btn-secondary" disabled={!!app.busy || importingSettings} onclick={() => importInput.click()}>{t('settings.import.action')}</button>
-      <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={exportDraft}>{t('settings.export')}</button>
-      <button type="button" class="btn btn-quiet" disabled={!!app.busy} onclick={resetDraft}>{t('settings.resetDraft')}</button>
+    <section class="card settings-section" id="manage-section" tabindex="-1" aria-labelledby="manage-title">
+      <details class="advanced" id="settings-management">
+        <summary>
+          <span class="section-head compact">
+            <span class="section-icon" aria-hidden="true"><Icon name="archive" size={18} /></span>
+            <span><strong id="manage-title">{t('settings.manage')}</strong></span>
+          </span>
+          <Icon name="chevron-down" size={18} />
+        </summary>
+        <div class="manage-body">
+          <div class="actions">
+            <input type="file" accept="application/json,.json,.py" bind:this={importInput} onchange={importDraft} hidden />
+            <button type="button" class="btn btn-secondary" disabled={!!app.busy || importingSettings} onclick={() => importInput.click()}>{t('settings.import.action')}</button>
+            <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={exportDraft}>{t('settings.export')}</button>
+            <button type="button" class="btn btn-quiet" disabled={!!app.busy} onclick={resetDraft}>{t('settings.resetDraft')}</button>
+          </div>
+          <SettingsHint text={t('settings.import.help')} />
         </div>
-        <p class="hint">{t('settings.import.help')}</p>
       </details>
     </section>
 
     <AppMaintenance />
     </fieldset>
-    <footer class="save-bar" class:dirty bind:clientHeight={saveBarHeight}>
-      <div class="save-status" role="status" aria-live="polite">
-        <strong>{t(app.busy === 'settings' ? 'settings.saving' : dirty ? 'settings.dirty' : 'settings.savedState')}</strong>
-        {#if dirty && hasBlockingError}<span class="field-error">{t('settings.fixErrors')}</span>{/if}
-      </div>
-      <div class="save-buttons">
-      {#if app.returnStep && !dirty}
-        <!-- Settings were opened to fix something a step needs: once saved, the way back is the next move. -->
-        <button type="button" class="btn btn-primary" disabled={!!app.busy} onclick={() => app.returnFromSettings()}>
-          <Icon name="chevron-left" size={15} /> {t('settings.returnTo', { step: t(`step.${app.returnStep}` as MessageKey) })}
-        </button>
-      {:else}
-      <button type="button" class="btn btn-secondary" disabled={!!app.busy || !dirty} onclick={discardDraft}>{t('settings.discard')}</button>
-      <button type="submit" class="btn btn-primary" disabled={!!app.busy || hasBlockingError || !dirty}>
-        <Icon name="check" size={15} /> {t(app.busy === 'settings' ? 'settings.saving' : app.returnStep ? 'settings.saveReturn' : 'common.save')}
-      </button>
-      {/if}
-      </div>
-    </footer>
   </form>
+  </div>
+
+  <!-- Only while there is something to save: a disabled Save button on a clean page says nothing. -->
+  {#if dirty}
+    <div class="action-bar" bind:clientHeight={saveBarHeight}>
+      <div class="note">
+        <span>{t('settings.barHint')}</span>
+        {#if hasBlockingError}<span class="field-error" role="alert">{t('settings.fixErrors')}</span>{/if}
+      </div>
+      <div class="buttons">
+        <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={discardChanges}>{t('settings.discard')}</button>
+        <button type="submit" form="settings-form" class="btn btn-primary" disabled={!!app.busy || hasBlockingError}>
+          <Icon name="check" size={15} /> {t(app.busy === 'settings' ? 'settings.saving' : app.returnStep ? 'settings.saveReturn' : 'common.save')}
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 {#if app.pendingLeave}
@@ -858,18 +1026,67 @@
 <style>
   .recommended { display: grid; gap: var(--space-1); }
   .recommended .chips { display: flex; flex-wrap: wrap; gap: var(--space-1); }
-  .settings > :global(*), .settings-form > fieldset { max-width: 920px; }
-  .settings > .settings-form { max-width: none; }
-  .settings-form { display: grid; gap: var(--space-4); }
+
+  /* Header status: always there, so a change of state is announced. */
+  .state { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; color: var(--text-secondary); font-size: var(--text-sm); }
+  .state :global(.icon) { color: var(--success-solid); }
+  .state.dirty { color: var(--accent-soft-text); font-weight: 600; }
+  .state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+
+  /* Narrow window: the section list is a strip pinned under the toolbar. Wide: a column beside the sections.
+     A sticky box measures from inside the pane's padding, so the pad is taken back out of its offset. */
+  .settings { --pad-top: var(--space-5); }
+  @media (max-width: 640px) { .settings { --pad-top: var(--space-4); } }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; min-width: 0; }
+  .section-nav {
+    position: sticky; top: calc(-1 * var(--pad-top)); z-index: 12; min-width: 0; overflow-x: auto; scrollbar-width: none;
+    margin-inline: calc(-1 * var(--pane-pad-x, 0px)); padding: 6px var(--pane-pad-x, 0px);
+    background: var(--bg-toolbar); border-block-end: 1px solid var(--border);
+    backdrop-filter: saturate(1.6) blur(16px); -webkit-backdrop-filter: saturate(1.6) blur(16px);
+  }
+  .section-nav::-webkit-scrollbar { display: none; }
+  .section-nav ul { list-style: none; margin: 0; padding: 0; display: flex; gap: 2px; width: max-content; }
+  .section-nav a {
+    position: relative; display: flex; align-items: center; min-height: 32px; padding: 0 var(--space-3); border-radius: var(--radius-md);
+    color: var(--text-secondary); font-size: var(--text-sm); font-weight: 500; text-decoration: none; white-space: nowrap;
+  }
+  /* Where you are: a tinted entry plus a bar, so it is not colour alone. */
+  .section-nav a[aria-current='true'] { background: var(--accent-soft); color: var(--accent-soft-text); font-weight: 600; }
+  .section-nav a[aria-current='true']::after { content: ''; position: absolute; inset-inline: var(--space-3); inset-block-end: 0; height: 2px; border-radius: 2px; background: var(--accent); }
+  @media (hover: hover) { .section-nav a:not([aria-current='true']):hover { background: var(--bg-hover); color: var(--text); } }
+  @media (forced-colors: active) {
+    .section-nav a[aria-current='true'] { text-decoration: underline; text-underline-offset: 4px; }
+    .preview { forced-color-adjust: none; }
+  }
+  /* A window this short has no room to spare for a pinned strip. */
+  @media (max-height: 520px) and (max-width: 899.98px) { .section-nav { position: static; margin-inline: 0; padding-inline: 0; } }
+
+  @media (min-width: 900px) {
+    .layout { grid-template-columns: clamp(152px, 17vw, 184px) minmax(0, 720px); column-gap: var(--space-6); }
+    .section-nav {
+      top: calc(var(--space-4) - var(--pad-top)); z-index: auto; overflow: visible; margin: 0; padding: 0; background: none; border: 0;
+      backdrop-filter: none; -webkit-backdrop-filter: none;
+    }
+    .section-nav ul { flex-direction: column; width: auto; gap: 1px; }
+    .section-nav a { padding: 0 var(--space-3); }
+    .section-nav a[aria-current='true']::after { inset-inline: auto; inset-inline-start: 0; inset-block: 7px; width: 2px; height: auto; }
+  }
+
+  .settings-form { min-width: 0; container-type: inline-size; container-name: settings-pane; }
   .settings-form > fieldset { display: grid; gap: var(--space-4); min-width: 0; margin: 0; padding: 0; border: 0; }
   .settings-form > fieldset :global(input), .settings-form > fieldset :global(select), .settings-form > fieldset :global(textarea), .settings-form > fieldset :global(button), .settings-form > fieldset :global(summary) { scroll-margin-block-end: calc(var(--settings-save-height) + var(--space-4)); }
-  .scope-body { display: grid; gap: var(--space-5); }
-  .settings-section { padding: var(--space-4) var(--space-5); display: grid; gap: var(--space-4); }
-  .section-head { display: flex; align-items: flex-start; gap: var(--space-3); min-width: 0; }
-  .section-head h2 { font-size: var(--text-lg); font-weight: 600; }
-  .section-head p { color: var(--text-secondary); font-size: var(--text-sm); margin-top: var(--space-1); }
-  .section-icon { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--accent); color: var(--text-on-accent); }
-  .section-icon :global(.icon) { width: 16px; height: 16px; }
+
+  /* Section cards, shared with the update, data and reset cards in AppMaintenance. */
+  .settings :global(.settings-section) { padding: var(--space-5); display: grid; gap: var(--space-4); min-width: 0; scroll-margin-block-start: 60px; }
+  .settings :global(.section-head) { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); min-width: 0; }
+  .settings :global(.section-head.compact) { display: flex; align-items: center; }
+  .settings :global(.section-head h2), .settings :global(.section-head strong) { display: block; font-size: var(--text-lg); font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+  .settings :global(.section-head p), .settings :global(.section-head small) { display: block; max-width: 64ch; margin-top: 2px; color: var(--text-secondary); font-size: var(--text-sm); font-weight: 400; line-height: 1.5; }
+  /* Neutral tiles: the glyph tells sections apart, not a coloured square. Only Reset is tinted. */
+  .settings :global(.section-icon) { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: var(--radius-md); background: var(--bg-sunken); border: 1px solid var(--border); color: var(--text-secondary); }
+  .settings :global(.section-icon.danger) { background: var(--danger-soft); border-color: var(--danger-border); color: var(--danger-text); }
+  @media (min-width: 900px) { .settings :global(.settings-section) { scroll-margin-block-start: var(--space-4); } }
+
   .fields { display: grid; gap: var(--space-4); min-width: 0; }
   .fields.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fields.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -878,15 +1095,18 @@
   .label { color: var(--text); font-size: var(--text-md); font-weight: 600; }
   .label-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
   .optional { color: var(--text-secondary); font-size: var(--text-xs); font-weight: 400; }
-  .hint { color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.45; }
+  .hint { color: var(--text-secondary); line-height: 1.5; }
   .input, .select, .textarea { min-width: 0; }
   .input.invalid { border-color: var(--danger-solid); box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger-solid) 18%, transparent); }
-  .field-error { color: var(--danger-text); font-size: var(--text-xs); line-height: 1.4; }
+  .field-error { color: var(--danger-text); font-size: var(--text-sm); line-height: 1.4; }
   .secret-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); min-width: 0; }
   .secret-input .btn { min-height: var(--control-height); }
   .key-status { border-block-start: 1px solid var(--border); padding-block-start: var(--space-4); }
   .key-cancel { justify-self: start; }
-  .key-management summary, #settings-management summary { font-size: var(--text-sm); font-weight: 600; padding-block: var(--space-2); }
+  .key-management { gap: var(--space-3); }
+  .key-management summary { font-size: var(--text-sm); font-weight: 600; padding-block: var(--space-2); }
+  .import-key { justify-items: start; }
+  .usage-panel { display: grid; justify-items: start; gap: var(--space-2); border-block-start: 1px solid var(--border); padding-block-start: var(--space-4); }
   .model-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .reasoning-modes { border: 0; padding: 0; margin: 0; min-width: 0; }
   .reasoning-modes legend { margin-block-end: var(--space-2); }
@@ -896,6 +1116,7 @@
   .mode-option:has(input:disabled) { opacity: 0.6; cursor: default; }
   .mode-option input { accent-color: var(--accent); margin: 0; }
   .strength { max-width: 320px; }
+
   .appearance { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: var(--space-2); }
   .appearance legend { margin-bottom: var(--space-2); }
   .theme-options { display: flex; flex-wrap: wrap; gap: var(--space-3); }
@@ -904,65 +1125,53 @@
   .theme-option input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; z-index: 1; }
   .theme-option.selected { border-color: var(--accent); }
   .theme-option:has(input:focus-visible) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
-  .theme-option .name { font-size: var(--text-sm); font-weight: 500; }
+  .theme-option .name { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); font-weight: 500; }
   .theme-option.selected .name { font-weight: 600; color: var(--accent-text); }
-  /* Miniature windows: fixed colours on purpose, they show each mode whatever the current one is. */
-  .preview { width: 96px; height: 60px; border-radius: var(--radius-md); border: 1px solid var(--border-strong); overflow: hidden; display: grid; grid-template-rows: 12px 1fr; align-content: start; gap: 6px; padding-bottom: 6px; }
-  .preview .bar { display: block; }
-  .preview .line { display: block; height: 6px; margin-inline: 10px; border-radius: 3px; }
-  .preview .line.short { width: 40%; }
-  .preview.light { background: #f9f8f7; }
-  .preview.light .bar { background: #e6e2dd; }
-  .preview.light .line { background: #d6d0c8; }
-  .preview.dark { background: #1d1914; }
-  .preview.dark .bar { background: #37322c; }
-  .preview.dark .line { background: #4a443d; }
-  .preview.system { background: linear-gradient(135deg, #f9f8f7 0 50%, #1d1914 50% 100%); }
-  .preview.system .bar { background: linear-gradient(135deg, #e6e2dd 0 50%, #37322c 50% 100%); }
-  .preview.system .line { background: #867b6f; }
-  .preview .bar + .line { background-color: #2c6cec; }
-  /* A window footer, quiet until there is something to save. */
-  .save-bar { position: sticky; inset-block-end: calc(-1 * var(--pane-pad-bottom, 0px)); z-index: 15; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-3);
-    margin: 0 calc(-1 * var(--pane-pad-x, 0px)) calc(-1 * var(--pane-pad-bottom, 0px)); padding: 10px var(--pane-pad-x, var(--space-4));
-    border-top: 1px solid var(--border); background: var(--bg-toolbar); backdrop-filter: saturate(1.6) blur(16px); -webkit-backdrop-filter: saturate(1.6) blur(16px); }
-  .save-bar.dirty { background: color-mix(in srgb, var(--accent-soft) 85%, transparent); border-top-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-  .save-status { display: grid; gap: var(--space-1); font-size: var(--text-sm); color: var(--text-secondary); }
-  .save-bar.dirty .save-status { color: var(--accent-soft-text); }
-  .save-buttons { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+  /* Miniature windows. Their colours are fixed on purpose: each tile shows its own mode whatever the current one is. */
+  .preview { position: relative; display: block; width: 112px; height: 68px; border-radius: var(--radius-md); border: 1px solid var(--border-strong); overflow: hidden; }
+  .mini { position: absolute; inset: 0; display: grid; grid-template-columns: 26px minmax(0, 1fr); background: var(--pv-bg); }
+  .mini.light { --pv-bg: var(--neutral-50); --pv-side: var(--neutral-100); --pv-line: var(--neutral-300); --pv-accent: var(--blue-600); }
+  .mini.dark { --pv-bg: #17181c; --pv-side: #121316; --pv-line: #3a3d46; --pv-accent: #3d7bff; }
+  .mini .side { display: block; background: var(--pv-side); border-inline-end: 1px solid color-mix(in srgb, var(--pv-line) 45%, transparent); }
+  .mini .body { display: grid; align-content: start; gap: 6px; padding: 12px 10px; }
+  .mini .line { display: block; height: 6px; border-radius: 3px; background: var(--pv-line); }
+  .mini .line.accent { width: 55%; background: var(--pv-accent); }
+  .mini .line.short { width: 40%; }
+  .preview.system .mini.dark { clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+
+  .action-bar > .note { display: grid; gap: 2px; }
   .check { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--space-2); padding: 10px var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); }
   .check input { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); }
   .check span { display: grid; gap: var(--space-1); min-width: 0; }
-  .check strong { font-size: var(--text-sm); }
-  .check small { color: var(--text-secondary); font-size: var(--text-xs); font-weight: 400; }
+  .check strong { font-size: var(--text-md); font-weight: 600; }
+  .check small { color: var(--text-secondary); font-size: var(--text-sm); font-weight: 400; line-height: 1.5; }
   .checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+  .scope-body, .manage-body { display: grid; gap: var(--space-5); }
+  .manage-body { gap: var(--space-3); }
   .advanced { display: grid; gap: var(--space-5); }
   /* A closed section is just its summary line: no gap waiting for content that is not shown. */
   .settings-form details:not([open]) { row-gap: 0; }
   :global(.dialog) .leave-stay { margin-inline-end: auto; }
-  .advanced summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); list-style: none; }
-  .advanced summary::-webkit-details-marker { display: none; }
-  .advanced summary > .section-head { align-items: center; }
-  .advanced summary strong { display: block; font-size: var(--text-lg); }
-  .advanced summary small { display: block; color: var(--text-secondary); font-size: var(--text-sm); margin-top: 2px; }
-  .advanced[open] summary > :global(.icon) { rotate: 180deg; }
-  .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding-top: var(--space-2); }
-  @media (max-width: 760px) {
+  .advanced > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); list-style: none; border-radius: var(--radius-md); }
+  .advanced > summary::-webkit-details-marker { display: none; }
+  .advanced > summary > :global(.icon) { color: var(--text-secondary); }
+  .advanced[open] > summary > :global(.icon) { rotate: 180deg; }
+  .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
+
+  /* The sections follow the width of their own column, not the window. */
+  @container settings-pane (max-width: 640px) {
+    .fields.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @container settings-pane (max-width: 520px) {
     .fields.two, .fields.three, .checks { grid-template-columns: 1fr; }
     .field.full { grid-column: auto; }
-    .settings-section { padding: var(--space-4); }
   }
   @media (max-width: 420px) {
-    .settings-section { padding-inline: var(--space-3); }
-    .section-head { gap: var(--space-2); }
-    .section-icon { width: 32px; height: 32px; }
+    .settings :global(.settings-section) { padding: var(--space-4); }
+    .settings :global(.section-head) { gap: var(--space-2); }
     .actions { display: grid; grid-template-columns: 1fr; }
-    .save-bar { padding: var(--space-3); }
-    .save-buttons { width: 100%; }
-    .save-buttons .btn { flex: 1; }
-  }
-  @media (min-width: 1500px) {
-    .settings-form > fieldset { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
-    .settings-form > fieldset > .settings-section:first-child, .settings-form > fieldset > .settings-section:nth-child(2) { grid-column: span 1; }
-    .settings-form > fieldset > .settings-section:nth-child(n+3) { grid-column: 1 / -1; }
+    .action-bar > .note { flex-basis: 100%; }
+    .action-bar > .buttons { width: 100%; }
+    .action-bar > .buttons .btn { flex: 1; }
   }
 </style>
