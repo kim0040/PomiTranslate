@@ -70,6 +70,8 @@ class TextRef:
 
 OnText = Callable[[Any, Any, str], None]
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
 # The component may be JSON (before 1.21.5) or SNBT (1.21.5+), so a quoted string also starts one.
 _COMMAND_JSON = (
     re.compile(r"^(/?(?:.*?\brun\s+)?tellraw\s+\S+\s+)([\[{'\"].*)$", re.DOTALL),
@@ -217,7 +219,10 @@ class TextExtractionMixin:
 
     @staticmethod
     def serialize_text_component(component: Any) -> str:
-        return json.dumps(component, ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps(component, ensure_ascii=False, separators=(",", ":"))
+        # json.loads turns an escaped lone surrogate ("\ud83d") into a character no UTF-8 encoder takes.
+        # Writing it back as the escape it came from keeps the text valid and unchanged.
+        return _LONE_SURROGATE.sub(lambda match: "\\u%04x" % ord(match.group()), text)
 
     def extract_command_json(self, command: str) -> tuple[str, str] | None:
         """Split ``tellraw``/``title`` (also after ``execute ... run``) into command and JSON."""
