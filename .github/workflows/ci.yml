@@ -114,3 +114,5 @@ jobs:
         run: python tests/test_journal_review.py
       - name: Real process kills at every write and recovery boundary
         run: python tests/test_journal_kill.py
+      - name: The core cancels and exits when the shell closes its stdin
+        run: python tests/test_eof_shutdown.py

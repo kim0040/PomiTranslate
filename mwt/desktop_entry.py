@@ -7,8 +7,10 @@ import hashlib
 import json
 import os
 import math
+import queue
 import re
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -1438,7 +1440,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             progress_callback=lambda event: emit(
                 {"v": 1, "id": request_id, "type": "scan.progress", "payload": event}
             ),
-            cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
+            cancel_check=lambda: _cancel_requested(cancel_path),
             desktop_context=body if body.get("credentialOwner") == "rust" else None,
         )
         skipped = [
@@ -1666,7 +1668,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             progress_callback=lambda event: emit(
                 {"v": 1, "id": request_id, "type": "translate.progress", "payload": event}
             ),
-            cancel_check=(lambda: cancel_path.is_file()) if cancel_path else None,
+            cancel_check=lambda: _cancel_requested(cancel_path),
             api_key_override=str(body.get("apiKey") or ""),
             allow_keyring_fallback=body.get("credentialOwner") != "rust",
             manual_overrides=overrides_by_source,
@@ -1851,9 +1853,56 @@ def _reply_error(request_id: object, code: str, message: str, **extra: object) -
           "error": {"code": code, "message": message, "recoverable": True, **extra}})
 
 
+# Set when stdin ends while a request is running: the shell (or the whole app) is gone, so nobody
+# will read the answer. Running work is asked to stop like a user cancel, and the process exits on
+# its own after EOF_EXIT_GRACE_SECONDS even if a provider call never returns. On macOS this is the
+# only thing that stops an orphaned core; Windows also has the Job Object, Linux PDEATHSIG.
+_SHELL_GONE = threading.Event()
+EOF_EXIT_GRACE_SECONDS = 10.0
+EOF_EXIT_CODE = 3
+
+
+def _cancel_requested(cancel_path: Path | None) -> bool:
+    return _SHELL_GONE.is_set() or (cancel_path is not None and cancel_path.is_file())
+
+
+def _shell_gone() -> None:
+    _SHELL_GONE.set()
+    try:
+        sys.stderr.write("stdin closed while a request was running; cancelling\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+    def hard_exit() -> None:
+        time.sleep(EOF_EXIT_GRACE_SECONDS)
+        os._exit(EOF_EXIT_CODE)
+
+    threading.Thread(target=hard_exit, name="pomi-eof-exit", daemon=True).start()
+
+
+def _queued_requests(busy: threading.Event):
+    """Request lines read on a thread, so the end of stdin is noticed while a request runs."""
+    lines: queue.Queue = queue.Queue()
+
+    def reader() -> None:
+        try:
+            for item in _read_requests():
+                lines.put(item)
+        finally:
+            lines.put(None)
+            if busy.is_set():
+                _shell_gone()
+
+    threading.Thread(target=reader, name="pomi-stdin", daemon=True).start()
+    while (item := lines.get()) is not None:
+        yield item
+
+
 def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
     hello()
-    for line, decode_error in _read_requests():
+    busy = threading.Event()
+    for line, decode_error in _queued_requests(busy):
         if decode_error is not None:
             _reply_error("", "INVALID_REQUEST", "Request was not valid UTF-8")
             continue
@@ -1868,6 +1917,7 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
             if message.get("v") != 1:
                 raise ValueError("Unsupported protocol version")
             _REQUEST_SECRETS[:] = _secrets_in(message)
+            busy.set()
             handle(message, report_dir, data_dir, cancel_path)
         except JournalError as exc:
             _reply_error(request_id, exc.code, str(exc), **({"jobIds": exc.job_ids} if exc.job_ids else {}))
@@ -1892,6 +1942,7 @@ def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> 
             except (OSError, ValueError):
                 return
         finally:
+            busy.clear()
             _REQUEST_SECRETS.clear()
 
 
