@@ -318,6 +318,96 @@ def test_json_string_and_literal_string_are_told_apart() -> None:
     record("extraction.json_versus_literal")
 
 
+def test_bare_json_string_components_stay_valid_json() -> None:
+    """Before 1.21.5 an unstyled line is the JSON string "Hello there", quotes included."""
+    wt = translator()
+    quoted = json.dumps("Hello there")
+    chunk = root(
+        w_compound(
+            "front_text",
+            w_list_of_strings("messages", [quoted, '{"text":"Object line"}', '""', json.dumps("Say \"hi\"")]),
+        ),
+        w_compound(
+            "back_text",
+            w_list_of_strings("messages", [json.dumps("Back bare"), '{"text":"Back object"}', '""', '""']),
+        ),
+        w_string("CustomName", json.dumps("Old Guard")),
+        w_string("OtherName", '{"text":"Old Guard"}'),
+        w_compound(
+            "display",
+            w_string("Name", json.dumps("Plain Name")),
+            w_list_of_strings("Lore", [json.dumps("Lore bare"), '{"text":"Lore object"}']),
+        ),
+    )
+    tree = wt.parse_nbt_bytes(chunk)
+    refs: list = []
+    wt.collect_tag_refs(tree, refs, "p")
+    texts = {text for text, _ in wt.extract_occurrences(refs)}
+    assert texts == {
+        "Hello there", "Object line", 'Say "hi"', "Back bare", "Back object", "Old Guard", "Plain Name",
+        "Lore bare", "Lore object",
+    }, texts
+    assert all(ref.kind == "json_tag" for ref in refs if ref.tag.value.startswith('"')), "bare literals are components"
+    # Translating returns text without the quotes: the stored value must still be a JSON string.
+    translations = {text: f"[KO] {text}" for text in texts}
+    answer = '[KO] 말해 "안녕"\n끝'
+    translations['Say "hi"'] = answer
+    assert wt.apply_translations(refs, translations) > 0
+    out = wt.parse_nbt_bytes(tree.dump())
+    front = [tag.value for tag in out["front_text"]["messages"]]
+    assert json.loads(front[0]) == "[KO] Hello there" and front[0].startswith('"') and front[0].endswith('"')
+    assert json.loads(front[1]) == {"text": "[KO] Object line"}
+    assert front[2] == '""', "an empty-string literal is left exactly as it was"
+    assert json.loads(front[3]) == answer
+    back = [tag.value for tag in out["back_text"]["messages"]]
+    assert json.loads(back[0]) == "[KO] Back bare" and back[2] == back[3] == '""'
+    assert "[KO] 말해" in front[3], "non-ASCII stays readable (ensure_ascii off)"
+    assert json.loads(out["CustomName"].value) == "[KO] Old Guard"
+    assert json.loads(out["display"]["Name"].value) == "[KO] Plain Name"
+    lore = [tag.value for tag in out["display"]["Lore"]]
+    assert json.loads(lore[0]) == "[KO] Lore bare" and json.loads(lore[1]) == {"text": "[KO] Lore object"}
+    # A model answer is plain text. Whatever it holds, quoting is the extractor's job and never the model's.
+    again: list = []
+    wt.collect_tag_refs(tree, again, "p")
+    ref = next(item for item in again if item.kind == "json_tag" and item.tag.value.startswith('"[KO] Hello'))
+    wt.apply_translations([ref], {"[KO] Hello there": "Bonjour"})
+    assert json.loads(ref.tag.value) == "Bonjour"
+    # Literal-string semantics of 1.21.5+ are untouched: a plain, unquoted string is still plain text.
+    literal = wt.parse_nbt_bytes(root(w_compound("front_text", w_list_of_strings("messages", ["Plain literal line"]))))
+    plain_refs: list = []
+    wt.collect_tag_refs(literal, plain_refs, "p")
+    assert [ref.kind for ref in plain_refs] == ["plain_tag"]
+    wt.apply_translations(plain_refs, {"Plain literal line": "일반 줄"})
+    assert wt.parse_nbt_bytes(literal.dump())["front_text"]["messages"][0].value == "일반 줄"
+    record("extraction.bare_json_string_components")
+
+
+def test_excluded_ids_are_a_set_and_follow_the_list() -> None:
+    import hashlib
+    import time
+
+    wt = translator()
+    text = "Hello adventurer"
+    candidate = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+    assert wt.should_translate_text(text)
+    wt.runtime_config["excluded_candidate_ids"] = [candidate]
+    assert not wt.should_translate_text(text)
+    wt.runtime_config["excluded_candidate_ids"] = ["0" * 20]
+    assert wt.should_translate_text(text), "a replaced list is read again"
+    wt.runtime_config["excluded_candidate_ids"].append(candidate)
+    assert not wt.should_translate_text(text), "a longer list is read again"
+    assert isinstance(wt._excluded_ids(), frozenset)
+    wt.runtime_config["excluded_candidate_ids"] = [f"{index:020x}" for index in range(50_000)]
+    wt.runtime_config["excluded_candidate_ids"].append(candidate)
+    started = time.perf_counter()
+    for index in range(2000):
+        wt.should_translate_text(f"Another sentence number {index}")
+    per_call = (time.perf_counter() - started) / 2000
+    # Linear scans of 50,000 ids cost ~0.9 ms per call; a set stays near the no-exclusion cost.
+    assert per_call < 0.0002, f"{per_call * 1e6:.1f} us per call with 50,000 exclusions"
+    record("extraction.exclusion_membership_is_a_set")
+
+
 def test_modified_utf8_chunks_are_read_and_written() -> None:
     wt = translator()
     emoji = "Hello \U0001F600 world"
@@ -474,6 +564,8 @@ def run_all(tmp: Path) -> list[str]:
     test_locations_name_the_block_or_entity()
     test_writing_back_changes_only_the_text()
     test_json_string_and_literal_string_are_told_apart()
+    test_bare_json_string_components_stay_valid_json()
+    test_excluded_ids_are_a_set_and_follow_the_list()
     test_modified_utf8_chunks_are_read_and_written()
     test_broken_nbt_fails_cleanly()
     test_candidate_page_count_and_rows_agree()
