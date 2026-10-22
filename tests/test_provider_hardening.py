@@ -290,7 +290,9 @@ def test_rejections_stop_after_a_bounded_number_of_calls() -> None:
         else:
             raise AssertionError("a request the provider always rejects must stop the job")
         calls = len(origin.posts)
-        assert calls == MAX_CONSECUTIVE_REJECTIONS, calls  # was 138 for the same 40 strings
+        # The core decides from ProviderError.kind: a rejected batch is split, never repeated, and the third
+        # rejection in a row (the batch, a fifth of it, one string) ends the job. Was 138 calls originally.
+        assert calls == 3, calls
         print(f"      persistent HTTP 400, 40 strings: {calls} provider calls (before the fix: 138)")
     finally:
         origin.close()
