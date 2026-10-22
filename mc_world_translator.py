@@ -36,7 +36,7 @@ from llm_backends import (
 )
 
 from mwt import nbtio as nbt
-from mwt.durable import atomic_write_bytes, atomic_write_text, fsync_dir, fsync_fd, replace as durable_replace
+from mwt.durable import CommittedWriteError, atomic_write_bytes, atomic_write_text, fsync_dir, fsync_fd, replace as durable_replace
 from mwt.extract import TextExtractionMixin, TextRef
 from mwt.locking import object_identity
 from mwt.journal import (
@@ -458,9 +458,16 @@ def normalize_config(config: dict[str, Any], config_path: Path | None) -> dict[s
 
 
 MAX_CONSECUTIVE_REQUEST_FAILURES = 6
-# A run of provider rejections (HTTP 4xx other than 429) with no success in between is a
-# configuration problem, not bad luck on one batch.
-MAX_CONSECUTIVE_REJECTIONS = 12
+# A run of "rejected" answers (HTTP 400/422 that are neither too large nor filtered) with no
+# accepted request in between is a configuration problem, not bad luck on one batch. Three calls
+# are enough to tell: the whole batch, one fifth of it, and a single string.
+MAX_CONSECUTIVE_REJECTIONS = 3
+
+# The provider layer classifies every failed request (``ProviderError.kind``); the core decides
+# only from that kind. SPLIT_NOW kinds never retry the identical request: a smaller one may succeed.
+SPLIT_NOW_KINDS = frozenset({"too_large", "filtered", "rejected"})
+FATAL_KINDS = frozenset({"redirect", "auth", "config"})
+RETRY_KINDS = frozenset({"rate_limit", "transient", "timeout", "unknown"})
 
 # Stable reasons a string could not be translated. The raw provider text stays in the report file;
 # the interface shows its own wording for each code.
@@ -479,13 +486,64 @@ _PROVIDER_CODE_FAILURES = {
 }
 
 
+def failure_kind(exc: BaseException) -> str | None:
+    """The retry class of a failed request, or None when it is not a provider failure at all.
+
+    Uses ``exc.kind`` when the provider layer set one. Otherwise (a fake client, an older
+    exception) it falls back to the HTTP status, with the meaning of the table on
+    ``llm_backends.ProviderError.kind``.
+    """
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, str) and kind:
+        return kind
+    status = getattr(exc, "status", None)
+    if not isinstance(exc, ProviderError) and not isinstance(status, int):
+        return None
+    error_code = getattr(exc, "error_code", None)
+    if error_code == "PROVIDER_REDIRECT_REFUSED":
+        return "redirect"
+    if error_code == "PROVIDER_TIMEOUT":
+        return "timeout"
+    if getattr(exc, "filtered", False):
+        return "filtered"
+    if getattr(exc, "too_large", False) or status == 413:
+        return "too_large"
+    if status in {401, 402, 403}:
+        return "auth"
+    if status in {404, 405, 415}:
+        return "config"
+    if status in {400, 422}:
+        return "rejected"
+    if status == 429:
+        return "rate_limit"
+    if status in {408, 409, 425} or status is None or (isinstance(status, int) and status >= 500):
+        return "transient"
+    return "unknown"
+
+
 def classify_failure(exc: BaseException) -> str:
-    """Map one failed request to a code from ``FAILURE_CODES``."""
+    """Map one failed request to a code from ``FAILURE_CODES``, from the structured kind first."""
     if isinstance(exc, TranslationCancelled):
         return "cancelled"
-    message = str(exc).lower()
     if isinstance(exc, ProviderUnavailable):
         return _PROVIDER_CODE_FAILURES.get(exc.code, "provider_unavailable")
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, str) and kind:
+        error_code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
+        if kind == "timeout":
+            return "timeout"
+        if kind in {"rate_limit", "auth"}:
+            if error_code == "NO_CREDIT":
+                return "quota"
+            return "rate_limit" if kind == "rate_limit" else "auth"
+        if kind == "config":
+            return "unsupported_model" if getattr(exc, "status", None) == 404 or error_code == "MODEL_NOT_FOUND" else "bad_request"
+        if kind in {"rejected", "too_large", "filtered"}:
+            return "bad_request"
+        if kind == "redirect":
+            return "auth"
+        return "provider_unavailable"  # transient, unknown
+    message = str(exc).lower()
     status = getattr(exc, "status", None)
     if isinstance(status, int):
         if status in {401, 403}:
@@ -507,12 +565,33 @@ def classify_failure(exc: BaseException) -> str:
         if status >= 500:
             return "provider_unavailable"
     if isinstance(exc, ProviderError):
-        return "timeout" if "timed out" in message or "timeout" in message else "provider_unavailable"
+        timed_out = getattr(exc, "error_code", None) == "PROVIDER_TIMEOUT" or "timed out" in message or "timeout" in message
+        return "timeout" if timed_out else "provider_unavailable"
     if isinstance(exc, TimeoutError):
         return "timeout"
     if "incomplete translation json" in message or isinstance(exc, json.JSONDecodeError):
         return "format_mismatch"
     return "other"
+
+
+# What progress events say about a failure: one stable sentence per failure code. The provider's
+# own text (which can echo the prompt or the request) stays in the report file only.
+FAILURE_MESSAGES = {
+    "timeout": "The provider did not answer in time.",
+    "auth": "The provider rejected the credentials.",
+    "rate_limit": "The provider is limiting requests.",
+    "quota": "The provider reports no credit or quota left.",
+    "bad_request": "The provider rejected the request.",
+    "unsupported_model": "The provider does not offer this model.",
+    "format_mismatch": "The provider's answer could not be read.",
+    "provider_unavailable": "The provider is not available.",
+    "cancelled": "The request was cancelled.",
+    "other": "The request failed.",
+}
+
+
+def public_failure_message(failure: str) -> str:
+    return FAILURE_MESSAGES.get(failure, FAILURE_MESSAGES["other"])
 
 
 class ProviderUnavailable(RuntimeError):
@@ -737,31 +816,34 @@ class BatchTranslator:
         return self.lookup(texts)
 
     def _note_failure(self, exc: Exception, *, attempt: int, max_retries: int, batch_size: int) -> float:
-        """Record one failed request and return how long to wait before the next try."""
+        """Record one failed request and return how long to wait before the next try.
+
+        The decision comes from the failure's kind (see ``failure_kind``): fatal kinds stop the job,
+        size/filter/rejection kinds are never retried as they are (the caller splits the batch) and
+        only a run of rejections ends the job; outages count toward their own breaker.
+        """
+        kind = failure_kind(exc)
         status = getattr(exc, "status", None)
         code = getattr(exc, "code", "REQUEST_FAILED")
-        # Only outages count toward the circuit breaker. A rejected or malformed answer for one
-        # batch says nothing about the next one.
+        failure = classify_failure(exc)
         with self._lock:
-            provider_outage = isinstance(exc, ProviderError) and (status is None or status == 429 or status >= 500)
-            rejected = isinstance(exc, ProviderError) and isinstance(status, int) and 400 <= status < 500 and status != 429
-            if provider_outage:
+            if kind in RETRY_KINDS:
                 self.consecutive_failures += 1
-            if rejected:
+            if kind == "rejected":
                 self.consecutive_rejections += 1
             streak = self.consecutive_failures
             abort: ProviderUnavailable | None = None
-            if getattr(exc, "fatal", False):
+            fatal = kind in FATAL_KINDS or (kind not in SPLIT_NOW_KINDS and kind not in RETRY_KINDS and bool(getattr(exc, "fatal", False)))
+            if fatal:
                 abort = ProviderUnavailable(str(exc), code=code, fatal=True)
             elif streak >= MAX_CONSECUTIVE_REQUEST_FAILURES:
-                abort = ProviderUnavailable(
-                    f"{streak} requests in a row failed. Last error: {exc}",
-                    code=code,
-                )
+                # An outage is never reported as a rejection, whatever the exception's own code says.
+                outage_code = "PROVIDER_ERROR" if code == "REQUEST_REJECTED" else code
+                abort = ProviderUnavailable(f"{streak} requests in a row failed. Last error: {exc}", code=outage_code)
             elif self.consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
                 abort = ProviderUnavailable(
                     f"{self.consecutive_rejections} requests in a row were rejected. Check the model, key and endpoint settings. Last error: {exc}",
-                    code=code,
+                    code="REQUEST_REJECTED",
                     fatal=True,
                 )
             # Publish the breaker while the failure counter is still locked. Otherwise a worker
@@ -778,17 +860,30 @@ class BatchTranslator:
             max_attempts=max_retries,
             code=code,
             status=status,
-            message=str(exc),
-            failure=classify_failure(exc),
+            kind=kind,
+            message=public_failure_message(failure),
+            failure=failure,
         )
         if abort is not None:
             raise abort from exc
         retry_after = getattr(exc, "retry_after", None)
         if retry_after:
             return float(retry_after)
-        if status == 429:
+        if kind == "rate_limit" or status == 429:
             return min(2.0 * (2 ** (attempt - 1)), 30.0)
         return min(1.5 * attempt, 4.0)
+
+    def _raw_failure_text(self, exc: BaseException) -> str:
+        from mwt.secrets import bounded_public_text
+
+        return bounded_public_text(str(exc), str(self.config["api"].get("api_key") or ""), 500)
+
+    @staticmethod
+    def _charge_extra_requests(budget: dict[str, Any], requests_before: int) -> None:
+        """Requests the client made beyond the one already counted (parameter adaptation retries)."""
+        made = LLMProviderClient.request_count - requests_before
+        if made > 1:
+            budget["left"] -= made - 1
 
     def _translate_batch(self, texts: list[str], batch_size: int, budget: dict[str, Any] | None = None) -> dict[str, str]:
         payload = {str(i): text for i, text in enumerate(texts)}
@@ -801,6 +896,7 @@ class BatchTranslator:
                 break
             self.ensure_not_cancelled()
             budget["left"] -= 1
+            requests_before = LLMProviderClient.request_count
             try:
                 self.throttle(len(texts))
                 # The breaker may have tripped while this worker waited for the shared throttle.
@@ -812,6 +908,7 @@ class BatchTranslator:
                     system_prompt=self.system_prompt(),
                     temperature=float(self.config["temperature"]),
                 )
+                self._charge_extra_requests(budget, requests_before)
                 self.emit("translation_batch_done", batch_size=len(texts), attempt=attempt)
                 with self._lock:
                     self.consecutive_failures = 0
@@ -826,9 +923,13 @@ class BatchTranslator:
             except (TranslationCancelled, ProviderUnavailable):
                 raise
             except Exception as exc:
-                budget["error"] = str(exc)
+                self._charge_extra_requests(budget, requests_before)
+                # Raw provider text goes to the report file (through the failed-strings table), never to progress events.
+                budget["error"] = self._raw_failure_text(exc)
                 budget["code"] = classify_failure(exc)
                 delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts))
+                if failure_kind(exc) in SPLIT_NOW_KINDS:
+                    break  # the same request would fail the same way; a smaller one may not
                 if attempt < max_retries and budget["left"] > 0:
                     self.wait(delay)
 
@@ -1536,15 +1637,17 @@ class WorldTranslator(TextExtractionMixin):
         for attempt in range(1, max(1, int(self.runtime_config["max_file_write_retries"])) + 1):
             try:
                 write_bytes_atomic(path, content)
-                self.digest_cache.forget(path)
                 last_error = None
                 break
             except Exception as exc:
                 last_error = exc
-                if is_disk_full(exc):
-                    break  # more attempts cannot help; the job stops with a clear code
+                if is_disk_full(exc) or isinstance(exc, CommittedWriteError):
+                    break  # more attempts cannot help; a committed file is reported as written, not retried
                 self.emit("file_write_retry", file=str(path), attempt=attempt, message=str(exc))
                 time.sleep(min(0.5 * attempt, 2.0))
+            finally:
+                # Whatever happened, the file may have changed: a remembered digest is not to be trusted.
+                self.digest_cache.forget(path)
         if last_error is not None:
             raise last_error
 
