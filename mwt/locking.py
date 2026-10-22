@@ -8,6 +8,11 @@ file, so a crashed or killed process can never leave a lock behind:
 * ``MinecraftSessionLocks`` takes the same kind of lock on the game's own ``session.lock``, the
   way Java's ``FileChannel.tryLock`` does, so a running game or server blocks a write.
 
+* ``ExternalTargetLock`` serialises writers of one external resource-pack ZIP. The ZIP itself is
+  never locked: replacing it swaps the inode, so a lock on the old object would not exclude the
+  next writer. The lock is a separate, persistent, app-private file keyed by the target's
+  canonical identity, kept under the app data directory.
+
 Who holds the lock is written to ``write.owner.json`` for diagnostics only. On Windows a locked
 byte cannot be read by another process, so the lock file itself carries no data and a failed
 acquire never depends on reading any metadata.
@@ -16,6 +21,7 @@ acquire never depends on reading any metadata.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import socket
@@ -32,6 +38,10 @@ class WorldWriteLocked(RuntimeError):
 
 class MinecraftWorldInUse(RuntimeError):
     pass
+
+
+class TargetLocked(RuntimeError):
+    """An external resource pack is in use by another job."""
 
 
 _LOCK_NAME = "write.lock"
@@ -353,19 +363,170 @@ class MinecraftSessionLocks:
         self.release()
 
 
-@contextmanager
-def hold_world(world_dir: Path, purpose: str = "restore"):
-    """Both write guards for the whole body, released in any order of failure.
+def external_target_key(path: Path) -> str:
+    """Stable identity of an external target: the case-folded real path, hashed.
 
-    Raises ``WorldWriteLocked`` or ``MinecraftWorldInUse`` before the body runs.
+    Two spellings of one file (case, ``..``, a junction in the folder chain) share one key, so
+    they cannot be written by two jobs at once. The key does not change when the file is replaced.
+    """
+    return hashlib.sha256(os.path.normcase(os.path.realpath(path)).encode("utf-8")).hexdigest()
+
+
+def object_identity(path: Path) -> str:
+    """``st_dev:st_ino`` of what ``path`` names now. On Windows ``os.stat`` fills these from the
+    volume serial number and the file index, so a replaced or swapped file gets a new value."""
+    info = os.stat(path)
+    return f"{info.st_dev}:{info.st_ino}"
+
+
+class ExternalTargetLock:
+    """Kernel lock on ``<lock_dir>/<key>.lock`` for one external target.
+
+    Held from input validation through backup, replace, verification and recovery. The lock file
+    is opened without ``O_EXCL``, never unlinked and never replaced, like ``WorldWriteLock``.
+    """
+
+    def __init__(self, target: Path, lock_dir: Path) -> None:
+        self.target = Path(target)
+        self.key = external_target_key(self.target)
+        self.path = Path(lock_dir) / f"{self.key}.lock"
+        self.acquired = False
+        self._descriptor: int | None = None
+        self._keys: list[str] = []
+
+    def acquire(self, timeout: float = 0.0) -> None:
+        """Take the lock, retrying for up to ``timeout`` seconds. Raises ``TargetLocked``."""
+        if self.acquired:
+            raise TargetLocked("This target lock is already held by this operation")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                self._try_acquire()
+                return
+            except TargetLocked:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    def _try_acquire(self) -> None:
+        with _HELD_GUARD:
+            if any(key in _HELD for key in _identity_keys(self.path)):
+                raise TargetLocked(f"Another operation is using the resource pack {self.target.name}")
+            try:
+                descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+            except OSError as exc:
+                raise TargetLocked(f"The resource pack lock could not be opened: {exc.strerror or exc}") from exc
+            try:
+                _try_lock(descriptor)
+            except OSError as exc:
+                os.close(descriptor)
+                if exc.errno in _NO_LOCKING:
+                    raise TargetLocked("This filesystem does not support file locking, so a safe write cannot be guaranteed") from exc
+                raise TargetLocked(f"Another operation is using the resource pack {self.target.name}") from exc
+            self._descriptor = descriptor
+            self._keys = _identity_keys(self.path)
+            for key in self._keys:
+                _HELD[key] = self
+            self.acquired = True
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        self.acquired = False
+        descriptor, self._descriptor = self._descriptor, None
+        if descriptor is not None:
+            try:
+                _unlock(descriptor)
+            except OSError:
+                pass
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        with _HELD_GUARD:
+            for key in self._keys:
+                if _HELD.get(key) is self:
+                    del _HELD[key]
+        self._keys = []
+
+    def __enter__(self) -> "ExternalTargetLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+
+class ExternalTargetLocks:
+    """All external-target locks of one operation, taken in sorted key order.
+
+    The order is global, so two jobs that share several packs cannot deadlock each other. The
+    world lock is always taken first (see ``hold_world``), then these.
+    """
+
+    def __init__(self, targets: list[Path], lock_dir: Path) -> None:
+        unique: dict[str, ExternalTargetLock] = {}
+        for target in targets:
+            lock = ExternalTargetLock(target, lock_dir)
+            unique.setdefault(lock.key, lock)
+        self._locks = [unique[key] for key in sorted(unique)]
+
+    def acquire(self, timeout: float = 0.0) -> None:
+        try:
+            for lock in self._locks:
+                lock.acquire(timeout)
+        except BaseException:
+            self.release()
+            raise
+
+    def release(self) -> None:
+        for lock in reversed(self._locks):
+            lock.release()
+
+    def __enter__(self) -> "ExternalTargetLocks":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.release()
+
+
+def target_lock_dir(data_dir: Path | None = None) -> Path:
+    """``<app data>/locks``: private to this user, shared by every process of the app."""
+    if data_dir is None:
+        from mwt.userdata import user_data_dir
+
+        data_dir = user_data_dir()
+    return Path(data_dir) / "locks"
+
+
+@contextmanager
+def hold_world(
+    world_dir: Path,
+    purpose: str = "restore",
+    *,
+    external_targets: list[Path] | None = None,
+    lock_dir: Path | None = None,
+    target_timeout: float = 0.0,
+):
+    """Every write guard for the whole body, released in any order of failure.
+
+    Order: world write lock, the game's session locks, then the external-target locks in sorted
+    key order. Raises ``WorldWriteLocked``, ``MinecraftWorldInUse`` or ``TargetLocked`` before
+    the body runs.
     """
     write_lock = WorldWriteLock(world_dir, purpose)
     session_locks = MinecraftSessionLocks(world_dir)
+    targets = list(external_targets or [])
+    target_locks = ExternalTargetLocks(targets, lock_dir or (target_lock_dir() if targets else Path(".")))
     write_lock.acquire()
     try:
         session_locks.acquire()
+        target_locks.acquire(target_timeout)
         yield
     finally:
+        target_locks.release()
         session_locks.release()
         write_lock.release()
 
