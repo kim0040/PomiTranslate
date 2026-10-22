@@ -73,3 +73,6 @@ level.dat
 level.dat_old
 
 # docs/images contains curated, synthetic documentation screenshots and is tracked.
+
+# Worktrees that agent tools create inside the checkout
+.claude/worktrees/
