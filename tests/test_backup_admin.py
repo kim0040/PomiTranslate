@@ -218,7 +218,9 @@ def test_world_lock_blocks_delete(tmp: Path) -> None:
         assert raises(BackupAdminError, prune_backups, {"worldDir": str(world), "keepLatest": 1}, data).code == "WORLD_LOCKED"
         assert ids(store) == {old, newest}
     # A second process holding the lock blocks as well.
-    process = subprocess.Popen([sys.executable, "-B", "-c", HOLDER, str(ROOT), str(world)],
+    # A Windows venv's python.exe is a launcher; start the real interpreter so killing it frees the lock.
+    python = getattr(sys, "_base_executable", None) or sys.executable
+    process = subprocess.Popen([python, "-B", "-c", HOLDER, str(ROOT), str(world)],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         assert process.stdout is not None and process.stdout.readline().strip() == "held"
