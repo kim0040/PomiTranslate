@@ -20,9 +20,9 @@
 <style>
   .list-row { list-style: none; min-width: 0; }
   .list-row.selected { background: var(--bg-selected); }
-  .line { display: flex; align-items: center; gap: var(--space-3); min-height: 44px; padding: 6px var(--space-4); min-width: 0; }
+  .line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px var(--space-3); min-height: 44px; padding: 6px var(--space-4); min-width: 0; }
   .lead { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--bg-sunken); color: var(--text-secondary); }
-  .main { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: var(--space-3); }
+  .main { flex: 1 1 220px; min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-3); }
   .end { flex: none; display: flex; align-items: center; gap: var(--space-2); }
   .detail { padding: 0 var(--space-4) var(--space-3); }
 </style>

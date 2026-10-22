@@ -2,8 +2,10 @@
   import { app } from '../lib/app.svelte';
   import { t, hasMessage, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber, formatCompact, formatUsd } from '../lib/format';
-  import Icon from '../components/Icon.svelte';
+  import Icon, { type IconName } from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import StatGrid, { type Stat } from '../components/StatGrid.svelte';
   import { resultPresentation } from '../lib/workflow';
   import { exportDocument } from '../lib/document-export';
   import { failureKey, failureSummary, warningText } from '../lib/failures';
@@ -45,54 +47,70 @@
   const usage = $derived(result?.usage);
   // The labels are the same for every status: "prepared" counts sentences the provider returned,
   // "applied" counts the files that were written into the world.
-  const cards = $derived([
-    { label: t('result.stat.prepared'), value: stats.translated ?? 0, tone: status === 'completed' ? 'ok' : '' },
-    { label: t('result.stat.unchanged'), value: stats.unchanged ?? 0, tone: '' },
-    { label: t('result.stat.failed'), value: stats.failed ?? 0, tone: (stats.failed ?? 0) > 0 ? 'bad' : '' },
-    { label: t('result.stat.kept'), value: stats.kept_original ?? 0, tone: (stats.kept_original ?? 0) > 0 ? 'warn' : '' },
-    { label: t('result.stat.filesApplied'), value: result?.changedFileCount ?? 0, tone: (result?.changedFileCount ?? 0) > 0 ? 'ok' : '' },
-    { label: t('result.stat.requests'), value: result?.providerRequests ?? 0, tone: '' }
+  // One number leads (what the provider returned); the rest sit quietly beside it, with the same six
+  // labels on every status so a slot never changes meaning between screens.
+  const num = (value: number) => formatNumber(value, app.locale);
+  const primaryStat = $derived<Stat>({ label: t('result.stat.prepared'), value: num(stats.translated ?? 0), tone: status === 'completed' ? 'success' : 'default' });
+  const otherStats = $derived<Stat[]>([
+    { label: t('result.stat.unchanged'), value: num(stats.unchanged ?? 0) },
+    { label: t('result.stat.failed'), value: num(stats.failed ?? 0), tone: (stats.failed ?? 0) > 0 ? 'danger' : 'default' },
+    { label: t('result.stat.kept'), value: num(stats.kept_original ?? 0), tone: (stats.kept_original ?? 0) > 0 ? 'warning' : 'default' },
+    { label: t('result.stat.filesApplied'), value: num(result?.changedFileCount ?? 0), tone: (result?.changedFileCount ?? 0) > 0 ? 'success' : 'default' },
+    { label: t('result.stat.requests'), value: num(result?.providerRequests ?? 0) }
   ]);
+  // Nothing was written: say that first and keep the surface calm; only the icon is red.
+  const unchanged = $derived(presentation.status === 'failed' && !result?.changedFileCount);
+  const heroTitle = $derived(unchanged ? t('result.unchangedTitle') : t(titleKey));
+  const heroBody = $derived(unchanged ? t('result.failedShort') : body);
+  const heroIcon = $derived<IconName>(tone === 'success' ? 'check-circle' : tone === 'danger' ? 'alert-circle' : tone === 'warning' ? 'alert-triangle' : 'info');
+  // One primary next step; the rest are quiet.
+  const primary = $derived<'interrupted' | 'retry' | 'again' | 'folder' | ''>(
+    firstError?.code === 'RECOVERY_REQUIRED' ? 'interrupted'
+      : resumable ? 'retry'
+      : canTranslateAgain ? 'again'
+      : status === 'completed' && app.worldDir ? 'folder'
+      : ''
+  );
   const adapted = $derived(result?.usage?.adapted_parameters?.filter((name) => typeof name === 'string' && name) ?? []);
 </script>
 
 <div class="page">
-  <header class="page-head with-actions">
-    <h1>{t('result.title')}</h1>
-    <div class="actions"><button type="button" class="btn btn-secondary btn-sm" title={t('export.reportHelp')} disabled={!!app.busy} onclick={exportReport}><Icon name="download" size={14} /> {t('export.report')}</button></div>
-  </header>
+  <PageHeader title={t('result.title')}>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary btn-sm" title={t('export.reportHelp')} disabled={!!app.busy} onclick={exportReport}><Icon name="download" size={14} /> {t('export.report')}</button>
+    {/snippet}
+  </PageHeader>
 
   {#if result}
-    <Callout {tone} title={t(titleKey)} role="status">
-      {body}
-      {#if showReason && reason}<br />{reason}{/if}
-      {#if status === 'completed'}<br />{t('result.completedNext')}{/if}
-      {#snippet actions()}
-        {#if resumable}
-          <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.startTranslate({ resume: true })}><Icon name="refresh" size={18} /> {t('result.retry')}</button>
-        {:else if canTranslateAgain}
-          <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.translateAgain()}><Icon name="refresh" size={18} /> {t('result.again')}</button>
+    <section class="card hero {tone}" class:unchanged role="status">
+      <span class="hero-icon" aria-hidden="true"><Icon name={heroIcon} size={24} /></span>
+      <div class="hero-text">
+        <h2>{heroTitle}</h2>
+        <p>{heroBody}{#if showReason && reason}<br />{reason}{/if}{#if status === 'completed'}<br />{t('result.completedNext')}{/if}</p>
+      </div>
+      <div class="hero-actions">
+        {#if primary === 'interrupted'}
+          <button type="button" class="btn btn-primary btn-lg" disabled={app.isBusy} onclick={() => app.openInterrupted()}>{t('result.toInterrupted')}</button>
+        {:else if primary === 'retry'}
+          <button type="button" class="btn btn-primary btn-lg" disabled={app.isBusy} onclick={() => app.startTranslate({ resume: true })}><Icon name="refresh" size={16} /> {t('result.retry')}</button>
+        {:else if primary === 'again'}
+          <button type="button" class="btn btn-primary btn-lg" disabled={app.isBusy} onclick={() => app.translateAgain()}><Icon name="refresh" size={16} /> {t('result.again')}</button>
+        {:else if primary === 'folder'}
+          <button type="button" class="btn btn-primary btn-lg" onclick={() => app.openFolder(app.worldDir)}><Icon name="folder" size={16} /> {t('result.openFolder')}</button>
         {/if}
         {#if status === 'invalidated' || status === 'partial' || (!resumable && status !== 'completed')}
-          <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.goStep('scan')}>{t('result.retryAll')}</button>
-        {/if}
-        {#if firstError?.code === 'RECOVERY_REQUIRED'}
-          <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.openInterrupted()}>{t('result.toInterrupted')}</button>
+          <button type="button" class="btn {primary ? 'btn-quiet' : 'btn-secondary'}" disabled={app.isBusy} onclick={() => app.goStep('scan')}>{t('result.retryAll')}</button>
         {/if}
         {#if result.backupSetId}
-          <button type="button" class="btn btn-secondary" onclick={() => app.goto('backups')}><Icon name="archive" size={18} /> {t('result.toBackups')}</button>
+          <button type="button" class="btn btn-quiet" onclick={() => app.goto('backups')}><Icon name="archive" size={16} /> {t('result.toBackups')}</button>
         {/if}
         {#if status === 'completed'}
-          <button type="button" class="btn btn-secondary" onclick={() => { app.goto('workspace'); app.goStep('world'); }}>{t('result.newRun')}</button>
+          <button type="button" class="btn btn-quiet" onclick={() => { app.goto('workspace'); app.goStep('world'); }}>{t('result.newRun')}</button>
         {/if}
-      {/snippet}
-    </Callout>
-
-    <section class="stats card" aria-label={t('result.title')}>
-      {#each cards as card (card.label)}
-        <div class="stat {card.tone}"><span class="v num">{formatNumber(card.value, app.locale)}</span><span class="l">{card.label}</span></div>
-      {/each}
+      </div>
     </section>
+
+    <StatGrid label={t('result.title')} primary={primaryStat} stats={otherStats} />
     <p class="muted stat-help">{t('result.stat.help')}</p>
     {#if (usage && (usage.prompt_tokens || usage.completion_tokens)) || usage?.cost_reported}
       <dl class="group usage">
@@ -164,21 +182,25 @@
 
 <style>
   .stat-help, .quiet-note { margin: 0; font-size: var(--text-sm); }
-  /* One strip of numbers, divided by hairlines, instead of a dashboard of cards. */
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); overflow: hidden; }
-  .stat { padding: var(--space-3) var(--space-4); display: grid; gap: 2px; align-content: start; border-inline-start: 1px solid var(--border); margin-inline-start: -1px; }
-  .stat .v { font-size: var(--text-2xl); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
-  .stat .l { font-size: var(--text-sm); color: var(--text-secondary); }
-  .stat.ok .v { color: var(--success-text); }
-  .stat.bad .v { color: var(--danger-text); }
-  .stat.warn .v { color: var(--warning-text); }
+  /* The outcome: a neutral card with a coloured icon. A failure is not shouted; the first line says what is safe. */
+  .hero { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3) var(--space-4); align-items: start; padding: var(--space-5); }
+  .hero-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--bg-sunken); color: var(--text-secondary); }
+  .hero.success .hero-icon { background: var(--success-soft); color: var(--success-text); }
+  .hero.warning .hero-icon { background: var(--warning-soft); color: var(--warning-text); }
+  .hero.danger .hero-icon { background: var(--danger-soft); color: var(--danger-text); }
+  .hero.info .hero-icon { background: var(--accent-soft); color: var(--accent-soft-text); }
+  .hero-text { min-width: 0; align-self: center; }
+  .hero-text h2 { font-size: var(--text-xl); font-weight: 600; }
+  .hero-text p { margin-top: var(--space-1); color: var(--text-secondary); text-wrap: pretty; }
+  .hero-actions { grid-column: 2; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .samples { padding: var(--space-4); display: grid; gap: var(--space-3); }
-  .samples h2 { font-size: var(--text-lg); }
+  .samples h2 { font-size: var(--text-lg); font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
-  th { text-align: start; font-size: var(--text-xs); letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
+  th { text-align: start; font-size: var(--text-overline); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
   td { padding: var(--space-3); border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; width: 50%; }
   td:first-child { color: var(--text-secondary); }
   .lines { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); font-size: var(--text-sm); }
   .lines li { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); overflow-wrap: anywhere; }
   .plain { margin: 0; padding-inline-start: 18px; }
+  @media (max-width: 560px) { .hero { grid-template-columns: minmax(0, 1fr); } .hero-actions { grid-column: 1; } }
 </style>

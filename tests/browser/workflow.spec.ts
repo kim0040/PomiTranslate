@@ -122,7 +122,7 @@ test('100k candidates stay virtual and keyboard reaches offscreen pages', async 
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '100001');
   expect(await page.locator('tr[data-index]').count()).toBeLessThan(50);
   await page.locator('tr[data-index="0"]').focus();
-  const pageSize = await page.locator('.viewport').evaluate((element) => Math.max(1, Math.floor(element.clientHeight / 60) - 1));
+  const pageSize = await page.locator('.viewport').evaluate((element) => Math.max(1, Math.floor(element.clientHeight / 44) - 1));
   await page.keyboard.press('ArrowDown');
   await expect(page.locator('tr[data-index="1"]')).toBeFocused();
   await page.keyboard.press('ArrowUp');
@@ -151,7 +151,8 @@ test('Enter opens candidate editing and Space toggles inclusion', async ({ page 
   await expect(row.locator('.c-state')).toContainText('제외됨');
   await page.keyboard.press('Space');
   await expect(row.locator('input[type="checkbox"]')).toBeChecked();
-  await expect(row.locator('.c-state')).toContainText('번역 대상');
+  // The default state carries no label: the checked box says it. Only exclusions and manual work get a pill.
+  await expect(row.locator('.c-state')).not.toContainText('제외됨');
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 840, height: 480 }, { width: 320, height: 568 }, { width: 2560, height: 1080 }]) {
@@ -233,6 +234,8 @@ test('model preserves scan; target language invalidates it', async ({ page }) =>
 
 test('kind filters are available immediately after loading a preview', async ({ page }) => {
   await review(page);
+  // Category and sort live in the Filters popover.
+  await page.getByRole('button', { name: /^필터/ }).click();
   const kinds = page.getByRole('group', { name: '텍스트 유형' });
   await kinds.getByRole('button', { name: /^표지판/ }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '2');

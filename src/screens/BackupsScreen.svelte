@@ -7,6 +7,11 @@
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import WorldCard from '../components/WorldCard.svelte';
+  import StatusScreen from '../components/StatusScreen.svelte';
+  import ListRow from '../components/ListRow.svelte';
+  import Pill from '../components/Pill.svelte';
   import { lastCopyIds, needsForRecovery, prunePlan } from '../lib/backups';
 
   let selectedBackup = $state<BackupSummary | null>(null);
@@ -87,37 +92,26 @@
 </script>
 
 <div class="page">
-  <header class="page-head">
-    <h1>{t('backups.title')}</h1>
-    <p class="lead">{t('backups.lead')}</p>
-  </header>
+  <PageHeader title={t('backups.title')} lead={t('backups.lead')} />
 
   {#if !hasWorld}
-    <section class="card empty-state" aria-labelledby="backups-no-world-title">
-      <div class="empty-icon" aria-hidden="true"><Icon name="archive" size={28} /></div>
-      <div class="empty-copy">
-        <h2 id="backups-no-world-title">{t('backups.noWorld')}</h2>
-        <p class="muted">{t('backups.noWorldHelp')}</p>
-      </div>
-      <div class="empty-actions">
+    <StatusScreen icon="archive" title={t('backups.noWorld')}>
+      <p>{t('backups.noWorldHelp')}</p>
+      {#snippet actions()}
         <button type="button" class="btn btn-primary" disabled={actionBusy} onclick={() => app.chooseWorld()}>
-          <Icon name="folder" size={18} /> {t('backups.pickWorld')}
+          <Icon name="folder" size={16} /> {t('backups.pickWorld')}
         </button>
         <button type="button" class="btn btn-secondary" onclick={() => app.goto('workspace')}>
           {t('nav.workspace')}
         </button>
-      </div>
-    </section>
+      {/snippet}
+    </StatusScreen>
   {:else}
-    <section class="card world-context" aria-labelledby="backup-world-title">
-      <div class="context-icon" aria-hidden="true"><Icon name="folder" size={24} /></div>
-      <div class="context-copy">
-        <p class="eyebrow">{t('world.selected')}</p>
-        <h2 id="backup-world-title">{worldName}</h2>
-        <p class="path mono" title={app.worldDir}>{middleEllipsis(app.worldDir, 96)}</p>
-      </div>
-      <span class="pill pill-accent num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}</span>
-    </section>
+    <WorldCard compact name={worldName} path={app.worldDir} eyebrow={t('world.selected')}>
+      {#snippet actions()}
+        <Pill tone="accent"><span class="num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}</span></Pill>
+      {/snippet}
+    </WorldCard>
 
     {#if restoring}
       <section class="card restoring" role="status" aria-live="polite" aria-label={t('status.restoring')}>
@@ -142,83 +136,75 @@
     {/if}
 
     {#if backups.length === 0}
-      <section class="card empty-state" aria-labelledby="backups-empty-title">
-        <div class="empty-icon" aria-hidden="true"><Icon name="archive" size={28} /></div>
-        <div class="empty-copy">
-          <h2 id="backups-empty-title">{t('backups.empty')}</h2>
-          <p class="muted">{t('backups.emptyHelp')}</p>
-        </div>
-        <button type="button" class="btn btn-secondary" disabled={actionBusy} onclick={() => app.goto('workspace')}>
-          {t('nav.workspace')} <Icon name="chevron-right" size={18} />
-        </button>
-      </section>
+      <StatusScreen icon="archive" title={t('backups.empty')}>
+        <p>{t('backups.emptyHelp')}</p>
+        {#snippet actions()}
+          <button type="button" class="btn btn-secondary" disabled={actionBusy} onclick={() => app.goto('workspace')}>
+            {t('nav.workspace')} <Icon name="chevron-right" size={16} />
+          </button>
+        {/snippet}
+      </StatusScreen>
     {:else}
       <section aria-labelledby="backup-list-title">
+        <!-- The name is already on the card above; this line is the count and the disk use. -->
+        <h2 id="backup-list-title" class="sr-only">{t('backups.world', { name: worldName })}</h2>
         <div class="list-heading">
-          <h2 id="backup-list-title" class="section-title">{t('backups.world', { name: worldName })}</h2>
-          <p class="muted num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}</p>
+          <p class="muted num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}{#if app.backupUsage}
+            · {t('backups.usage', {
+              world: formatBytes(app.backupUsage.worldBytes, app.locale),
+              all: formatBytes(app.backupUsage.appBytes, app.locale)
+            })}{app.backupUsage.appBytesApproximate ? ` ${t('backups.usageApprox')}` : ''}{/if}</p>
+          {#if admin && appSets.length > 1}
+            <div class="prune">
+              <label for="keep-latest">{t('backups.keepLatest')}</label>
+              <input id="keep-latest" class="input num" type="number" min="1" max="1000" step="1" bind:value={keepLatest} />
+              <button type="button" class="btn btn-secondary btn-sm" disabled={actionBusy || !plan.doomed.length} onclick={() => (confirmPrune = true)}>
+                {plan.doomed.length ? t('backups.pruneButton', { count: formatNumber(plan.doomed.length, app.locale) }) : t('backups.pruneNothing')}
+              </button>
+            </div>
+          {/if}
         </div>
-        {#if app.backupUsage}
-          <p class="muted usage num">{t('backups.usage', {
-            world: formatBytes(app.backupUsage.worldBytes, app.locale),
-            all: formatBytes(app.backupUsage.appBytes, app.locale)
-          })}{app.backupUsage.appBytesApproximate ? ` ${t('backups.usageApprox')}` : ''}</p>
-        {/if}
-        {#if admin && appSets.length > 1}
-          <div class="prune">
-            <label for="keep-latest">{t('backups.keepLatest')}</label>
-            <input id="keep-latest" class="input num" type="number" min="1" max="1000" step="1" bind:value={keepLatest} />
-            <button type="button" class="btn btn-secondary btn-sm" disabled={actionBusy || !plan.doomed.length} onclick={() => (confirmPrune = true)}>
-              {plan.doomed.length ? t('backups.pruneButton', { count: formatNumber(plan.doomed.length, app.locale) }) : t('backups.pruneNothing')}
-            </button>
-          </div>
-        {/if}
-        <ul class="backup-list">
+        <ul class="list backup-list">
           {#each backups as backup (backup.backupSetId)}
-            <li>
-              <article class="card backup-row" aria-label={`${kindLabel(backup.kind)} · ${dateLabel(backup.createdAt)}`}>
-                <div class="row-main">
-                  <span class="backup-icon" aria-hidden="true"><Icon name={backup.kind === 'recovery' ? 'undo' : 'archive'} size={18} /></span>
-                  <div class="row-title">
-                    <strong>{kindLabel(backup.kind)}</strong>
-                    <span class="date num">{dateLabel(backup.createdAt)}</span>
-                  </div>
-                  <span class="row-facts num">
-                    {t('backups.files', { count: formatNumber(backup.fileCount, app.locale) })}{#if backup.sizeBytes !== undefined} · {formatBytes(backup.sizeBytes, app.locale)}{/if} · {locationLabel(backup)}
-                  </span>
-                  <span class="row-pills">
-                    {#if backup.legacy}
-                      <span class="pill unverified" title={t('backups.legacyHelp')}><Icon name="alert-triangle" size={13} /> {t('backups.legacy')}</span>
-                    {:else}
-                      <span class:verified={backup.verified} class:unverified={!backup.verified} class="pill">
-                        <Icon name={backup.verified ? 'check-circle' : 'alert-triangle'} size={13} />
-                        {backup.verified ? t('backups.verified') : t('backups.unverified')}
-                      </span>
-                    {/if}
-                    {#if needsForRecovery(backup)}<span class="pill unverified">{t('backups.neededForRecovery')}</span>{/if}
-                    {#if lastCopies.has(backup.backupSetId)}<span class="pill pill-accent">{t('backups.onlyCopy')}</span>{/if}
-                  </span>
-                  <span class="row-actions">
-                    <button type="button" class="btn btn-secondary btn-sm" disabled={actionBusy} onclick={() => openRestore(backup)}>
-                      <Icon name="undo" size={15} /> {t('backups.restore')}
-                    </button>
-                    {#if admin}
-                      <button type="button" class="btn btn-danger btn-sm" disabled={actionBusy || needsForRecovery(backup)}
-                        aria-label={t('backups.deleteOne', { date: dateLabel(backup.createdAt) })}
-                        title={needsForRecovery(backup) ? t('backups.neededForRecoveryHelp') : undefined}
-                        onclick={() => askDelete(backup)}>
-                        <Icon name="trash" size={15} /> {t('backups.delete')}
-                      </button>
-                    {/if}
-                  </span>
-                </div>
+            <ListRow>
+              {#snippet leading()}<Icon name={backup.kind === 'recovery' ? 'undo' : 'archive'} size={16} />{/snippet}
+              <strong class="kind">{kindLabel(backup.kind)}</strong>
+              <span class="date num">{dateLabel(backup.createdAt)}</span>
+              <span class="row-facts num">
+                {t('backups.files', { count: formatNumber(backup.fileCount, app.locale) })}{#if backup.sizeBytes !== undefined} · {formatBytes(backup.sizeBytes, app.locale)}{/if} · {locationLabel(backup)}
+              </span>
+              {#snippet trailing()}
+                <span class="row-pills">
+                  {#if backup.legacy}
+                    <span title={t('backups.legacyHelp')}><Pill tone="warning" dot>{t('backups.legacy')}</Pill></span>
+                  {:else if backup.verified}
+                    <Pill tone="success" dot>{t('backups.verified')}</Pill>
+                  {:else}
+                    <Pill tone="warning" dot>{t('backups.unverified')}</Pill>
+                  {/if}
+                  {#if needsForRecovery(backup)}<Pill tone="warning">{t('backups.neededForRecovery')}</Pill>{/if}
+                  {#if lastCopies.has(backup.backupSetId)}<Pill tone="accent">{t('backups.onlyCopy')}</Pill>{/if}
+                </span>
+                <button type="button" class="btn btn-secondary btn-sm" disabled={actionBusy} onclick={() => openRestore(backup)}>
+                  <Icon name="undo" size={15} /> {t('backups.restore')}
+                </button>
+                {#if admin}
+                  <button type="button" class="btn btn-quiet btn-sm delete" disabled={actionBusy || needsForRecovery(backup)}
+                    aria-label={t('backups.deleteOne', { date: dateLabel(backup.createdAt) })}
+                    title={needsForRecovery(backup) ? t('backups.neededForRecoveryHelp') : undefined}
+                    onclick={() => askDelete(backup)}>
+                    <Icon name="trash" size={15} /> {t('backups.delete')}
+                  </button>
+                {/if}
+              {/snippet}
+              {#snippet detail()}
                 <details class="row-details">
                   <summary>{t('backups.details')}</summary>
                   <code class="backup-id" title={backup.backupSetId}>{t('backups.id')}: {backup.backupSetId}</code>
                   {#if backup.externalTargets?.length}<p class="muted">{t('backups.externalCount', { count: backup.externalTargets.length })}</p>{/if}
                 </details>
-              </article>
-            </li>
+              {/snippet}
+            </ListRow>
           {/each}
         </ul>
       </section>
@@ -296,73 +282,24 @@
 
 <style>
   .external-targets { overflow-wrap: anywhere; padding-inline-start: 1em; }
-  .empty-state {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-5);
-    padding: var(--space-6) var(--space-5);
-    border-style: dashed;
-    border-color: var(--border-strong);
-    box-shadow: none;
-  }
-  .empty-icon, .context-icon, .backup-icon {
-    display: grid;
-    place-items: center;
-    flex: none;
-    color: var(--accent-soft-text);
-    background: var(--accent-soft);
-    border-radius: var(--radius-lg);
-  }
-  .empty-icon { width: 56px; height: 56px; }
-  .empty-copy { min-width: 0; }
-  .empty-copy h2 { font-size: var(--text-xl); }
-  .empty-copy p { margin-top: var(--space-1); }
-  .empty-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); justify-content: flex-end; }
-
-  .world-context {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
-  }
-  .context-icon { width: 48px; height: 48px; }
-  .context-copy { min-width: 0; }
-  .context-copy h2 { font-size: var(--text-lg); margin-top: 2px; overflow-wrap: anywhere; }
-  .path { margin-top: 2px; color: var(--text-secondary); font-size: var(--text-sm); }
-
-  .restoring {
-    display: grid;
-    gap: var(--space-3);
-    padding: var(--space-4) var(--space-5);
-    border-color: var(--accent);
-  }
+  .restoring { display: grid; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-color: var(--accent); }
   .restoring-head { display: flex; align-items: center; gap: var(--space-2); color: var(--accent-text); }
   .restoring-head :global(.icon) { animation: pomi-spin 0.9s linear infinite; }
   .restoring p { font-size: var(--text-sm); }
 
-  .list-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-4); margin: var(--space-2) 0 var(--space-3); }
-  .list-heading > .section-title { margin: 0; }
-  .backup-list { display: grid; gap: var(--space-3); list-style: none; margin: 0; padding: 0; }
-  .backup-list { gap: var(--space-2); }
-  .backup-row { display: grid; gap: var(--space-1); padding: var(--space-2) var(--space-4); }
-  .row-main { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-4); min-width: 0; }
-  .backup-icon { width: 32px; height: 32px; }
-  .row-title { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; flex: 1 1 220px; }
-  .row-title strong { font-size: var(--text-md); }
+  .list-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-3); }
+  .list-heading > p { margin: 0; font-size: var(--text-sm); }
+  .kind { font-weight: 600; }
   .date { color: var(--text-secondary); font-size: var(--text-sm); }
   .row-facts { color: var(--text-secondary); font-size: var(--text-sm); }
-  .row-pills { display: inline-flex; flex-wrap: wrap; gap: var(--space-1); }
-  .row-actions { display: inline-flex; gap: var(--space-2); margin-inline-start: auto; }
+  .row-pills { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+  .delete { color: var(--danger-text); }
+  @media (hover: hover) { .delete:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger-text); } }
   .row-details summary { cursor: pointer; font-size: var(--text-xs); color: var(--text-secondary); }
   .row-details[open] { padding-block-end: var(--space-1); }
-  .usage { margin: 0 0 var(--space-2); font-size: var(--text-sm); }
-  .prune { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-block-end: var(--space-3); font-size: var(--text-sm); }
+  .prune { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); font-size: var(--text-sm); }
   .prune .input { width: 80px; min-height: 30px; }
   .understand { margin-top: var(--space-2); }
-  .pill.verified { background: var(--success-soft); color: var(--success-text); }
-  .pill.unverified { background: var(--warning-soft); color: var(--warning-text); }
 
   .backup-id { min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); font-size: var(--text-xs); }
 
@@ -370,18 +307,4 @@
   .confirm-facts li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); overflow-wrap: anywhere; }
   .confirm-facts li > span { color: var(--text-secondary); font-size: var(--text-sm); }
   .confirm-facts li > strong, .confirm-facts li > code { min-width: 0; color: var(--text); text-align: end; overflow-wrap: anywhere; }
-
-  @media (max-width: 640px) {
-    .empty-state, .world-context { grid-template-columns: 1fr; align-items: start; }
-    .empty-actions { justify-content: flex-start; }
-    .context-icon, .empty-icon { width: 44px; height: 44px; }
-    .world-context > .pill { justify-self: start; }
-    .row-actions { margin-inline-start: 0; width: 100%; }
-  }
-
-  @media (max-width: 380px) {
-    .empty-actions, .empty-actions .btn { width: 100%; }
-    .empty-actions .btn { justify-content: center; }
-    .world-context, .empty-state { padding-inline: var(--space-4); }
-  }
 </style>

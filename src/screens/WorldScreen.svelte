@@ -7,6 +7,11 @@
   import { resultPresentation } from '../lib/workflow';
   import SetupNotice from '../components/SetupNotice.svelte';
   import InterruptedWork from '../components/InterruptedWork.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import WorldCard from '../components/WorldCard.svelte';
+  import ListRow from '../components/ListRow.svelte';
+  import StatusScreen from '../components/StatusScreen.svelte';
+  import Pill from '../components/Pill.svelte';
 
   const dimensions = $derived.by(() => {
     const dirs = app.inspection?.regionDirs ?? [];
@@ -19,6 +24,14 @@
     }
     return ['overworld', 'nether', 'end', 'other'].filter((name) => found.has(name));
   });
+  // "Overworld · The Nether · The End +1": one chip, not one chip per dimension.
+  const dimensionText = $derived.by(() => {
+    const names = dimensions.map((dim) => t(`world.dim.${dim}` as MessageKey));
+    return names.length > 3 ? `${names.slice(0, 3).join(' · ')} +${names.length - 3}` : names.join(' · ');
+  });
+  // The discovered list knows the world's own icon.png; the selected card borrows it.
+  const selectedIcon = $derived(app.discovered.find((world) => world.path === app.worldDir)?.icon ?? '');
+  const nothingYet = $derived(!app.worldDir && app.discoveredLoaded && app.discovered.length === 0 && app.recent.length === 0);
   const dataVersion = $derived(app.inspection?.dataVersions?.find((item) => item.dataVersion)?.dataVersion ?? null);
   const blockers = $derived(app.inspection?.writeBlockers ?? []);
   const blockerText = (code: string) => {
@@ -54,30 +67,24 @@
 </script>
 
 <div class="page">
-  <header class="page-head">
-    <h1>{t('world.title')}</h1>
-    <p class="lead">{t('world.lead')}</p>
-  </header>
+  <PageHeader title={t('world.title')} lead={t('world.lead')} />
 
   <InterruptedWork />
 
   {#if app.worldDir && app.inspection?.validJavaWorld}
-    <section class="card selected" aria-labelledby="selected-title">
-      <div class="head">
-        <div class="thumb" aria-hidden="true"><Icon name="folder" size={28} /></div>
-        <div class="who">
-          <p class="eyebrow" id="selected-title">{t('world.selected')}</p>
-          <h2 class="name">{name}</h2>
-          <p class="path mono truncate" title={app.worldDir}>{middleEllipsis(app.worldDir, 72)}</p>
-        </div>
-      </div>
+    <WorldCard name={name} path={app.worldDir} icon={selectedIcon} eyebrow={t('world.selected')}>
+      {#snippet actions()}
+        <button type="button" class="btn btn-secondary btn-sm" disabled={app.isBusy} onclick={() => app.chooseWorld()}>
+          <Icon name="folder" size={14} /> {t('world.openOther')}
+        </button>
+      {/snippet}
 
       <ul class="facts">
-        <li><span class="pill pill-accent">{t(`world.kind.${kind}` as MessageKey)}</span></li>
-        {#each dimensions as dim (dim)}<li><span class="pill">{t(`world.dim.${dim}` as MessageKey)}</span></li>{/each}
-        {#if app.inspection?.resourcePacks?.length}<li><span class="pill">{t('world.resourcePack')}</span></li>{/if}
-        <li><span class="pill">{t('world.backupsCount', { count: app.backups.length })}</span></li>
-        {#if dataVersion}<li><span class="pill num">{t('world.gameData', { version: dataVersion })}</span></li>{/if}
+        <li><Pill tone="accent">{t(`world.kind.${kind}` as MessageKey)}</Pill></li>
+        {#if dimensionText}<li><Pill>{dimensionText}</Pill></li>{/if}
+        {#if app.inspection?.resourcePacks?.length}<li><Pill>{t('world.resourcePack')}</Pill></li>{/if}
+        <li><Pill>{t('world.backupsCount', { count: app.backups.length })}</Pill></li>
+        {#if dataVersion}<li><Pill>{t('world.gameData', { version: dataVersion })}</Pill></li>{/if}
       </ul>
 
       {#if landing.length}
@@ -102,17 +109,20 @@
           {/snippet}
         </Callout>
       {/if}
-
-      <div class="cta">
-        <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.chooseWorld()}>
-          <Icon name="folder" size={16} /> {t('world.openOther')}
-        </button>
-      </div>
-    </section>
+    </WorldCard>
     <SetupNotice />
+  {:else if nothingYet}
+    <StatusScreen title={t('world.open')}>
+      <p>{t('world.openHint')}</p>
+      <p>{t('world.discoveredEmpty')}</p>
+      {#snippet actions()}
+        <button type="button" class="btn btn-primary btn-lg" onclick={() => app.chooseWorld()}><Icon name="folder" size={16} /> {t('world.open')}</button>
+        <button type="button" class="btn btn-secondary btn-lg" disabled={app.isBusy} onclick={() => app.loadDiscovered(true)}><Icon name="refresh" size={16} /> {t('world.refresh')}</button>
+      {/snippet}
+    </StatusScreen>
   {:else}
     <section class="card empty">
-      <div class="art" aria-hidden="true"><img src="/images/pomi.png" alt="" width="96" height="96" /></div>
+      <div class="art" aria-hidden="true"><img src="/images/pomi.png" alt="" width="72" height="72" /></div>
       <div class="copy">
         <h2>{t('world.open')}</h2>
         <p class="muted">{t('world.openHint')}</p>
@@ -124,67 +134,67 @@
     </section>
   {/if}
 
-  <section class="found" aria-labelledby="found-title">
-    <div class="section-row">
-      <h2 id="found-title" class="section-title">{t('world.discovered')}</h2>
-      <button type="button" class="btn btn-quiet btn-sm" disabled={app.isBusy} onclick={() => app.loadDiscovered(true)}><Icon name="refresh" size={14} /> {t('world.refresh')}</button>
-    </div>
-    <p class="muted small">{t('world.discoveredHelp')}</p>
-    {#if app.discoveredLoaded && app.discovered.length === 0}
-      <p class="muted">{t('world.discoveredEmpty')}</p>
-    {:else if app.discovered.length}
-      <ul class="tiles">
-        {#each app.discovered as world (world.path)}
-          <li>
-            <button type="button" class="tile" class:current={world.path === app.worldDir} disabled={app.isBusy}
-              aria-current={world.path === app.worldDir ? 'true' : undefined} title={world.path} onclick={() => app.useWorld(world.path)}>
-              {#if world.icon}<img class="icon-img" src={world.icon} alt="" width="48" height="48" />
-              {:else}<span class="icon-img placeholder" aria-hidden="true"><Icon name="folder" size={22} /></span>{/if}
-              <span class="tile-text">
-                <span class="n">{world.name}</span>
-                <span class="p">{world.folder}{#if world.versionName} · {world.versionName}{/if}</span>
-                <span class="p">{t('world.lastPlayed', { date: formatDate(world.lastPlayed, app.locale) })}</span>
-              </span>
-            </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+  {#if !nothingYet}
+    <section class="found" aria-labelledby="found-title">
+      <div class="section-row">
+        <h2 id="found-title" class="section-title">{t('world.discovered')}</h2>
+        <button type="button" class="btn btn-quiet btn-sm" disabled={app.isBusy} onclick={() => app.loadDiscovered(true)}><Icon name="refresh" size={14} /> {t('world.refresh')}</button>
+      </div>
+      <p class="muted small">{t('world.discoveredHelp')}</p>
+      {#if app.discoveredLoaded && app.discovered.length === 0}
+        <p class="muted">{t('world.discoveredEmpty')}</p>
+      {:else if app.discovered.length}
+        <ul class="tiles">
+          {#each app.discovered as world (world.path)}
+            <li>
+              <button type="button" class="tile" class:current={world.path === app.worldDir} disabled={app.isBusy}
+                aria-current={world.path === app.worldDir ? 'true' : undefined} title={world.path} onclick={() => app.useWorld(world.path)}>
+                {#if world.icon}<img class="icon-img" src={world.icon} alt="" width="48" height="48" />
+                {:else}<span class="icon-img placeholder" aria-hidden="true"><Icon name="folder" size={22} /></span>{/if}
+                <span class="tile-text">
+                  <span class="n">{world.name}</span>
+                  <span class="p">{world.versionName ? `${world.folder} · ${world.versionName}` : world.folder}</span>
+                  <span class="p when">{t('world.lastPlayed', { date: formatDate(world.lastPlayed, app.locale) })}</span>
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
 
-  <section class="recent" aria-labelledby="recent-title">
-    <h2 id="recent-title" class="section-title">{t('world.recent')}</h2>
-    {#if app.recent.length === 0}
-      <p class="muted">{t('world.recentEmpty')}</p>
-    {:else}
-      <ul class="worlds">
-        {#each app.recent as world (world.path)}
-          <li class="world" class:current={world.path === app.worldDir}>
-            <button
-              type="button"
-              class="open"
-              disabled={!world.available || app.isBusy}
-              aria-current={world.path === app.worldDir ? 'true' : undefined}
-              onclick={() => app.useWorld(world.path)}
-            >
-              <span class="ico" aria-hidden="true"><Icon name="folder" size={20} /></span>
-              <span class="txt">
-                <span class="n">{world.name || baseName(world.path)}</span>
-                {#if world.path !== app.worldDir}<span class="p mono truncate" title={world.path}>{middleEllipsis(world.path, 64)}</span>{/if}
-              </span>
-              <span class="meta">
-                {#if !world.available}<span class="pill pill-warning">{t('world.missing')}</span>
+    <section class="recent" aria-labelledby="recent-title">
+      <h2 id="recent-title" class="section-title">{t('world.recent')}</h2>
+      {#if app.recent.length === 0}
+        <p class="muted">{t('world.recentEmpty')}</p>
+      {:else}
+        <ul class="list">
+          {#each app.recent as world (world.path)}
+            <ListRow selected={world.path === app.worldDir}>
+              {#snippet leading()}<Icon name="folder" size={16} />{/snippet}
+              <button
+                type="button"
+                class="open"
+                disabled={!world.available || app.isBusy}
+                aria-current={world.path === app.worldDir ? 'true' : undefined}
+                onclick={() => app.useWorld(world.path)}
+              >
+                <span class="n truncate">{world.name || baseName(world.path)}</span>
+                {#if world.path !== app.worldDir}<span class="p mono truncate" title={world.path}>{middleEllipsis(world.path, 56)}</span>{/if}
+              </button>
+              {#snippet trailing()}
+                {#if !world.available}<Pill tone="warning" dot>{t('world.missing')}</Pill>
                 {:else if world.lastOpened}<span class="when">{formatDate(world.lastOpened, app.locale)}</span>{/if}
-              </span>
-            </button>
-            <button type="button" class="btn btn-quiet btn-icon btn-sm" disabled={app.isBusy} aria-label={t('world.forgetNamed', { name: world.name || baseName(world.path) })} title={t('world.forget')} onclick={() => app.forgetWorld(world.path)}>
-              <Icon name="x" size={16} />
-            </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+                <button type="button" class="btn btn-quiet btn-icon btn-sm" disabled={app.isBusy} aria-label={t('world.forgetNamed', { name: world.name || baseName(world.path) })} title={t('world.forget')} onclick={() => app.forgetWorld(world.path)}>
+                  <Icon name="x" size={16} />
+                </button>
+              {/snippet}
+            </ListRow>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+  {/if}
 
   {#if app.worldDir && app.inspection?.validJavaWorld}
     <div class="action-bar">
@@ -205,51 +215,32 @@
 </div>
 
 <style>
-  .selected { padding: var(--space-4); display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
-  .head { display: flex; gap: var(--space-4); align-items: center; min-width: 0; }
-  .thumb { flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--accent-soft-text); }
-  .who { min-width: 0; }
-  .name { font-size: var(--text-xl); margin-top: 2px; overflow-wrap: anywhere; }
-  .path { font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
   .facts { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
   .plain { margin: 0; padding-inline-start: 18px; }
   .landing { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
-  .cta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .small { font-size: var(--text-sm); }
   .found { display: grid; gap: var(--space-2); }
-  .tiles { list-style: none; margin: var(--space-1) 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--space-2); }
-  .tile { width: 100%; min-width: 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: var(--space-3); align-items: center; padding: var(--space-2); text-align: start;
-    background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
+  .tiles { list-style: none; margin: var(--space-1) 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-3); }
+  .tile { width: 100%; min-width: 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: var(--space-3); align-items: center; padding: var(--space-3); text-align: start;
+    background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
   .tile.current { border-color: var(--accent); background: var(--bg-selected); }
   .tile:disabled { opacity: 0.6; }
-  @media (hover: hover) { .tile:not(:disabled):hover { border-color: var(--border-strong); } }
+  @media (hover: hover) { .tile:not(:disabled):hover { border-color: var(--border-control); } }
   .icon-img { width: 48px; height: 48px; border-radius: var(--radius-md); image-rendering: pixelated; object-fit: cover; outline: 1px solid var(--image-outline); outline-offset: -1px; }
   .icon-img.placeholder { display: grid; place-items: center; background: var(--bg-sunken); color: var(--text-secondary); }
-  .tile-text { display: grid; min-width: 0; }
+  .tile-text { display: grid; gap: 1px; min-width: 0; }
   .tile-text .n { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tile-text .p { font-size: var(--text-xs); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .empty { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: var(--space-5); padding: var(--space-5); border-style: dashed; border-color: var(--border-strong); }
+  /* The last-played line is the useful one: it wraps instead of being cut. */
+  .tile-text .p.when { white-space: normal; overflow: visible; }
+  .empty { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: var(--space-5); padding: var(--space-5); border-style: dashed; border-color: var(--border-strong); box-shadow: none; }
   .art img { width: 72px; height: 72px; object-fit: contain; }
-  .copy h2 { font-size: var(--text-xl); }
+  .copy h2 { font-size: var(--text-xl); font-weight: 600; }
   .copy p { margin-top: var(--space-1); }
-  .worlds { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); min-width: 0; }
-  .world { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); min-width: 0; }
-  .open { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); min-height: 44px; padding: 6px var(--space-3);
-    min-width: 0; width: 100%; text-align: start; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
-  .world.current .open { border-color: var(--accent); background: var(--bg-selected); }
+  .open { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: var(--space-3); padding: 0; border: 0; background: transparent; text-align: start; align-self: stretch; }
   .open:disabled { opacity: 0.6; }
-  .ico { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--radius-md); background: var(--bg-sunken); color: var(--text-secondary); }
-  .txt { display: grid; min-width: 0; }
-  .n { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .p { font-size: var(--text-xs); color: var(--text-secondary); }
+  .open .n { font-weight: 600; flex: none; max-width: 50%; }
+  .open .p { font-size: var(--text-xs); color: var(--text-secondary); min-width: 0; }
   .when { font-size: var(--text-xs); color: var(--text-secondary); white-space: nowrap; }
-  @media (hover: hover) { .open:not(:disabled):hover { border-color: var(--border-control); } }
-  @media (max-width: 760px) { .empty { grid-template-columns: 1fr; justify-items: start; } .meta { display: none; } }
-  @media (max-width: 420px) {
-    .selected { padding: var(--space-4); }
-    .head { align-items: flex-start; gap: var(--space-3); }
-    .thumb { width: 48px; height: 48px; }
-    .cta .btn { width: 100%; }
-    .open { padding-inline: var(--space-2); gap: var(--space-2); }
-  }
+  @media (max-width: 760px) { .empty { grid-template-columns: 1fr; justify-items: start; } .when { display: none; } }
 </style>

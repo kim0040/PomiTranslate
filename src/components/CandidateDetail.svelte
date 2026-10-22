@@ -116,7 +116,8 @@
   .blank { display: grid; justify-items: center; align-content: center; gap: var(--space-3); min-height: 240px; padding: var(--space-5); text-align: center; color: var(--text-secondary); }
   .top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: var(--space-3); min-height: 44px; margin: 0 calc(-1 * var(--space-4)); padding: var(--space-2) var(--space-4); background: var(--bg-surface); border-bottom: 1px solid var(--border); }
   .top h2 { font-size: var(--text-lg); font-weight: 600; margin-inline-end: auto; white-space: nowrap; }
-  @container (max-width: 380px) { .top h2 { display: none; } }
+  /* Hidden for the eye only: the heading level order stays intact for assistive technology. */
+  @container (max-width: 380px) { .top h2 { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); } }
   .top .include { margin-inline-start: auto; align-items: center; }
   .top h2 + .include { margin-inline-start: 0; }
   .top .check .label { font-weight: 500; font-size: var(--text-sm); }

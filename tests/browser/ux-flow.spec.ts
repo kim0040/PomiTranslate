@@ -120,6 +120,7 @@ test('a narrow window still explains why the next step is disabled', async ({ pa
   await page.setViewportSize({ width: 1024, height: 680 });
   await open(page, 'scenario=review');
   await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('button', { name: '일괄 작업' }).click();
   await page.getByRole('button', { name: '현재 표시된 항목 모두 제외' }).click();
   await expect(page.getByRole('alert').filter({ hasText: '번역 대상으로 선택된 문장이 없습니다' })).toBeVisible();
 });

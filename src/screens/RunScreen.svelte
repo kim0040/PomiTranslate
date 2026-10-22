@@ -7,6 +7,8 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import SetupNotice from '../components/SetupNotice.svelte';
   import Dialog from '../components/Dialog.svelte';
+  import PageHeader from '../components/PageHeader.svelte';
+  import WorldCard from '../components/WorldCard.svelte';
   import { REASONING_PROVIDERS, reasoningSummary, supportsReasoning } from '../lib/reasoning';
   import { clock, holdClock } from '../lib/clock.svelte';
   import { milestone, percentDone, remainingSeconds } from '../lib/workflow';
@@ -110,74 +112,72 @@
 
 <div class="page">
   {#if running}
-    <header class="page-head">
-      <h1>{t('run.busy')}</h1>
-      <p class="lead">{t('run.busyHelp')}</p>
-    </header>
+    <PageHeader title={t('run.busy')} lead={t('run.busyHelp')} />
 
-    <section class="card live">
-      <p class="sr-only" role="status" aria-live="polite">{announcement}</p>
-      <ol class="phases" aria-label={t('step.list')}>
-        {#each phases as phase, index (phase.id)}
-          <li class:done={phaseIndex > index} class:current={phaseIndex === index}>
-            <span class="dot" aria-hidden="true">
-              {#if phaseIndex > index}<Icon name="check" size={14} />{:else if phaseIndex === index}<span class="ping"></span>{:else}{index + 1}{/if}
-            </span>
-            <span>{t(phase.key)}</span>
-          </li>
-        {/each}
-      </ol>
+    <div class="live-grid" class:two={p.samples.length > 0}>
+      <section class="card live">
+        <p class="sr-only" role="status" aria-live="polite">{announcement}</p>
+        <ol class="phases" aria-label={t('step.list')}>
+          {#each phases as phase, index (phase.id)}
+            <li class:done={phaseIndex > index} class:current={phaseIndex === index}>
+              <span class="dot" aria-hidden="true">
+                {#if phaseIndex > index}<Icon name="check" size={14} />{:else if phaseIndex === index}<span class="ping"></span>{:else}{index + 1}{/if}
+              </span>
+              <span>{t(phase.key)}</span>
+            </li>
+          {/each}
+        </ol>
 
-      <div class="bar">
-        <ProgressBar label={detail} value={barValue} max={barMax} />
-        <div class="line">
-          <span class="num strong">{detail}</span>
-          <span class="spacer"></span>
-          <span class="num muted" role="timer" aria-live="off">{t('run.progress.elapsed', { time: formatDuration((now - p.startedAt) / 1000, app.locale) })}</span>
+        <div class="bar">
+          <ProgressBar label={detail} value={barValue} max={barMax} />
+          <div class="line">
+            <span class="num strong">{detail}</span>
+            <span class="spacer"></span>
+            <span class="num muted" role="timer" aria-live="off">{t('run.progress.elapsed', { time: formatDuration((now - p.startedAt) / 1000, app.locale) })}</span>
+          </div>
+          <!-- Always one line tall, so the rows below do not move when an estimate appears. -->
+          <p class="num muted detail-line">
+            {#if eta !== null}{t('run.progress.eta', { time: formatDuration(eta, app.locale) })}{:else}&nbsp;{/if}
+            {#if p.currentFile && p.phase !== 'translate'}<span class="file mono" title={p.currentFile}>{middleEllipsis(p.currentFile, 56)}</span>{/if}
+          </p>
         </div>
-        <!-- Always one line tall, so the rows below do not move when an estimate appears. -->
-        <p class="num muted detail-line">
-          {#if eta !== null}{t('run.progress.eta', { time: formatDuration(eta, app.locale) })}{:else}&nbsp;{/if}
-          {#if p.currentFile && p.phase !== 'translate'}<span class="file" title={p.currentFile}>{middleEllipsis(p.currentFile, 56)}</span>{/if}
-        </p>
-      </div>
 
-      <!-- Always laid out, so the cancel button does not move when translation starts. -->
-      <dl class="facts">
-        <div><dt>{t('run.progress.requestsLabel')}</dt><dd class="num">{p.phase === 'translate' ? t('run.progress.requests', { done: p.requests, total: p.requestsEstimate || estimate?.requests || 0 }) : '–'}</dd></div>
-        <div><dt>{t('result.stat.failed')}</dt><dd class="num" class:bad={p.failed > 0}>{p.phase === 'translate' ? p.failed : '–'}</dd></div>
-        <div><dt>{t('run.cost.soFar')}</dt><dd class="num">{spentText}</dd></div>
-      </dl>
+        <!-- Always laid out, so the cancel button does not move when translation starts. -->
+        <dl class="facts">
+          <div><dt>{t('run.progress.requestsLabel')}</dt><dd class="num">{p.phase === 'translate' ? t('run.progress.requests', { done: p.requests, total: p.requestsEstimate || estimate?.requests || 0 }) : '–'}</dd></div>
+          <div><dt>{t('result.stat.failed')}</dt><dd class="num" class:bad={p.failed > 0}>{p.phase === 'translate' ? p.failed : '–'}</dd></div>
+          <div><dt>{t('run.cost.soFar')}</dt><dd class="num">{spentText}</dd></div>
+        </dl>
 
+        {#if p.retry}
+          <Callout tone="warning" title={t('run.progress.retry', { attempt: p.retry.attempt, max: p.retry.max })} role="status">
+            {#if p.retry.code}{t(failureKey(p.retry.code))}{/if}
+          </Callout>
+        {/if}
+
+        <div>
+          <button type="button" class="btn btn-secondary" disabled={app.cancelling} onclick={() => app.cancel()}>
+            <Icon name="stop" size={18} /> {app.cancelling ? t('run.cancelling') : t('run.cancel')}
+          </button>
+        </div>
+      </section>
+
+      <!-- The strongest trust signal for a translation tool: what was just translated, as it happens. -->
       {#if p.samples.length}
-        <div class="samples">
-          <h2 class="group-title">{t('run.samples')}</h2>
+        <section class="card feed" aria-labelledby="feed-title">
+          <h2 id="feed-title" class="section-title">{t('run.samples')}</h2>
           <ul>
             {#each p.samples as sample, index (index + sample.source)}
-              <li><span class="from" title={sample.source}>{sample.source}</span><span class="arrow" aria-hidden="true">→</span><span class="to" title={sample.translated}>{sample.translated}</span></li>
+              <li>
+                <span class="from" title={sample.source}>{sample.source}</span>
+                <span class="to" title={sample.translated}><span class="arrow" aria-hidden="true">→</span> {sample.translated}</span>
+              </li>
             {/each}
           </ul>
-        </div>
+        </section>
       {/if}
-
-      {#if p.retry}
-        <Callout tone="warning" title={t('run.progress.retry', { attempt: p.retry.attempt, max: p.retry.max })} role="status">
-          {#if p.retry.code}{t(failureKey(p.retry.code))}{/if}
-        </Callout>
-      {/if}
-
-      <div>
-        <button type="button" class="btn btn-secondary" disabled={app.cancelling} onclick={() => app.cancel()}>
-          <Icon name="stop" size={18} /> {app.cancelling ? t('run.cancelling') : t('run.cancel')}
-        </button>
-      </div>
-    </section>
+    </div>
   {:else}
-    <header class="page-head">
-      <h1>{t('run.title')}</h1>
-      <p class="lead">{t('run.lead')}</p>
-    </header>
-
     {#if app.resume}
       <Callout tone="info" title={t('world.resumeFound')}>
         {resumeText}
@@ -187,43 +187,47 @@
       </Callout>
     {/if}
 
+    <PageHeader title={t('run.title')} lead={t('run.lead')} />
+
     <SetupNotice blocking />
 
-    <section aria-labelledby="summary-title">
-      <h2 id="summary-title" class="group-title">{t('run.summaryTitle')}</h2>
-      <dl class="group">
-        <div class="row-item"><dt class="k">{t('run.summary.world')}</dt><dd class="v" title={app.worldDir}>{baseName(app.worldDir)}<span class="sub mono">{middleEllipsis(app.worldDir, 56)}</span></dd></div>
-        <div class="row-item"><dt class="k">{t('run.summary.language')}</dt><dd class="v">{app.settings.target_language}</dd></div>
-        <div class="row-item"><dt class="k">{t('run.summary.model')}</dt><dd class="v" class:warn={!app.hasModel && !app.manualOnly}>{modelText}</dd></div>
-        {#if REASONING_PROVIDERS.includes(app.settings.provider) && !app.manualOnly}
-          <div class="row-item"><dt class="k">{t('settings.reasoning.label')}</dt><dd class="v inline"><span class="text">{reasoning}</span>{#if reasoningEditable}<button type="button" class="btn btn-quiet btn-sm edit-settings" disabled={!!app.busy} onclick={() => app.openSettingsFor('run')}>{t('run.reasoning.edit')}</button>{/if}</dd></div>
-        {/if}
-      </dl>
-    </section>
+    <div class="cols">
+      <section class="col" aria-labelledby="summary-title">
+        <h2 id="summary-title" class="group-title">{t('run.summaryTitle')}</h2>
+        <WorldCard compact name={baseName(app.worldDir)} path={app.worldDir} />
+        <dl class="group">
+          <div class="row-item"><dt class="k">{t('run.summary.language')}</dt><dd class="v">{app.settings.target_language}</dd></div>
+          <div class="row-item"><dt class="k">{t('run.summary.model')}</dt><dd class="v" class:warn={!app.hasModel && !app.manualOnly}>{modelText}</dd></div>
+          {#if REASONING_PROVIDERS.includes(app.settings.provider) && !app.manualOnly}
+            <div class="row-item"><dt class="k">{t('settings.reasoning.label')}</dt><dd class="v inline"><span class="text">{reasoning}</span>{#if reasoningEditable}<button type="button" class="btn btn-quiet btn-sm edit-settings" disabled={!!app.busy} onclick={() => app.openSettingsFor('run')}>{t('run.reasoning.edit')}</button>{/if}</dd></div>
+          {/if}
+        </dl>
+      </section>
 
-    <section aria-labelledby="work-title">
-      <h2 id="work-title" class="group-title">{t('run.workTitle')}</h2>
-      <dl class="group">
-        <div class="row-item"><dt class="k">{t('run.summary.texts')}</dt><dd class="v num">{formatNumber(app.outgoingCount, app.locale)}</dd></div>
-        <div class="row-item"><dt class="k">{t('run.summary.manual')}</dt><dd class="v num">{formatNumber(app.manualCount, app.locale)}</dd></div>
-        <div class="row-item"><dt class="k">{t('run.summary.requests')}</dt><dd class="v num">{app.manualOnly ? '0' : estimate ? formatNumber(estimate.requests, app.locale) : app.estimateLoading ? t('run.cost.calculating') : t('common.unknown')}</dd></div>
-        <div class="row-item">
-          <dt class="k">{t('run.summary.cost')}</dt>
-          <dd class="v num">{costText}
-            <!-- While a new estimate is on its way its lines keep their place, so nothing below jumps. -->
-            {#if (estimate && estimate.requests > 0) || (!estimate && app.estimateLoading && !app.manualOnly)}
-              <span class="sub">{estimate ? t('run.summary.tokens', { input: formatCompact(estimate.inputTokens, app.locale), output: formatCompact(estimate.outputTokens, app.locale) }) : '\u00a0'}</span>
-              <span class="sub">{estimate ? (estimate.cost ? t('run.cost.note') : t('run.cost.unknownWhy')) : '\u00a0'}</span>
-              {#if REASONING_PROVIDERS.includes(app.settings.provider) && app.settings.openrouter_reasoning !== 'disabled'}<span class="sub">{t('run.reasoning.cost')}</span>{/if}
-            {/if}
-          </dd>
+      <section class="col" aria-labelledby="work-title">
+        <h2 id="work-title" class="group-title">{t('run.workTitle')}</h2>
+        <!-- The one number to decide on, set apart from the facts around it. -->
+        <div class="card cost">
+          <p class="overline">{t('run.summary.cost')}</p>
+          <p class="cost-head num">{costText}</p>
+          <!-- While a new estimate is on its way its lines keep their place, so nothing below jumps. -->
+          {#if (estimate && estimate.requests > 0) || (!estimate && app.estimateLoading && !app.manualOnly)}
+            <span class="sub">{estimate ? t('run.summary.tokens', { input: formatCompact(estimate.inputTokens, app.locale), output: formatCompact(estimate.outputTokens, app.locale) }) : '\u00a0'}</span>
+            <span class="sub">{estimate ? (estimate.cost ? t('run.cost.note') : t('run.cost.unknownWhy')) : '\u00a0'}</span>
+            {#if REASONING_PROVIDERS.includes(app.settings.provider) && app.settings.openrouter_reasoning !== 'disabled'}<span class="sub">{t('run.reasoning.cost')}</span>{/if}
+          {/if}
         </div>
-        <div class="row-item"><dt class="k">{t('run.summary.backup')}</dt><dd class="v backup"><Icon name="shield" size={14} /> {t('run.summary.backupValue')}</dd></div>
-        {#if app.settings.resource_pack_enabled && app.settings.external_resource_pack_paths?.length}
-          <div class="row-item"><dt class="k">{t('settings.pack.externalTitle')}</dt><dd class="v"><ul class="external-paths">{#each app.settings.external_resource_pack_paths as path}<li class="mono">{path}</li>{/each}</ul><span class="sub">{t('settings.pack.externalHelp')}</span></dd></div>
-        {/if}
-      </dl>
-    </section>
+        <dl class="group">
+          <div class="row-item"><dt class="k">{t('run.summary.texts')}</dt><dd class="v num">{formatNumber(app.outgoingCount, app.locale)}</dd></div>
+          <div class="row-item"><dt class="k">{t('run.summary.manual')}</dt><dd class="v num">{formatNumber(app.manualCount, app.locale)}</dd></div>
+          <div class="row-item"><dt class="k">{t('run.summary.requests')}</dt><dd class="v num">{app.manualOnly ? '0' : estimate ? formatNumber(estimate.requests, app.locale) : app.estimateLoading ? t('run.cost.calculating') : t('common.unknown')}</dd></div>
+          <div class="row-item"><dt class="k">{t('run.summary.backup')}</dt><dd class="v backup"><Icon name="shield" size={14} /> {t('run.summary.backupValue')}</dd></div>
+          {#if app.settings.resource_pack_enabled && app.settings.external_resource_pack_paths?.length}
+            <div class="row-item"><dt class="k">{t('settings.pack.externalTitle')}</dt><dd class="v"><ul class="external-paths">{#each app.settings.external_resource_pack_paths as path}<li class="mono">{path}</li>{/each}</ul><span class="sub">{t('settings.pack.externalHelp')}</span></dd></div>
+          {/if}
+        </dl>
+      </section>
+    </div>
 
     <fieldset class="group policy">
       <legend class="group-title">{t('run.failurePolicy')}</legend>
@@ -285,21 +289,26 @@
 {/if}
 
 <style>
+  .cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); align-items: start; }
+  .col { display: grid; gap: var(--space-3); min-width: 0; }
+  .col > .group-title { margin: 0; }
+  .group-title { font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary); margin: 0 0 6px var(--space-1); }
+  .cost { padding: var(--space-4); display: grid; gap: 2px; }
+  .cost-head { font-size: var(--text-xl); font-weight: 600; letter-spacing: -0.01em; min-height: 1.4em; }
   .detail-line { margin: 0; min-height: 1.4em; font-size: var(--text-sm); display: flex; gap: var(--space-3); }
-  .file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .samples ul { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: grid; gap: var(--space-1); }
-  .samples li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--space-2); font-size: var(--text-sm); }
-  .samples .from, .samples .to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .samples .from { color: var(--text-secondary); }
+  .file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }
   .external-paths { padding-inline-start: 1em; margin: 0; overflow-wrap: anywhere; }
   /* The edit button keeps its line when the summary text changes length, so the rows below stay put. */
   .inline { display: flex; align-items: center; gap: var(--space-2); }
   .inline > .text { flex: 1 1 auto; min-width: 0; }
   .edit-settings { flex: none; }
+  /* Progress: the live card on the left, the feed of finished sentences beside it when the core sends them. */
+  .live-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+  .live-grid.two { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
   .live { padding: var(--space-5); display: grid; gap: var(--space-5); }
   .phases { display: flex; gap: var(--space-5); margin: 0; padding: 0; list-style: none; flex-wrap: wrap; }
-  .phases li { display: flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); font-weight: 600; }
-  .phases li.current { color: var(--text); }
+  .phases li { display: flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); font-weight: 500; }
+  .phases li.current { color: var(--text); font-weight: 600; }
   .phases li.done { color: var(--success-text); }
   .dot { position: relative; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--border-control); font-size: var(--text-xs); font-variant-numeric: tabular-nums; background: var(--bg-surface); }
   li.done .dot { background: var(--success-solid); border-color: var(--success-solid); color: #fff; }
@@ -308,12 +317,19 @@
   @keyframes pomi-pulse { 50% { opacity: 0.3; scale: 0.8; } }
   .bar { display: grid; gap: var(--space-2); }
   .line { display: flex; align-items: baseline; gap: var(--space-3); }
-  .strong { font-weight: 700; }
-  .facts { display: flex; gap: var(--space-6); margin: 0; }
+  .strong { font-weight: 600; }
+  .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--border); }
   .facts dt { font-size: var(--text-sm); color: var(--text-secondary); font-weight: 500; }
-  .facts dd { margin: 0; font-size: var(--text-xl); font-weight: 700; }
+  .facts dd { margin: 0; font-size: var(--text-xl); font-weight: 600; }
   .bad { color: var(--danger-text); }
   dd.warn { color: var(--warning-text); }
+  .feed { padding: var(--space-4); display: grid; gap: var(--space-3); align-content: start; }
+  .feed .section-title { margin: 0; }
+  .feed ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+  .feed li { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); font-size: var(--text-sm); min-width: 0; }
+  .feed .from { color: var(--text-secondary); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .feed .to { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .feed .arrow { color: var(--accent-text); }
   .backup { display: flex; align-items: center; gap: 6px; }
   .backup :global(.icon) { color: var(--success-text); flex: none; }
   .sub { display: block; font-weight: 400; font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
@@ -324,4 +340,6 @@
   .policy .row-item:first-of-type { border-top: 0; }
   .check span { font-weight: 500; }
   .check input[type='radio'] { width: 16px; height: 16px; margin: 0; }
+  @media (max-width: 860px) { .cols, .live-grid.two { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 520px) { .facts { grid-template-columns: minmax(0, 1fr); gap: var(--space-2); } }
 </style>

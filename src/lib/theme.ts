@@ -31,7 +31,7 @@ export function applyTheme(choice: ThemeChoice): void {
   const root = document.documentElement;
   const resolved = resolveTheme(choice);
   // The native title bar and the window behind the page follow too, so a dark start never flashes white.
-  const background = resolved === 'dark' ? '#120f0b' : '#f9f8f7';
+  const background = resolved === 'dark' ? '#0e0f11' : '#fafafa';
   void setWindowTheme(choice, background);
   void setMenuTheme(choice);
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', background);

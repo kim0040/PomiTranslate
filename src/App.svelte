@@ -227,9 +227,9 @@
   <Dialog title={t('notice.title')} dismissible={false} onClose={() => {}}>
     <div class="notice-brand" aria-hidden="true"><img src="/images/pomi.png" alt="" width="72" height="72" /></div>
     <ul class="notice-list">
-      <li><Icon name="shield" size={19} /> <span>{t('notice.item1')}</span></li>
-      <li><Icon name="language" size={19} /> <span>{t('notice.item2')}</span></li>
-      <li><Icon name="info" size={19} /> <span>{t('notice.item3')}</span></li>
+      <li><span class="mark"><Icon name="shield" size={18} /></span> <span>{t('notice.item1')}</span></li>
+      <li><span class="mark"><Icon name="language" size={18} /></span> <span>{t('notice.item2')}</span></li>
+      <li><span class="mark"><Icon name="info" size={18} /></span> <span>{t('notice.item3')}</span></li>
     </ul>
     <div class="first-run">
       <div class="field">
@@ -248,9 +248,10 @@
         <span id="first-target-help" class="hint">{t('firstRun.targetHelp')}</span>
       </div>
     </div>
-    <p class="required" lang="en">NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
     {#snippet actions()}
-      <button type="button" class="btn btn-primary btn-lg" data-autofocus onclick={() => app.acceptNotice()}>{t('notice.accept')}</button>
+      <button type="button" class="btn btn-primary btn-lg accept" data-autofocus onclick={() => app.acceptNotice()}>{t('notice.accept')}</button>
+      <!-- Required wording, kept exactly as written; it is set quietly below the choice instead of shouting above it. -->
+      <p class="required" lang="en">NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
     {/snippet}
   </Dialog>
 {/if}
@@ -311,10 +312,11 @@
   .notice-brand { display: grid; place-items: center; }
   .notice-brand img { width: 72px; height: 72px; object-fit: contain; outline: 1px solid var(--image-outline); outline-offset: -1px; border-radius: var(--radius-xl); }
   .notice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
-  .notice-list li { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: var(--space-3); }
-  .required { font-size: var(--text-xs); font-weight: 600; color: var(--text-secondary); letter-spacing: 0.01em; }
-  .first-run { display: grid; gap: var(--space-3); }
-  .notice-list :global(.icon) { color: var(--accent-text); margin-top: 2px; }
+  .notice-list li { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: var(--space-3); font-size: var(--text-md); }
+  .notice-list .mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent-text); }
+  .accept { flex: 1 1 100%; }
+  .required { flex: 1 1 100%; margin: 0; text-align: center; font-size: var(--text-xs); font-weight: 400; color: var(--text-secondary); }
+  .first-run { display: grid; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border); }
   .drop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 3px dashed var(--accent); outline-offset: -12px; pointer-events: none; animation: pomi-fade var(--dur-fast) var(--ease-out); }
   .drop-card { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-radius: var(--radius-xl); background: var(--bg-surface); color: var(--accent-text); font-weight: 600; box-shadow: var(--shadow-pop); }
 

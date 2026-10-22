@@ -21,6 +21,8 @@
   .segmented button[aria-pressed='true'], .chip[aria-pressed='true'] { background: Highlight; color: HighlightText; border: 1px solid Highlight; forced-color-adjust: none; }
   .segmented button[aria-pressed='false'], .chip[aria-pressed='false'] { border: 1px solid ButtonText; }
   .pill-success::before, .pill-warning::before, .pill-danger::before { content: '\25CF\00a0'; }
+  /* The dot variant already draws its own mark; keep it visible in the text colour instead of adding a second one. */
+  .pill-dot.pill-success::before, .pill-dot.pill-warning::before, .pill-dot.pill-danger::before, .pill-dot::before { content: ''; background: CanvasText; forced-color-adjust: none; }
   tr.excluded .src { text-decoration: line-through; }
 
   /* Progress: a track outline and a filled bar in the highlight colour; unknown progress stays hatched. */
