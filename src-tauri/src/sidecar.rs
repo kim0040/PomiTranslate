@@ -71,6 +71,19 @@ const JOB_REQUESTS: &[&str] = &[
 /// A short request (every request that is not a job) must be answered within this time of its
 /// being written; the core is stopped when it is not (R7). Jobs have no blanket timeout.
 pub const QUERY_DEADLINE: Duration = Duration::from_secs(120);
+/// `prompt.enhance` runs one provider generation whose saved timeout the core accepts up to 600 s
+/// (`mwt/desktop_prompt.py`); the deadline is that plus the time to start the core and answer.
+pub const ENHANCE_DEADLINE: Duration = Duration::from_secs(630);
+
+/// The completion deadline of a short request, by request type. Only `prompt.enhance` is allowed
+/// longer than the general limit.
+pub fn query_deadline(kind: &str) -> Duration {
+    if kind == "prompt.enhance" {
+        ENHANCE_DEADLINE
+    } else {
+        QUERY_DEADLINE
+    }
+}
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How long the core may take to exit after its stdin is closed, before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -975,7 +988,9 @@ pub async fn run(
     request: impl Into<SecretRequest>,
     on_progress: impl Fn(&Value),
 ) -> Result<Value, IpcError> {
-    run_with_deadline(launch, state, request, on_progress, QUERY_DEADLINE).await
+    let request: SecretRequest = request.into();
+    let limit = query_deadline(request.get("type").and_then(Value::as_str).unwrap_or(""));
+    run_with_deadline(launch, state, request, on_progress, limit).await
 }
 
 /// [`run`] with the completion deadline of a short request as a parameter (so a test need not wait
