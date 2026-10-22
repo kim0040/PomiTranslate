@@ -1225,7 +1225,7 @@ class WorldTranslator(TextExtractionMixin):
             expected = str(self.runtime_config.get("expected_world_fingerprint") or "")
             if expected and expected != fingerprint and not self.checkpoint_loaded:
                 self.report["status"] = "invalidated"
-                self.report["errors"].append({"scope": "plan", "message": "World changed after scan"})
+                self.report["errors"].append({"scope": "plan", "code": "WORLD_CHANGED", "message": "World changed after scan"})
                 self.refresh_report_counts()
                 self.write_report()
                 self.release_write_lock()

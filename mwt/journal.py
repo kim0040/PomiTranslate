@@ -486,6 +486,17 @@ def list_interrupted(stores: list[Path]) -> list[dict]:
     return sorted(found.values(), key=lambda item: item["createdAt"], reverse=True)
 
 
+def find_journal(job_id: str, stores: list[Path]) -> Path:
+    """Path of the record of ``job_id`` in the first store that has it."""
+    if not _ID.fullmatch(job_id or ""):
+        raise JournalError("JOURNAL_NOT_FOUND", "There is no recovery record for this job")
+    for store in stores:
+        candidate = Path(store) / job_id / JOURNAL_NAME
+        if candidate.is_file():
+            return candidate
+    raise JournalError("JOURNAL_NOT_FOUND", "There is no recovery record for this job")
+
+
 def journal_state_of_set(set_dir: Path) -> str | None:
     """State of a backup set's journal, or None for a set written before journals existed."""
     path = Path(set_dir) / JOURNAL_NAME
@@ -1002,6 +1013,28 @@ def recover_job(
         return _rollback(journal, classes, authorized, progress, retries)
 
 
+def _settle_stale_recoveries(store: Path, parent_id: str) -> None:
+    """Close the records of earlier, interrupted recovery attempts of ``parent_id``.
+
+    Their writes were judged again by hash in the attempt that just finished, so they have nothing
+    left to decide; leaving them open would list the same job twice.
+    """
+    try:
+        candidates = sorted(Path(store).glob(f"*/{JOURNAL_NAME}"))
+    except OSError:
+        return
+    for path in candidates:
+        if peek_unsettled(path) is False:
+            continue
+        try:
+            other = Journal.load(path)
+        except JournalError:
+            continue
+        if other.kind == "recovery" and not other.settled and other.doc.get("parentJobId") == parent_id:
+            other.doc["settledBy"] = "superseded"
+            other.set_state("committed")
+
+
 def _keep(journal: Journal, classes: list[Classified]) -> dict:
     for item in classes:
         if item.kind == "owned" or (item.kind == "pristine" and same_state(item.target["preimage"], item.target["post"])):
@@ -1010,6 +1043,7 @@ def _keep(journal: Journal, classes: list[Classified]) -> dict:
     state = "committed" if journal.all_verified() else "partial"
     journal.set_state(state, settled=True)
     clear_staging(journal.path.parent)
+    _settle_stale_recoveries(journal.path.parent.parent, journal.job_id)
     return {
         "jobId": journal.job_id, "mode": "keep", "state": "kept",
         "restoredFiles": 0, "keptFiles": len(classes),
@@ -1051,6 +1085,7 @@ def _rollback(journal: Journal, classes: list[Classified], authorized: set[str],
         externals = sorted({str(i.path) for items in actionable.values() for i in items if i.target["rootKind"] == "external_pack"})
         recovery = BackupSet.new(world_dir, kind="recovery", store=store, external_files=[Path(p) for p in externals])
         recovery_journal = Journal.create(recovery.root / JOURNAL_NAME, job_id=recovery.backup_id, kind="recovery", world_dir=world_dir)
+        recovery_journal.doc["parentJobId"] = journal.job_id
         units = []
         for uid, items in list(actionable.items()):
             try:
@@ -1099,13 +1134,15 @@ def _rollback(journal: Journal, classes: list[Classified], authorized: set[str],
         state = "partial"
         journal.set_state("partial")
     elif conflicts:
-        state = "partial" if restored else "recovery_conflict"
+        # Whatever was safe has been restored; what somebody else changed is left alone and reported.
+        state = "recovery_conflict"
         journal.set_state(state)
     else:
         state = "rolled_back"
         journal.doc["settledBy"] = "rollback"
         journal.set_state("rolled_back")
     clear_staging(host_root)
+    _settle_stale_recoveries(store, journal.job_id)
     result = {
         "jobId": journal.job_id, "mode": "rollback", "state": state,
         "restoredFiles": restored, "keptFiles": max(0, len(classes) - restored),
