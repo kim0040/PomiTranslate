@@ -193,9 +193,9 @@ fn a_progress_event_larger_than_a_status_line_is_a_protocol_fault() {
     // A reply may be larger than a progress event: the line limit is what bounds it.
     let mut reply = Exchange::new("r", "candidates.page");
     feed(&mut reply, HELLO);
-    let mut line = br#"{"v":1,"id":"r","type":"response.ok","payload":""#.to_vec();
+    let mut line = br#"{"v":1,"id":"r","type":"response.ok","payload":{"text":""#.to_vec();
     line.extend_from_slice(&vec![b'x'; MAX_PROGRESS_BYTES * 2]);
-    line.extend_from_slice(b"\"}\n");
+    line.extend_from_slice(b"\"}}\n");
     assert!(matches!(&feed(&mut reply, &line)[..], [Step::Done(Ok(_))]));
 }
 
@@ -572,18 +572,13 @@ async fn a_core_that_cannot_be_started_is_a_spawn_error_and_leaves_no_slot() {
 // --- H4: only a valid terminal reply ends an exchange -------------------------------------------
 
 #[test]
-fn a_same_id_event_that_is_not_a_reply_is_ignored_and_the_real_result_still_arrives() {
+fn a_same_id_event_of_another_type_is_ignored_and_the_real_result_still_arrives() {
     let mut exchange = Exchange::new("req-1", "translate.start");
     feed(&mut exchange, HELLO);
     for unexpected in [
-        // An unknown event type for this request.
         &br#"{"v":1,"id":"req-1","type":"job.surprise","payload":{"text":"x"}}"#[..],
-        // A terminal type with an invalid envelope: no payload, wrong version, no error object.
-        br#"{"v":1,"id":"req-1","type":"response.ok"}"#,
-        br#"{"v":2,"id":"req-1","type":"response.ok","payload":{}}"#,
-        br#"{"v":1,"id":"req-1","type":"response.error"}"#,
-        br#"{"v":1,"id":"req-1","type":"response.error","error":"text"}"#,
-        br#"{"v":1,"id":"req-1","type":"response.ok","payload":null}"#,
+        br#"{"v":1,"id":"req-1","type":"status.note"}"#,
+        br#"{"v":1,"id":"req-1","type":7}"#,
     ] {
         let mut line = unexpected.to_vec();
         line.push(b'\n');
@@ -600,26 +595,83 @@ fn a_same_id_event_that_is_not_a_reply_is_ignored_and_the_real_result_still_arri
     assert!(matches!(&steps[..], [Step::Done(Ok(reply))] if reply["payload"]["saved"] == 3));
 }
 
+/// Terminal replies that carry the request id but are not valid (R6).
+fn malformed_terminals() -> Vec<Vec<u8>> {
+    let long_code = "A".repeat(65);
+    vec![
+        br#"{"v":1,"id":"r","type":"response.ok"}"#.to_vec(),
+        br#"{"v":2,"id":"r","type":"response.ok","payload":{}}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.ok","payload":null}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.ok","payload":"text"}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.ok","payload":[1,2]}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error"}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":"text"}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{}}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{"message":"m"}}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{"code":"X"}}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{"code":"X","message":3}}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{"code":"","message":"m"}}"#.to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{"code":"lower","message":"m"}}"#
+            .to_vec(),
+        br#"{"v":1,"id":"r","type":"response.error","error":{"code":"HAS SPACE","message":"m"}}"#
+            .to_vec(),
+        format!(
+            r#"{{"v":1,"id":"r","type":"response.error","error":{{"code":"{long_code}","message":"m"}}}}"#
+        )
+        .into_bytes(),
+    ]
+}
+
 #[test]
-fn a_valid_error_reply_and_a_reply_with_any_payload_type_still_end_the_exchange() {
+fn a_malformed_terminal_reply_stops_a_query_and_cancels_a_writer() {
+    for body in malformed_terminals() {
+        let mut line = body.clone();
+        line.push(b'\n');
+        let shown = String::from_utf8_lossy(&body).into_owned();
+
+        let mut query = Exchange::new("r", "estimate.get");
+        feed(&mut query, HELLO);
+        let steps = feed(&mut query, &line);
+        assert!(
+            matches!(&steps[..], [Step::Done(Err(error))] if error.code == code::CORE_PROTOCOL),
+            "{shown}: {steps:?}"
+        );
+
+        let mut writer = Exchange::new("r", "translate.start");
+        feed(&mut writer, HELLO);
+        let steps = feed(&mut writer, &line);
+        assert!(matches!(&steps[..], [Step::Cancel]), "{shown}: {steps:?}");
+        assert!(writer.cancelling(), "{shown}");
+        let ended = writer.on_event(exited(Some(0), None));
+        assert!(
+            matches!(&ended[..], [Step::Done(Err(error))] if error.code == code::CORE_PROTOCOL),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
+fn a_valid_error_reply_and_an_object_reply_end_the_exchange() {
     for body in [
         &br#"{"v":1,"id":"r","type":"response.error","error":{"code":"X","message":"m"}}"#[..],
-        br#"{"v":1,"id":"r","type":"response.ok","payload":"text"}"#,
-        br#"{"v":1,"id":"r","type":"response.ok","payload":[1,2]}"#,
+        br#"{"v":1,"id":"r","type":"response.error","error":{"code":"WORLD_LOCKED_2","message":""}}"#,
+        br#"{"v":1,"id":"r","type":"response.ok","payload":{}}"#,
+        br#"{"v":1,"id":"r","type":"response.ok","payload":{"items":[1,2]}}"#,
     ] {
         let mut exchange = Exchange::new("r", "estimate.get");
         feed(&mut exchange, HELLO);
         let mut line = body.to_vec();
         line.push(b'\n');
-        assert!(matches!(
-            &feed(&mut exchange, &line)[..],
-            [Step::Done(Ok(_))]
-        ));
+        assert!(
+            matches!(&feed(&mut exchange, &line)[..], [Step::Done(Ok(_))]),
+            "{}",
+            String::from_utf8_lossy(body)
+        );
     }
 }
 
 #[test]
-fn an_unexpected_event_is_logged_by_type_name_only() {
+fn an_unexpected_event_is_logged_without_its_type_or_content() {
     let _turn = diagnostics::serial();
     let dir = tempfile::tempdir().unwrap();
     diagnostics::global().reset();
@@ -628,14 +680,120 @@ fn an_unexpected_event_is_logged_by_type_name_only() {
     feed(&mut exchange, HELLO);
     feed(
         &mut exchange,
-        br#"{"v":1,"id":"r","type":"job.surprise\u0000","payload":{"text":"WORLD-TEXT-IN-EVENT sk-or-v1-abcdef0123456789abcdef"}}
+        br#"{"v":1,"id":"r","type":"job.surprise-violet-lantern-castle-rose","payload":{"text":"WORLD-TEXT-IN-EVENT sk-or-v1-abcdef0123456789abcdef"}}
 "#,
     );
     let log = diagnostics::global().log_file_text();
-    assert!(log.contains("job.surprise"), "{log}");
-    assert!(!log.contains("WORLD-TEXT-IN-EVENT"), "{log}");
-    assert!(!log.contains("sk-or-v1"), "{log}");
+    assert!(log.contains("ignored a message"), "{log}");
+    for leaked in [
+        "job.surprise",
+        "violet-lantern-castle-rose",
+        "WORLD-TEXT-IN-EVENT",
+        "sk-or-v1",
+    ] {
+        assert!(!log.contains(leaked), "{leaked} leaked:\n{log}");
+    }
     diagnostics::global().reset();
+}
+
+// --- R6 / R7 with a real child --------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_malformed_terminal_reply_from_a_real_core_stops_a_query_at_once() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    let started = std::time::Instant::now();
+    let error = run(
+        &launch("malformed-terminal", dir.path()),
+        &state,
+        request("q1", "estimate.get"),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, code::CORE_PROTOCOL);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(!state.busy(), "the core is gone");
+}
+
+#[tokio::test]
+async fn a_malformed_terminal_reply_from_a_real_writer_gets_the_cooperative_cancel_first() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    let started = std::time::Instant::now();
+    let reply = run(
+        &launch("malformed-then-cancel", dir.path()),
+        &state,
+        request("w1", "translate.start"),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    // The helper answers only once the cancel marker exists, so this reply is the proof that the
+    // writer was asked to cancel instead of being killed mid-write; the answer to that cancel is
+    // the job's result, as for any other cancel.
+    assert_eq!(reply["payload"]["cancelled"], true);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!state.busy());
+}
+
+#[tokio::test]
+async fn a_short_request_that_is_not_answered_in_time_stops_the_core_with_a_timeout() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    let started = std::time::Instant::now();
+    let error = run_with_deadline(
+        &launch("stall", dir.path()),
+        &state,
+        request("q1", "candidates.page"),
+        |_| {},
+        Duration::from_millis(500),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, code::CORE_TIMEOUT);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(!state.busy(), "the core was stopped and its end seen");
+    // The slot is free: the next request starts.
+    let ok = run(
+        &launch("echo", dir.path()),
+        &state,
+        request("q2", "estimate.get"),
+        |_| {},
+    )
+    .await;
+    assert!(ok.is_ok());
+}
+
+#[tokio::test]
+async fn the_deadline_covers_model_lists_and_connection_checks_but_not_world_jobs() {
+    for kind in ["models.list", "provider.usage", "prompt.enhance"] {
+        assert_eq!(lane(kind), Lane::Query, "{kind}");
+    }
+    for kind in JOB_REQUESTS {
+        assert_eq!(lane(kind), Lane::Job, "{kind}");
+    }
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    // The same slow core: a query is cut off, a job is let finish.
+    let query = run_with_deadline(
+        &launch("slow-reply", dir.path()),
+        &state,
+        request("q1", "models.list"),
+        |_| {},
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(query.unwrap_err().code, code::CORE_TIMEOUT);
+    let job = run_with_deadline(
+        &launch("slow-reply", dir.path()),
+        &state,
+        request("j1", "scan.start"),
+        |_| {},
+        Duration::from_millis(300),
+    )
+    .await;
+    assert!(job.is_ok(), "a world job has no blanket timeout: {job:?}");
 }
 
 #[tokio::test]
@@ -674,13 +832,22 @@ fn stderr_lines_are_classified_as_whole_lines_across_chunk_boundaries() {
         diagnostics::global().snapshot(),
         diagnostics::global().log_file_text()
     );
-    for leaked in ["sk-or", "abcdef", "0123456789abc", "villagers", "Oakhaven"] {
+    for leaked in [
+        "sk-or",
+        "abcdef",
+        "0123456789abc",
+        "villagers",
+        "Oakhaven",
+        "REDACTED",
+        "last wo",
+        "key ",
+    ] {
         assert!(!all.contains(leaked), "{leaked} leaked:\n{all}");
     }
-    assert!(all.contains("[pomi] key [REDACTED] done"), "{all}");
+    // Both prefixed lines are one fixed shape, and the unfinished one is flushed as a whole line.
     assert!(
-        all.contains("[pomi] last wo"),
-        "the unfinished line is flushed:\n{all}"
+        all.matches("[pomi] [message omitted]").count() >= 2,
+        "{all}"
     );
     assert!(all.contains("[1 line omitted]"), "{all}");
     diagnostics::global().reset();
@@ -739,14 +906,15 @@ async fn a_core_writing_every_kind_of_stderr_leaves_only_known_shapes_in_the_log
         "secret folder",
         "sk-or-v1-ab",
         "cdef0123456789",
+        "stage=scan",
     ] {
         assert!(!all.contains(leaked), "{leaked} leaked:\n{all}");
     }
     for kept in [
         "Traceback (most recent call last):",
-        "File \"mwt/scan.py\", line 12, in run",
+        "File \"mwt/extract.py\", line 12, in run",
         "ValueError: [message omitted]",
-        "[pomi] stage=scan files=3",
+        "[pomi] [message omitted]",
         "request=scan.start",
     ] {
         assert!(all.contains(kept), "{kept} missing:\n{all}");
@@ -886,4 +1054,118 @@ async fn a_run_whose_wait_fails_forever_reports_the_state_as_unknown_and_keeps_t
     let error = outcome.unwrap_err();
     assert_eq!(error.code, code::CORE_STATE_UNKNOWN, "{error:?}");
     assert!(state.busy(), "nothing was released on a guess");
+}
+
+// --- R8: a created child that could not be confirmed gone ----------------------------------------
+
+/// A stand-in for a created child whose termination is not confirmed: it is gone after `after`
+/// more attempts to reap it.
+struct StuckChild {
+    after: u32,
+}
+
+impl core_process::Leftover for StuckChild {
+    fn reap(&mut self) -> bool {
+        if self.after == 0 {
+            return true;
+        }
+        self.after -= 1;
+        false
+    }
+}
+
+#[tokio::test]
+async fn no_core_starts_while_a_created_child_is_not_confirmed_gone_and_the_state_is_unknown() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    core_process::retain_leftover(Box::new(StuckChild { after: 2 }));
+    for _ in 0..2 {
+        let error = run(
+            &launch("echo", dir.path()),
+            &state,
+            request("m1", "estimate.get"),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, code::CORE_STATE_UNKNOWN, "{error:?}");
+        assert!(!state.busy(), "no core is running, so no slot is held");
+    }
+    assert!(core_process::leftovers_pending());
+    // The child is finally reaped: the next request starts normally.
+    let reply = run(
+        &launch("echo", dir.path()),
+        &state,
+        request("m2", "estimate.get"),
+        |_| {},
+    )
+    .await;
+    assert!(reply.is_ok(), "{reply:?}");
+    assert!(!core_process::leftovers_pending());
+}
+
+#[test]
+fn a_spawn_that_failed_without_a_leftover_is_a_plain_spawn_error() {
+    assert!(!core_process::leftovers_pending());
+    let error = core_process::SpawnError::Failed(std::io::Error::other("x")).into_ipc();
+    assert_eq!(error.code, code::CORE_SPAWN_FAILED);
+    let error = core_process::SpawnError::CleanupUnconfirmed.into_ipc();
+    assert_eq!(error.code, code::CORE_STATE_UNKNOWN);
+}
+
+// --- R10: one maintenance guard ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn maintenance_holds_the_gate_and_is_refused_while_a_request_holds_it() {
+    let state = ActiveSidecar::default();
+    {
+        let _request = state.request_gate.try_lock().unwrap();
+        assert_eq!(state.maintenance().err().unwrap().code, code::BUSY);
+    }
+    let guard = state.maintenance().unwrap();
+    assert!(
+        state.request_gate.try_lock().is_err(),
+        "no request can start while maintenance holds the gate"
+    );
+    assert_eq!(
+        state.maintenance().err().unwrap().code,
+        code::BUSY,
+        "and no second maintenance either"
+    );
+    drop(guard);
+    assert!(state.request_gate.try_lock().is_ok());
+}
+
+#[tokio::test]
+async fn maintenance_is_refused_while_a_core_is_retained_because_its_end_was_never_seen() {
+    let (state, dir) = (ActiveSidecar::default(), scratch());
+    core_process::fault::fail_waits(u32::MAX);
+    let error = run(
+        &launch("stall", dir.path()),
+        &state,
+        request("m1", "estimate.get"),
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, code::CORE_STATE_UNKNOWN);
+    // A credential reset, an app reset and an update install all take this guard: none of them may
+    // change what the core might still be using.
+    let refused = state.maintenance().err().expect("refused");
+    assert_eq!(refused.code, code::CORE_STATE_UNKNOWN);
+    assert!(
+        state.request_gate.try_lock().is_ok(),
+        "the refusal does not keep the gate"
+    );
+    state.kill_now();
+}
+
+#[tokio::test]
+async fn maintenance_is_refused_while_a_created_child_is_not_confirmed_gone() {
+    let state = ActiveSidecar::default();
+    core_process::retain_leftover(Box::new(StuckChild { after: 0 }));
+    let refused = state.maintenance().err().expect("refused");
+    assert_eq!(refused.code, code::CORE_STATE_UNKNOWN);
+    // `kill_now` takes one more look at it, which is what frees it here.
+    state.kill_now();
+    assert!(state.maintenance().is_ok());
 }

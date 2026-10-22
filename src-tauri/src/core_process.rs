@@ -11,6 +11,11 @@
 //!   the end of its stdin (the shell's death closes the pipe), which the core treats as "cancel and
 //!   exit" (`docs/build.md`, "Process supervision").
 //!
+//! A child that was created but could not be put under supervision (or whose termination was not
+//! confirmed) is not dropped from sight: its handles go to a retained cleanup slot ([`Leftover`]),
+//! it is stopped again on later attempts (bounded each time), and no new core starts - the result is
+//! `CORE_STATE_UNKNOWN` - until it is reaped or the app restarts (R8).
+//!
 //! The rest of the shell sees only [`Spawned`]: piped stdio as events, a [`ProcessControl`] to kill
 //! the tree and to observe the exit. A slot that tracks a child is cleared only after
 //! [`ProcessControl::wait_exit`] returned, never because a timer ran out (Sol S4). A wait that
@@ -26,6 +31,7 @@ use std::{
     time::Duration,
 };
 
+use crate::error::{code, IpcError};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::{mpsc, watch},
@@ -56,6 +62,90 @@ const MAX_OBSERVE_ATTEMPTS: u32 = 12;
 fn observe_backoff(attempt: u32) -> Duration {
     let (base, cap) = if cfg!(test) { (5, 40) } else { (100, 5_000) };
     Duration::from_millis((base << attempt.min(8)).min(cap))
+}
+
+/// Why a core could not be started.
+#[derive(Debug)]
+pub enum SpawnError {
+    /// The system refused, and no child is left behind.
+    Failed(io::Error),
+    /// A child from an earlier failed start (or this one) could not be confirmed gone: nothing new
+    /// starts until it is.
+    CleanupUnconfirmed,
+}
+
+impl SpawnError {
+    pub fn os_error(&self) -> Option<i32> {
+        match self {
+            Self::Failed(error) => error.raw_os_error(),
+            Self::CleanupUnconfirmed => None,
+        }
+    }
+
+    pub fn into_ipc(self) -> IpcError {
+        match self {
+            Self::Failed(_) => IpcError::new(
+                code::CORE_SPAWN_FAILED,
+                "Could not start the translation core",
+            ),
+            Self::CleanupUnconfirmed => IpcError::new(
+                code::CORE_STATE_UNKNOWN,
+                "A translation core from an earlier failed start has not been confirmed gone",
+            ),
+        }
+    }
+}
+
+/// A created child that is not under supervision and whose termination is not confirmed. It holds
+/// the handles needed to finish the job.
+pub(crate) trait Leftover: Send {
+    /// One bounded attempt to stop it and see it gone. True once it is gone (the slot is freed).
+    fn reap(&mut self) -> bool;
+}
+
+fn with_leftovers<R>(work: impl FnOnce(&mut Vec<Box<dyn Leftover>>) -> R) -> R {
+    // Tests run in parallel threads and each plays its own scenario: the slot is per thread there.
+    #[cfg(not(test))]
+    {
+        static LEFTOVERS: std::sync::Mutex<Vec<Box<dyn Leftover>>> =
+            std::sync::Mutex::new(Vec::new());
+        work(
+            &mut LEFTOVERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+    #[cfg(test)]
+    {
+        thread_local! {
+            static LEFTOVERS: std::cell::RefCell<Vec<Box<dyn Leftover>>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        LEFTOVERS.with(|slot| work(&mut slot.borrow_mut()))
+    }
+}
+
+/// Keep `leftover` in sight until it is reaped.
+pub(crate) fn retain_leftover(leftover: Box<dyn Leftover>) {
+    crate::diagnostics::global().log(
+        "ERROR",
+        "core",
+        "an unsupervised translation core could not be confirmed gone; it is kept for cleanup",
+    );
+    with_leftovers(|all| all.push(leftover));
+}
+
+/// Try once more to reap every leftover; how many are still there.
+pub fn reap_leftovers() -> usize {
+    with_leftovers(|all| {
+        all.retain_mut(|leftover| !leftover.reap());
+        all.len()
+    })
+}
+
+/// Some leftover has not been confirmed gone (no reap attempt is made).
+pub fn leftovers_pending() -> bool {
+    with_leftovers(|all| !all.is_empty())
 }
 
 /// Test-only: make the next waits on the next spawned child fail, to prove that a failed wait is
@@ -101,8 +191,9 @@ pub enum CoreEvent {
     Stderr(Vec<u8>),
     /// Sent once, after the child ended and what it had written was collected.
     Exited(ExitInfo),
-    /// Waiting for the child failed; the child's state is unknown (it may still be running).
-    Error(String),
+    /// Waiting for the child failed; the child's state is unknown (it may still be running). The
+    /// system's error text is not carried: it is logged as a code by the watcher.
+    Error,
 }
 
 /// What to run. `env` entries override the inherited environment; an empty value blanks a variable.
@@ -184,14 +275,13 @@ impl ProcessControl {
 
     /// Kill the child and its descendants. The exit is observed with [`Self::wait_exit`].
     pub fn kill_tree(&self) {
-        if let Err(error) = self.killer.kill() {
-            crate::diagnostics::global().log(
+        if self.killer.kill().is_err() {
+            crate::diagnostics::global().log_with(
                 "ERROR",
                 "core",
-                &format!(
-                    "could not stop the translation core (pid {}): {error}",
-                    self.pid
-                ),
+                "could not stop the translation core",
+                None,
+                &[("pid", i64::from(self.pid))],
             );
         }
     }
@@ -239,8 +329,22 @@ fn pump(
 
 /// Start the child. Needs a running tokio runtime (the pipe readers and the exit watcher are
 /// tasks). Fails closed: a child that could not be placed under supervision is not left running.
-pub fn spawn(spec: &SpawnSpec) -> io::Result<Spawned> {
-    let raw = platform::spawn(spec)?;
+pub fn spawn(spec: &SpawnSpec) -> Result<Spawned, SpawnError> {
+    // An earlier child that is not confirmed gone may still hold a world: look again, and refuse
+    // to start another while it does.
+    if reap_leftovers() > 0 {
+        return Err(SpawnError::CleanupUnconfirmed);
+    }
+    let raw = match platform::spawn(spec) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Err(if leftovers_pending() {
+                SpawnError::CleanupUnconfirmed
+            } else {
+                SpawnError::Failed(error)
+            })
+        }
+    };
     let (tx, events) = mpsc::channel(EVENT_QUEUE);
     let (state_tx, state_rx) = watch::channel(ProcessState::Running);
     let out = pump(raw.stdout, tx.clone(), CoreEvent::Stdout);
@@ -264,30 +368,30 @@ pub fn spawn(spec: &SpawnSpec) -> io::Result<Spawned> {
             let result = wait().await;
             match result {
                 Ok(info) => break info,
-                Err(error) => {
+                Err(_) => {
                     // Not an exit: the child may still be running. Say so, stop the tree again
                     // (bounded) and look again; the slot stays occupied meanwhile.
                     attempt += 1;
                     let _ = state_tx.send(ProcessState::Unknown);
                     if attempt <= MAX_OBSERVE_ATTEMPTS {
-                        crate::diagnostics::global().log(
+                        crate::diagnostics::global().log_with(
                             "ERROR",
                             "core",
-                            &format!(
-                                "could not observe the end of the translation core (attempt {attempt}): {error}"
-                            ),
+                            "could not observe the end of the translation core",
+                            None,
+                            &[("attempt", i64::from(attempt))],
                         );
                     }
                     if attempt == 1 {
-                        let _ = tx.send(CoreEvent::Error(error.to_string())).await;
+                        let _ = tx.send(CoreEvent::Error).await;
                     }
                     if attempt <= MAX_OBSERVE_ATTEMPTS {
                         if let Some(killer) = weak.upgrade() {
-                            if let Err(error) = killer.kill() {
+                            if killer.kill().is_err() {
                                 crate::diagnostics::global().log(
                                     "ERROR",
                                     "core",
-                                    &format!("could not stop the translation core again: {error}"),
+                                    "could not stop the translation core again",
                                 );
                             }
                         }

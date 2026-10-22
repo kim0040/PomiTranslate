@@ -11,7 +11,7 @@ use ring::{
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{code, IpcError};
 pub use keychain::{KeychainStore, OsKeychain};
-use ledger::Ledger;
+use ledger::{Ledger, Ownership, Previous, Read as LedgerRead, Record};
 use private_fs::{FsError, FsErrorKind};
 
 pub const PROVIDERS: &[&str] = &[
@@ -206,6 +206,8 @@ struct Held {
 }
 
 struct Vault {
+    /// The application data folder everything below hangs from.
+    app_root: PathBuf,
     root: PathBuf,
     key_dir: PathBuf,
     db: PathBuf,
@@ -213,6 +215,7 @@ struct Vault {
 impl Vault {
     fn new(root: &Path) -> Self {
         Self {
+            app_root: root.to_path_buf(),
             root: root.join("credentials"),
             key_dir: root.join("credential-key"),
             db: root.join("credentials/credentials.sqlite"),
@@ -237,8 +240,14 @@ impl Vault {
         if !Self::present(&self.root)? && !create {
             return Ok(None);
         }
-        // The directory is validated (not a link, owned by the user, user-only) and held before
-        // the lock file or anything else below it is touched.
+        // The folder above is checked first, then the directory is validated (not a link, owned by
+        // the user, user-only) and held before the lock file or anything else below it is touched.
+        if create {
+            // A first run may come before anything else made the folder; a link there is caught below.
+            fs::create_dir_all(&self.app_root)
+                .map_err(|_| io_error("Cannot create the application data folder"))?;
+        }
+        private_fs::check_root(&self.app_root)?;
         private_fs::directory(&self.root)?;
         let pin = private_fs::pin_directory(&self.root)?;
         let lock = private_fs::Lock::acquire(&self.root.join("vault.lock"), private_fs::LOCK_WAIT)?;
@@ -361,6 +370,7 @@ impl Vault {
         private_fs::open(&temporary, false)?
             .sync_all()
             .map_err(|_| io_error("Cannot flush the credential database"))?;
+        private_fs::check_root(&self.app_root)?;
         private_fs::rename(&temporary, &self.db)
             .map_err(|_| io_error("Cannot commit the credential database"))?;
         private_fs::sync_directory(&self.root)
@@ -428,6 +438,14 @@ impl Vault {
         Ok(key)
     }
 
+    /// Right before a rename in the key directory: the folder above is still the user's own and the
+    /// key directory is still the one that was validated (R4).
+    fn confirm_before_rename(&self, pin: &private_fs::DirPin) -> Result<(), IpcError> {
+        private_fs::check_root(&self.app_root)?;
+        pin.confirm(&self.key_dir)?;
+        Ok(())
+    }
+
     /// `master.key` is missing. A `master.new` left by an interrupted creation is promoted only when
     /// it is exactly 48 bytes and no stored credential was encrypted under a different key;
     /// otherwise it is set aside (never overwritten or deleted) and, when allowed, a fresh key is made.
@@ -460,14 +478,14 @@ impl Vault {
             Some(pin) => {
                 if fs::symlink_metadata(&leftover).is_ok() {
                     if self.leftover_is_promotable(conn, &leftover) {
-                        pin.confirm(&self.key_dir)?;
+                        self.confirm_before_rename(&pin)?;
                         private_fs::rename(&leftover, path)
                             .map_err(|_| io_error("Cannot commit credential master key"))?;
                         private_fs::sync_directory(&self.key_dir)
                             .map_err(|_| io_error("Cannot flush the credential key directory"))?;
                         return Ok(pin);
                     }
-                    pin.confirm(&self.key_dir)?;
+                    self.confirm_before_rename(&pin)?;
                     self.set_aside(&leftover)?;
                 }
                 if !create || rows > 0 {
@@ -495,7 +513,7 @@ impl Vault {
                 .and_then(|_| file.sync_all())
                 .map_err(|_| io_error("Cannot save credential master key"))?;
         }
-        pin.confirm(&self.key_dir)?;
+        self.confirm_before_rename(&pin)?;
         private_fs::rename(&leftover, path)
             .map_err(|_| io_error("Cannot commit credential master key"))?;
         private_fs::sync_directory(&self.key_dir)
@@ -527,6 +545,10 @@ impl Vault {
 }
 
 fn set_aside(path: &Path, stamp: u128) -> Result<PathBuf, IpcError> {
+    // Re-validated right before the rename: the folder must still be the user's own (R4).
+    if let Some(parent) = path.parent() {
+        private_fs::check_root(parent)?;
+    }
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -747,7 +769,8 @@ impl Credentials {
 
     /// The Custom key goes only to the endpoint it was saved for. A key saved before endpoints were
     /// recorded has none, and a request cannot establish where it was meant to go: it stays unusable
-    /// until the person re-enters it or confirms the current endpoint (`confirm_endpoint`) (H5).
+    /// until the person types it again (R2): the request or a renderer message cannot say where a key
+    /// belongs, only the key being entered together with the endpoint can.
     fn check_endpoint(
         conn: &Connection,
         provider: &str,
@@ -759,85 +782,13 @@ impl Credentials {
             (Some(stored), Some(wanted)) if stored == wanted => Ok(()),
             (None, _) => Err(IpcError::new(
                 code::CREDENTIAL_ENDPOINT_UNBOUND,
-                "The stored API key has no recorded endpoint; re-enter it or confirm the current endpoint",
+                "The stored API key has no recorded endpoint; enter the key again",
             )),
             _ => Err(IpcError::new(
                 code::CREDENTIAL_ENDPOINT_MISMATCH,
                 "The stored API key was saved for a different endpoint",
             )),
         }
-    }
-
-    /// The person confirms that the Custom key stored without an endpoint belongs to `endpoint`
-    /// (the one currently configured). Only an unbound key is bound; a key that already has an
-    /// endpoint is never retargeted this way.
-    pub fn confirm_endpoint(
-        &self,
-        root: &Path,
-        provider: &str,
-        endpoint: Option<&str>,
-    ) -> Result<Status, IpcError> {
-        validate_provider(provider)?;
-        if provider != BOUND_PROVIDER {
-            return Err(IpcError::new(
-                code::CREDENTIAL_PROVIDER_INVALID,
-                "Only the Custom provider has an endpoint to confirm",
-            ));
-        }
-        let endpoint = endpoint.ok_or_else(|| {
-            IpcError::new(
-                code::CUSTOM_ENDPOINT_REQUIRED,
-                "Custom provider requires an explicit endpoint",
-            )
-        })?;
-        let sessions = lock_wait(&self.sessions)?;
-        let vault = Vault::new(root);
-        let Some((conn, _held)) = vault.connection(false)? else {
-            return Ok(Status {
-                mode: Mode::Local,
-                stored: false,
-            });
-        };
-        let mode = mode_of(&conn, provider)?;
-        let (known_keychain, current) = account_flags(&conn, provider)?;
-        let stored = match mode {
-            Mode::Local => conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM credentials WHERE provider=?1)",
-                    [provider],
-                    |row| row.get(0),
-                )
-                .map_err(|error| {
-                    sql(
-                        error,
-                        code::VAULT_CORRUPT,
-                        "Cannot inspect credential metadata",
-                    )
-                })?,
-            Mode::Session => sessions.contains_key(provider),
-            Mode::Keychain => known_keychain,
-        };
-        if !stored {
-            return Ok(Status { mode, stored });
-        }
-        let wanted = endpoint_hash(endpoint);
-        match current {
-            Some(bound) if bound == wanted => {}
-            Some(_) => {
-                return Err(IpcError::new(
-                    code::CREDENTIAL_ENDPOINT_MISMATCH,
-                    "The stored API key was saved for a different endpoint",
-                ))
-            }
-            None => {
-                conn.execute(
-                    "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,?2,?3,?4) ON CONFLICT(provider) DO UPDATE SET endpoint_hash=excluded.endpoint_hash",
-                    params![provider, mode.label(), known_keychain, wanted],
-                )
-                .map_err(|error| sql(error, code::VAULT_IO, "Cannot save the endpoint binding"))?;
-            }
-        }
-        Ok(Status { mode, stored })
     }
 
     pub fn save(
@@ -855,7 +806,7 @@ impl Credentials {
             .connection(true)?
             .ok_or_else(|| io_error("Cannot initialize credential storage"))?;
         let ledger = Ledger::new(root);
-        Self::start_ledger(&conn, &ledger)?;
+        let (mut record, _) = load_record(&ledger, VaultView::Readable(&conn))?;
         let previous = mode_of(&conn, provider)?;
         let (was_known_keychain, existing_hash) = account_flags(&conn, provider)?;
         let secret = if !supplied.is_empty() {
@@ -956,11 +907,16 @@ impl Credentials {
         };
         if let Some(action) = keychain_action {
             let previous_key = self.keychain.get(provider)?;
+            let name = provider_name(provider);
+            let before = Previous::of(record.get(name));
             if action.is_some() {
-                // Recorded before the OS entry exists, so a crash in between cannot lose it (M1).
-                ledger.add(provider_name(provider))?;
+                // Recorded as pending, with what the entry was before, and made durable before the
+                // OS entry is touched: a crash in between cannot lose it, and a write that fails
+                // and is undone puts the old state back exactly (R3).
+                record.set(name, Ownership::Pending(before));
+                ledger.save(&record)?;
             }
-            keychain_transaction::commit(
+            let result = keychain_transaction::commit(
                 || match action {
                     Some(value) => self.keychain.set(provider, value),
                     None => self.keychain.delete(provider),
@@ -974,7 +930,27 @@ impl Credentials {
                     Some(previous) => self.keychain.set(provider, previous),
                     None => self.keychain.delete(provider),
                 },
-            )?;
+            );
+            match &result {
+                Ok(()) => {
+                    if action.is_some() {
+                        record.set(name, Ownership::Owned);
+                    } else {
+                        record.remove(name);
+                    }
+                }
+                // The previous value is back: so is the previous ownership.
+                Err(error) if !error.uncertain => {
+                    if action.is_some() {
+                        record.restore(name, before);
+                    }
+                }
+                // Neither state can be vouched for.
+                Err(_) => record.set(name, Ownership::Uncertain),
+            }
+            // A record that cannot be saved here stays as the (conservative) pending one on disk.
+            save_best_effort(&ledger, &record);
+            result?;
         } else {
             tx.commit().map_err(|error| {
                 sql(
@@ -983,9 +959,6 @@ impl Credentials {
                     "Cannot commit credential transaction",
                 )
             })?;
-        }
-        if matches!(keychain_action, Some(None)) {
-            Self::forget(&ledger, provider);
         }
         if mode == Mode::Session {
             if let Some(secret) = secret {
@@ -996,22 +969,6 @@ impl Credentials {
         }
         self.remember(provider, mode);
         Ok(Status { mode, stored })
-    }
-
-    /// Installs from before the ownership record start it from what the vault says it wrote.
-    fn start_ledger(conn: &Connection, ledger: &Ledger) -> Result<(), IpcError> {
-        if ledger.exists() {
-            return Ok(());
-        }
-        ledger.ensure(vault_owned_providers(conn)?)
-    }
-
-    /// The OS entry is confirmed gone; the record forgets it. A failure here only leaves a name in
-    /// the record, which a later delete of a missing entry clears.
-    fn forget(ledger: &Ledger, provider: &str) {
-        if let Err(error) = ledger.remove(provider) {
-            crate::diagnostics::global().log_error("credentials:ledger", &error);
-        }
     }
 
     pub fn import_keychain(
@@ -1042,10 +999,7 @@ impl Credentials {
         let (mut conn, _held) = match vault.connection(false) {
             Ok(Some(open)) => open,
             Ok(None) => {
-                if ledger.contains(provider) {
-                    self.keychain.delete(provider)?;
-                    Self::forget(&ledger, provider);
-                }
+                self.delete_recorded(&ledger, provider, VaultView::Absent)?;
                 sessions.remove(provider);
                 return Ok(());
             }
@@ -1055,21 +1009,26 @@ impl Credentials {
                     code::VAULT_PERMISSIONS | code::VAULT_SCHEMA | code::VAULT_CORRUPT
                 ) =>
             {
-                // The vault cannot say what it wrote; the record outside it can.
-                if ledger.contains(provider) {
-                    self.keychain.delete(provider)?;
-                    Self::forget(&ledger, provider);
-                }
+                // The vault cannot say what it wrote; the record outside it can. The vault is set
+                // aside either way; an entry the record cannot vouch for is reported afterwards.
+                let recorded = self.delete_recorded(&ledger, provider, VaultView::Unreadable);
                 self.reset_locked(&mut sessions, root)?;
-                return Ok(());
+                return recorded;
             }
             Err(error) => return Err(error),
         };
+        let (mut record, _) = load_record(&ledger, VaultView::Readable(&conn))?;
+        let name = provider_name(provider);
         let tx = conn
             .transaction()
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot begin credential transaction"))?;
         let (known, _) = account_flags(&tx, provider)?;
-        if known || mode_of(&tx, provider)? == Mode::Keychain || ledger.contains(provider) {
+        // The vault commits `known_keychain` only after the OS write was confirmed, so it is as good
+        // a witness of ownership as the record. An entry that is neither is never deleted.
+        let owned = known
+            || mode_of(&tx, provider)? == Mode::Keychain
+            || record.get(name) == Some(Ownership::Owned);
+        if owned {
             self.keychain.delete(provider)?;
         }
         tx.execute(
@@ -1082,9 +1041,37 @@ impl Credentials {
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot delete encrypted credential"))?;
         tx.commit()
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot commit credential deletion"))?;
-        Self::forget(&ledger, provider);
+        if owned {
+            record.remove(name);
+            save_best_effort(&ledger, &record);
+        }
         sessions.remove(provider);
         Ok(())
+    }
+
+    /// The delete of one provider's OS entry when the vault cannot help: only an entry the record
+    /// vouches for as owned is deleted; one it cannot is reported, never touched.
+    fn delete_recorded(
+        &self,
+        ledger: &Ledger,
+        provider: &str,
+        vault: VaultView<'_>,
+    ) -> Result<(), IpcError> {
+        let (mut record, _) = load_record(ledger, vault)?;
+        let name = provider_name(provider);
+        match record.get(name) {
+            Some(Ownership::Owned) => {
+                self.keychain.delete(provider)?;
+                record.remove(name);
+                save_best_effort(ledger, &record);
+                Ok(())
+            }
+            Some(_) => Err(IpcError::new(
+                code::KEYCHAIN_UNCONFIRMED,
+                "An OS credential entry may exist that this app cannot confirm it created",
+            )),
+            None => Ok(()),
+        }
     }
 
     /// Set the vault and its key directory aside (`*.broken-<ms>`, links are never followed) and make
@@ -1103,15 +1090,28 @@ impl Credentials {
     ) -> Result<(), IpcError> {
         let vault = Vault::new(root);
         let ledger = Ledger::new(root);
-        // Best effort: a vault that cannot be read has nothing more to tell.
-        if let Ok(Some((conn, held))) = vault.connection(false) {
-            let owned = vault_owned_providers(&conn).unwrap_or_default();
-            drop(conn);
-            drop(held);
-            for provider in owned {
-                if let Err(error) = ledger.add(provider) {
-                    crate::diagnostics::global().log_error("credentials:ledger", &error);
+        // What the keychain may hold for this app is written into the record, which lives outside
+        // the directories about to be set aside, before they are touched. When that cannot be
+        // done the reset stops: setting the vault aside would lose the only evidence (R5).
+        match vault.connection(false) {
+            Ok(Some((conn, held))) => {
+                let loaded = load_record(&ledger, VaultView::Readable(&conn));
+                // Close the database before its directory is moved.
+                drop(conn);
+                drop(held);
+                let (mut record, vault_read) = loaded?;
+                // The vault was read and everything it says is now in the record: that is the
+                // reconciliation a lost or damaged record was waiting for.
+                if vault_read && record.unreconciled {
+                    record.unreconciled = false;
+                    ledger.save(&record)?;
                 }
+            }
+            Ok(None) => {
+                load_record(&ledger, VaultView::Absent)?;
+            }
+            Err(_) => {
+                load_record(&ledger, VaultView::Unreadable)?;
             }
         }
         let stamp = now_millis();
@@ -1133,53 +1133,63 @@ impl Credentials {
         Ok(())
     }
 
-    /// App reset with "delete keys": delete the OS entries this app created (the ownership record,
-    /// plus what a readable vault says it wrote, for installs from before the record), then the
-    /// vault, the key directory and every set-aside copy. A step that fails does not stop the
-    /// others: the answer says what is gone and what could not be confirmed. An entry whose deletion
-    /// failed stays in the record, so a retry finds it. No other keychain entry is ever touched.
+    /// App reset with "delete keys": delete the OS entries the ownership record says this app
+    /// created (and nothing else), then the vault, the key directory and every set-aside copy. A
+    /// step that fails does not stop the others: the answer says what is gone and what could not be
+    /// confirmed. An entry whose deletion failed stays in the record, and every entry is written
+    /// there before any vault metadata is removed, so a retry finds it. An entry the app cannot
+    /// vouch for (pending, or found only in damaged data) is reported uncertain and never deleted.
     pub fn purge(&self, root: &Path) -> Result<Purged, IpcError> {
         let mut sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
         let ledger = Ledger::new(root);
         let mut outcome = Purged::default();
 
-        let mut owned: BTreeSet<&'static str> = BTreeSet::new();
-        let mut ledger_known = ledger.exists();
-        match ledger.providers() {
-            Ok(list) => owned.extend(list),
-            Err(error) => {
-                ledger_known = false;
-                outcome.errors.push(error.code);
-            }
-        }
-        match vault.connection(false) {
+        let loaded = match vault.connection(false) {
             Ok(Some((conn, held))) => {
-                let listed = vault_owned_providers(&conn);
+                let loaded = load_record(&ledger, VaultView::Readable(&conn));
                 // Close the database before its directory is removed.
                 drop(conn);
                 drop(held);
-                match listed {
-                    Ok(list) => owned.extend(list),
-                    Err(_) if ledger_known => {}
-                    // The database opened but cannot say what it holds.
-                    Err(_) => outcome.keychain_unverified = true,
-                }
+                loaded
             }
-            Ok(None) => {}
-            Err(_) if ledger_known => {}
-            // Neither the record nor the vault can say what the keychain holds.
-            Err(_) => outcome.keychain_unverified = true,
-        }
-        for provider in owned {
+            Ok(None) => load_record(&ledger, VaultView::Absent),
+            Err(_) => load_record(&ledger, VaultView::Unreadable),
+        };
+        // Without a record nothing is known, and the vault metadata that could say is kept.
+        let (mut record, vault_read) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                outcome.errors.push(error.code);
+                outcome.keychain_unverified = true;
+                (Record::default(), false)
+            }
+        };
+        let record_known = !outcome.keychain_unverified;
+        for provider in record.owned() {
             match self.keychain.delete(provider) {
                 Ok(()) => {
                     outcome.keychain_deleted.push(provider);
-                    if let Err(error) = ledger.remove(provider) {
-                        outcome.errors.push(error.code);
-                    }
+                    record.remove(provider);
                 }
                 Err(error) => outcome.keychain_failed.push((provider, error.code)),
+            }
+        }
+        outcome.keychain_uncertain = record.unestablished();
+        // A record that was lost or damaged is reconciled only against a vault that could be read.
+        if record.unreconciled && !vault_read {
+            outcome.keychain_unverified = true;
+        }
+        if vault_read && outcome.keychain_failed.is_empty() && outcome.keychain_uncertain.is_empty()
+        {
+            record.unreconciled = false;
+        }
+        // Every obligation that is left is durable before any vault metadata goes.
+        let mut obligations_saved = record_known;
+        if record_known && !record.is_clear() {
+            if let Err(error) = ledger.save(&record) {
+                obligations_saved = false;
+                outcome.errors.push(error.code);
             }
         }
 
@@ -1206,18 +1216,20 @@ impl Credentials {
                 Err(_) => listed = false,
             }
         }
-        outcome.files_removed = listed;
+        outcome.files_removed = listed && obligations_saved;
         if !listed {
             outcome.errors.push(code::VAULT_IO);
         }
-        for target in targets {
-            if let Err(error) = remove_path(&target) {
-                outcome.files_removed = false;
-                outcome.errors.push(error.code);
+        if obligations_saved {
+            for target in targets {
+                if let Err(error) = remove_path(&target) {
+                    outcome.files_removed = false;
+                    outcome.errors.push(error.code);
+                }
             }
         }
-        // The record goes with the keys only when every entry it listed is gone.
-        if outcome.keychain_failed.is_empty() && !outcome.keychain_unverified {
+        // The record goes with the keys only when nothing is owed and nothing is unknown.
+        if record_known && obligations_saved && record.is_clear() {
             if let Err(error) = ledger.remove_files() {
                 outcome.errors.push(error.code);
             }
@@ -1238,6 +1250,9 @@ pub struct Purged {
     pub keychain_deleted: Vec<&'static str>,
     /// Entries whose deletion failed, with the reason; they stay in the ownership record.
     pub keychain_failed: Vec<(&'static str, &'static str)>,
+    /// Entries that may exist but that the app cannot vouch for as its own (a write that never
+    /// finished, or a name found only in damaged data). They are never deleted, and stay recorded.
+    pub keychain_uncertain: Vec<&'static str>,
     /// Neither the ownership record nor the vault could say which OS entries exist, so none could
     /// be checked.
     pub keychain_unverified: bool,
@@ -1251,23 +1266,102 @@ impl Purged {
     /// Every store was emptied and confirmed.
     pub fn complete(&self) -> bool {
         self.keychain_failed.is_empty()
+            && self.keychain_uncertain.is_empty()
             && !self.keychain_unverified
             && self.files_removed
             && self.errors.is_empty()
     }
 }
 
-/// The providers whose OS entry the vault says this app wrote. A vault that cannot be read is an
-/// error, never an empty answer.
-fn vault_owned_providers(conn: &Connection) -> Result<Vec<&'static str>, IpcError> {
-    let mut owned = Vec::new();
+/// The OS entries the vault says this app wrote. `known_keychain` is committed only after the OS
+/// write was confirmed, so it is ownership; a keychain mode without it is only a hint. A vault that
+/// cannot be read is an error, never an empty answer.
+fn vault_entries(conn: &Connection) -> Result<Vec<(&'static str, Ownership)>, IpcError> {
+    let mut entries = Vec::new();
     for provider in PROVIDERS.iter().copied() {
         let (known, _) = account_flags(conn, provider)?;
-        if known || mode_of(conn, provider)? == Mode::Keychain {
-            owned.push(provider);
+        if known {
+            entries.push((provider, Ownership::Owned));
+        } else if mode_of(conn, provider)? == Mode::Keychain {
+            entries.push((provider, Ownership::Uncertain));
         }
     }
-    Ok(owned)
+    Ok(entries)
+}
+
+/// What the vault can say when the ownership record is read.
+enum VaultView<'a> {
+    /// There is no vault.
+    Absent,
+    Readable(&'a Connection),
+    /// There is one, but it cannot be read.
+    Unreadable,
+}
+
+/// The ownership record, with a lost or damaged one rebuilt as far as it can be (R5). A missing
+/// record next to a vault, or a damaged one, is unknown, not empty: a damaged file is kept aside, and
+/// what can still be read from it, from earlier copies and from the vault goes in (a name found
+/// only in damaged data is uncertain), with the `unreconciled` marker set. The record is saved when
+/// it changed. The flag says whether the vault metadata could be read.
+fn load_record(ledger: &Ledger, vault: VaultView<'_>) -> Result<(Record, bool), IpcError> {
+    let (mut record, baseline, rebuilt) = match ledger.read()? {
+        LedgerRead::Present(found) => (found.clone(), found, false),
+        LedgerRead::Missing => (Record::default(), Record::default(), true),
+        LedgerRead::Damaged { recovered } => {
+            ledger.quarantine()?;
+            let mut record = Record::default();
+            for provider in recovered {
+                record.set(provider, Ownership::Uncertain);
+            }
+            // The damaged file has just been moved away: the rebuilt record must be written.
+            record.unreconciled = true;
+            (record, Record::default(), true)
+        }
+    };
+    if rebuilt {
+        let traces = ledger.traces()?;
+        for provider in &traces.providers {
+            if record.get(provider).is_none() {
+                record.set(provider, Ownership::Uncertain);
+            }
+        }
+        if traces.any {
+            record.unreconciled = true;
+        }
+    }
+    let entries = match &vault {
+        VaultView::Absent => Some(Vec::new()),
+        VaultView::Readable(conn) => vault_entries(conn).ok(),
+        VaultView::Unreadable => None,
+    };
+    let vault_read = entries.is_some() && !matches!(vault, VaultView::Absent);
+    match entries {
+        Some(entries) => {
+            for (provider, state) in entries {
+                match record.get(provider) {
+                    None => record.set(provider, state),
+                    Some(Ownership::Uncertain) if state == Ownership::Owned => {
+                        record.set(provider, Ownership::Owned);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        None if rebuilt => record.unreconciled = true,
+        None => {}
+    }
+    if record != baseline {
+        ledger.save(&record)?;
+    }
+    Ok((record, vault_read))
+}
+
+/// Save the record where a failure must not undo what already happened; the failure is logged. The
+/// copy on disk then stays the more conservative earlier one.
+fn save_best_effort(ledger: &Ledger, record: &Record) {
+    if let Err(error) = ledger.save(record) {
+        crate::diagnostics::global().log_error("credentials:ledger", &error);
+    }
 }
 
 /// The static name of a provider that passed `validate_provider`.

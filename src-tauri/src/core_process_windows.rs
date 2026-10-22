@@ -16,7 +16,8 @@
 //! `CreateProcessW` is given an exact file, so a bare program name (`python` in development mode) is
 //! first resolved to an absolute path the way a shell would, through `PATH` and `PATHEXT` (M2). A
 //! created process that cannot be placed under supervision is terminated *and reaped*; a failed
-//! `TerminateProcess` is retried and reported, never ignored (M4).
+//! `TerminateProcess` is retried and reported, never ignored (M4). A created process whose termination
+//! cannot be confirmed keeps its handles in the retained cleanup slot of `core_process` (R8).
 use std::{
     ffi::{c_void, OsStr, OsString},
     io, mem,
@@ -62,14 +63,14 @@ const REAP_WAIT_MS: u32 = 5_000;
 
 /// A step that tests make fail (see [`fault`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Step {
+pub(crate) enum Step {
     Assign,
     Resume,
     Terminate,
 }
 
 #[cfg(test)]
-pub(super) mod fault {
+pub(crate) mod fault {
     use super::Step;
     use std::cell::Cell;
 
@@ -280,51 +281,81 @@ fn resume(thread: &Owned) -> io::Result<()> {
     Ok(())
 }
 
-impl Suspended {
-    /// Stop a child that never ran and wait until the system says it is gone. Each result is
-    /// checked: a failed termination is retried, and a child that cannot be stopped is reported
-    /// (it stays suspended, so it executes nothing, but nobody pretends it is gone).
-    fn terminate_and_reap(&self) {
-        let mut stopped = false;
-        for attempt in 1..=TERMINATE_ATTEMPTS {
-            match terminate(&self.process) {
-                Ok(()) => {
-                    stopped = true;
-                    break;
-                }
-                Err(error) => {
-                    crate::diagnostics::global().log(
-                        "ERROR",
-                        "core",
-                        &format!("could not terminate the unsupervised core (attempt {attempt}): {error}"),
-                    );
-                    std::thread::sleep(Duration::from_millis(20));
-                }
+/// The system reports the process as ended (within `wait_ms`).
+fn ended(process: &Owned, wait_ms: u32) -> bool {
+    // SAFETY: the process handle is valid and owned.
+    unsafe { WaitForSingleObject(process.raw(), wait_ms) == WAIT_OBJECT_0 }
+}
+
+/// Stop a child that never ran and wait until the system says it is gone. Each result is checked:
+/// a failed termination is retried (bounded), and a child that cannot be stopped is reported -
+/// it stays suspended, so it executes nothing, but nobody pretends it is gone. True once it ended.
+fn terminate_and_reap(process: &Owned) -> bool {
+    if ended(process, 0) {
+        return true;
+    }
+    let mut stopped = false;
+    for attempt in 1..=TERMINATE_ATTEMPTS {
+        match terminate(process) {
+            Ok(()) => {
+                stopped = true;
+                break;
+            }
+            Err(_) => {
+                crate::diagnostics::global().log_with(
+                    "ERROR",
+                    "core",
+                    "could not terminate the unsupervised core",
+                    None,
+                    &[("attempt", i64::from(attempt))],
+                );
+                std::thread::sleep(Duration::from_millis(20));
             }
         }
-        if !stopped {
-            crate::diagnostics::global().log(
-                "ERROR",
-                "core",
-                "an unsupervised translation core could not be terminated; it was never resumed",
-            );
-            return;
-        }
-        // SAFETY: the process handle is valid and owned.
-        if unsafe { WaitForSingleObject(self.process.raw(), REAP_WAIT_MS) } != WAIT_OBJECT_0 {
-            crate::diagnostics::global().log(
-                "ERROR",
-                "core",
-                "a terminated unsupervised core was not reported gone in time",
-            );
-        }
+    }
+    if !stopped {
+        crate::diagnostics::global().log(
+            "ERROR",
+            "core",
+            "an unsupervised translation core could not be terminated; it was never resumed",
+        );
+        return false;
+    }
+    if !ended(process, REAP_WAIT_MS) {
+        crate::diagnostics::global().log(
+            "ERROR",
+            "core",
+            "a terminated unsupervised core was not reported gone in time",
+        );
+        return false;
+    }
+    true
+}
+
+/// The handles of a created child that could not be stopped, kept until it ends (R8). While they are
+/// held the process is still the app's to clean up; they close when it is finally gone.
+struct SuspendedLeftover {
+    process: Owned,
+    _thread: Owned,
+}
+
+impl super::Leftover for SuspendedLeftover {
+    fn reap(&mut self) -> bool {
+        terminate_and_reap(&self.process)
     }
 }
 
 impl Drop for Suspended {
     fn drop(&mut self) {
-        if self.armed {
-            self.terminate_and_reap();
+        if !self.armed {
+            return;
+        }
+        if !terminate_and_reap(&self.process) {
+            // Not confirmed gone: the handles move to the retained cleanup slot instead of closing.
+            super::retain_leftover(Box::new(SuspendedLeftover {
+                process: mem::replace(&mut self.process, Owned(0)),
+                _thread: mem::replace(&mut self.thread, Owned(0)),
+            }));
         }
     }
 }

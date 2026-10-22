@@ -1,17 +1,24 @@
-//! Bounded, redacted diagnostics: a rotating log file under the app's local data directory, a ring of
-//! the translation core's last stderr lines, Rust-side error records and a crash record from the
-//! panic hook (SC-7, NX-1).
+//! Bounded diagnostics: a rotating log file under the app's local data directory, a ring of the
+//! translation core's last stderr lines, Rust-side error records and a crash record from the panic
+//! hook (SC-7, NX-1).
 //!
-//! What leaves the machine is decided here (H3). The support export (`bundle`, and the same text
-//! for "copy diagnostics") never contains free text. It is made of structured records - versions,
-//! platform, error codes with times, request types with durations and exit codes, counts - and of the
-//! core's stderr lines, which are redacted as complete lines and then *classified*: only lines of a
-//! known diagnostic shape survive (a Python traceback header, a frame reduced to a module-relative
-//! path, an exception class name without its message, a line of our own logger). Every other line -
-//! world text a library echoed, provider input, an unusual key - is replaced by a count
-//! (`[n lines omitted]`). The same classification applies to the log file, so neither holds it.
+//! No free text, by construction (R1). Nothing a person, a provider, a world or a library wrote can
+//! reach the log file or the support export, because nothing here copies text through:
+//!
+//! * Rust's own events are a compile-time message (`&'static str`) with a source *component* from a
+//!   fixed list and numbers. Errors are logged by their stable code only, never by their message.
+//!   A renderer-supplied request type is logged only when it is in the known request list, else it is
+//!   `[unknown request]`.
+//! * The core's stderr and stray stdout are *classified* line by line, and a line is rebuilt from
+//!   known pieces only: the traceback header, a frame whose file is one of our own modules (any other
+//!   frame is `[frame]`), an exception class from an allow-list (any other is `[exception]`, and the
+//!   message is always `[message omitted]`), and three fixed notices. Every other `[pomi] ` line is
+//!   `[pomi] [message omitted]`; every other line is only counted (`[n lines omitted]`).
+//!
+//! The support export (`bundle`, and the same text for "copy diagnostics") is made of these records,
+//! versions, platform, codes with times, request types with durations and exit codes, and counts. The
+//! log file holds the same kinds of records.
 use std::{
-    backtrace::Backtrace,
     collections::VecDeque,
     fs::{self, OpenOptions},
     io::Write,
@@ -34,10 +41,8 @@ const RUN_RING_LINES: usize = 100;
 const CRASH_RING_LINES: usize = 20;
 /// A single kept line never exceeds this many characters.
 const MAX_LINE_CHARS: usize = 2000;
-/// A line of our own logger is short by contract; longer ones are cut after redaction.
-const MAX_LOG_LINE_CHARS: usize = 300;
-/// The prefix the translation core puts on the lines of its own logger. Only these lines (and the
-/// fixed shapes in `classify`) are kept from the core's output.
+/// The prefix the translation core puts on the lines of its own logger. The text after it is never
+/// kept (except one fixed sentence, see `classify`).
 pub const CORE_LOG_PREFIX: &str = "[pomi] ";
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -265,32 +270,6 @@ fn redact_words(text: &str) -> String {
     out
 }
 
-/// The stricter rule for the lines of our own logger, which are kept as text: any run of letters,
-/// digits, `_` and `-` of ten or more characters that mixes letters and digits is replaced. Logger
-/// lines carry short words, counts and names, so little is lost; an odd secret that no shape rule
-/// knows still usually has this shape.
-fn redact_mixed_tokens(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut token = String::new();
-    let flush = |token: &mut String, out: &mut String| {
-        let mixed = token.len() >= 10
-            && token.chars().any(|c| c.is_ascii_digit())
-            && token.chars().any(|c| c.is_ascii_alphabetic());
-        out.push_str(if mixed { "[REDACTED]" } else { token });
-        token.clear();
-    };
-    for c in text.chars() {
-        if is_token_char(c) {
-            token.push(c);
-        } else {
-            flush(&mut token, &mut out);
-            out.push(c);
-        }
-    }
-    flush(&mut token, &mut out);
-    out
-}
-
 fn clip_to(line: &str, limit: usize) -> String {
     let single = line.replace(['\r', '\n'], " ");
     if single.chars().count() <= limit {
@@ -306,7 +285,7 @@ fn clip(line: &str) -> String {
 }
 
 /// Letters, digits and `._:-` only, at most `limit` characters; anything else is not an identifier
-/// and is replaced by `?`. Used for names that come from outside the shell (request types).
+/// and is replaced by `?`. Used for the app's own version string.
 fn identifier(text: &str, limit: usize) -> String {
     let clean: String = text
         .chars()
@@ -326,6 +305,51 @@ fn identifier(text: &str, limit: usize) -> String {
     }
 }
 
+/// The components that write to the log. Anything else is `[component]`.
+const COMPONENTS: &[&str] = &[
+    "app",
+    "core",
+    "credentials",
+    "credential_import",
+    "credential_reset_storage",
+    "native_reset",
+    "sidecar_request",
+    "update_check",
+    "update_install",
+    "force_stop_active",
+    "navigation",
+];
+/// Non-request parts a source may carry after the component.
+const SUB_SOURCES: &[&str] = &["ledger", "bootstrap"];
+
+/// A request type as it may be written: only a type of the known request list, else
+/// `[unknown request]` (the type may come from the page, which is not trusted with the log).
+fn request_label(request: &str) -> &str {
+    if crate::ALLOWED_REQUESTS.contains(&request) {
+        request
+    } else {
+        "[unknown request]"
+    }
+}
+
+/// `component` or `component:part`, reduced to known names.
+fn source_label(source: &str) -> String {
+    let (component, part) = match source.split_once(':') {
+        Some((component, part)) => (component, Some(part)),
+        None => (source, None),
+    };
+    let component = if COMPONENTS.contains(&component) {
+        component
+    } else {
+        "[component]"
+    };
+    match part {
+        None => component.to_owned(),
+        Some(part) if SUB_SOURCES.contains(&part) => format!("{component}:{part}"),
+        Some(part) => format!("{component}:{}", request_label(part)),
+    }
+}
+
 fn push_bounded(ring: &Mutex<VecDeque<String>>, line: String, cap: usize) {
     let mut ring = lock(ring);
     if ring.len() == cap {
@@ -340,20 +364,190 @@ const CHAIN_LINES: &[&str] = &[
     "During handling of the above exception, another exception occurred:",
     "The above exception was the direct cause of the following exception:",
 ];
-const EXCEPTION_SUFFIXES: &[&str] = &["Error", "Exception", "Warning", "Exit", "Interrupt"];
-const EXCEPTION_NAMES: &[&str] = &[
-    "KeyboardInterrupt",
-    "StopIteration",
-    "StopAsyncIteration",
+const TRACEBACK_HEADER: &str = "Traceback (most recent call last):";
+/// The one `[pomi] ` sentence that is kept as it is (`mwt/desktop_entry.py`): the whole line, nothing
+/// before or after it.
+const STDIN_CLOSED_LINE: &str = "stdin closed while a request was running; cancelling";
+/// The other two fixed notices the core prints on stderr (`mwt/desktop_entry.py`).
+const PREFS_NOT_SAVED: &str = "preferences were not saved";
+const VALUES_REPLACED: &str = "protocol message had values that were replaced";
+/// The flag names `_plain()` in `mwt/desktop_entry.py` can put in `values that were replaced`.
+const REPLACED_FLAGS: &[&str] = &["non_finite_number"];
+
+/// The core's own source files, as `module_relative` writes them: `mwt/*.py` and the three modules
+/// next to it. A frame in any other file (a library, the standard library, anything unknown) is
+/// reported as `[frame]`. `tests::the_module_list_covers_the_core_sources` keeps this list in step
+/// with the Python tree.
+const CORE_MODULES: &[&str] = &[
+    "mwt/__init__.py",
+    "mwt/__main__.py",
+    "mwt/backup_admin.py",
+    "mwt/desktop_entry.py",
+    "mwt/desktop_legacy_import.py",
+    "mwt/desktop_prompt.py",
+    "mwt/desktop_provider.py",
+    "mwt/desktop_resource_packs.py",
+    "mwt/desktop_settings.py",
+    "mwt/desktop_usage.py",
+    "mwt/discovery.py",
+    "mwt/durable.py",
+    "mwt/extract.py",
+    "mwt/journal.py",
+    "mwt/layout.py",
+    "mwt/locking.py",
+    "mwt/nbtio.py",
+    "mwt/notices.py",
+    "mwt/reasoning.py",
+    "mwt/region.py",
+    "mwt/review_drafts.py",
+    "mwt/safety.py",
+    "mwt/secrets.py",
+    "mwt/snbt.py",
+    "mwt/support_matrix.py",
+    "mwt/tokens.py",
+    "mwt/userdata.py",
+    "mc_world_translator.py",
+    "llm_backends.py",
+    "webui_server.py",
+];
+
+/// Python's built-in exception classes (printed without a module).
+const BUILTIN_EXCEPTIONS: &[&str] = &[
+    "BaseException",
+    "BaseExceptionGroup",
+    "Exception",
+    "ExceptionGroup",
+    "ArithmeticError",
+    "AssertionError",
+    "AttributeError",
+    "BlockingIOError",
+    "BrokenPipeError",
+    "BufferError",
+    "ChildProcessError",
+    "ConnectionAbortedError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "EOFError",
+    "EncodingWarning",
+    "EnvironmentError",
+    "FileExistsError",
+    "FileNotFoundError",
+    "FloatingPointError",
     "GeneratorExit",
+    "IOError",
+    "ImportError",
+    "IndentationError",
+    "IndexError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "KeyError",
+    "KeyboardInterrupt",
+    "LookupError",
+    "MemoryError",
+    "ModuleNotFoundError",
+    "NameError",
+    "NotADirectoryError",
+    "NotImplementedError",
+    "OSError",
+    "OverflowError",
+    "PermissionError",
+    "ProcessLookupError",
+    "PythonFinalizationError",
+    "RecursionError",
+    "ReferenceError",
+    "ResourceWarning",
+    "RuntimeError",
+    "RuntimeWarning",
+    "StopAsyncIteration",
+    "StopIteration",
+    "SyntaxError",
+    "SystemError",
     "SystemExit",
+    "TabError",
+    "TimeoutError",
+    "TypeError",
+    "UnboundLocalError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeError",
+    "UnicodeTranslateError",
+    "UserWarning",
+    "ValueError",
+    "Warning",
+    "ZeroDivisionError",
 ];
-/// Fixed messages the core prints on stderr (`mwt/desktop_entry.py`); the tail after the colon is
-/// restricted to identifier-like text.
-const FIXED_PREFIXES: &[&str] = &[
-    "preferences were not saved: ",
-    "protocol message had values that were replaced: ",
+
+/// The exception classes the core's own modules define (found with `class X(...)` in `mwt/`,
+/// `mc_world_translator.py`, `llm_backends.py` and `webui_server.py`; kept in step by
+/// `tests::the_exception_list_covers_the_core_sources`). Python prints them bare or as
+/// `<module>.<Class>`.
+const CORE_EXCEPTIONS: &[&str] = &[
+    "BackupAdminError",
+    "BackupError",
+    "ChunkTooLarge",
+    "CommittedWriteError",
+    "DiskFull",
+    "ExternalPackUnavailable",
+    "ExternalTargetError",
+    "JournalError",
+    "JournalWriteFailed",
+    "MinecraftWorldInUse",
+    "ModelCatalogError",
+    "NbtError",
+    "PlanInvalidated",
+    "ProviderError",
+    "ProviderUnavailable",
+    "RegionError",
+    "RegionLayoutUnsafe",
+    "ReviewDraftError",
+    "SnbtError",
+    "TargetChanged",
+    "TargetLocked",
+    "TranslationCancelled",
+    "UnsupportedCompression",
+    "UsageUnavailable",
+    "WorldChanged",
+    "WorldWriteLocked",
+    "_DeadlineExceeded",
 ];
+
+/// Standard-library exception classes that reach the core's tracebacks with their module name.
+const STDLIB_EXCEPTIONS: &[&str] = &[
+    "json.decoder.JSONDecodeError",
+    "urllib.error.URLError",
+    "urllib.error.HTTPError",
+    "http.client.HTTPException",
+    "http.client.RemoteDisconnected",
+    "ssl.SSLError",
+    "sqlite3.Error",
+    "sqlite3.OperationalError",
+    "zipfile.BadZipFile",
+    "subprocess.CalledProcessError",
+    "subprocess.TimeoutExpired",
+    "concurrent.futures.TimeoutError",
+    "asyncio.CancelledError",
+    "queue.Empty",
+];
+
+/// A class in the allow-list: a built-in, a class of the core's own modules (bare, or behind the
+/// dotted name of one of those modules), or one of the listed standard-library classes.
+fn allowed_exception(name: &str) -> bool {
+    if BUILTIN_EXCEPTIONS.contains(&name)
+        || CORE_EXCEPTIONS.contains(&name)
+        || STDLIB_EXCEPTIONS.contains(&name)
+    {
+        return true;
+    }
+    let Some((module, class)) = name.rsplit_once('.') else {
+        return false;
+    };
+    CORE_EXCEPTIONS.contains(&class)
+        && CORE_MODULES.iter().any(|file| {
+            file.strip_suffix(".py")
+                .is_some_and(|stem| stem.replace('/', ".") == module)
+        })
+}
 
 /// A path reduced to the part that names our code or a library, never the person's folders.
 fn module_relative(path: &str) -> String {
@@ -400,8 +594,32 @@ fn module_relative(path: &str) -> String {
     }
 }
 
-/// `File "<path>", line N, in fn` with the path reduced; the source line printed under it is not
-/// a frame and falls through to "omitted".
+/// A Python function name as it prints in a frame: identifiers (dotted for a qualified name) or one
+/// of the synthetic `<...>` names.
+fn python_function(name: &str) -> bool {
+    const SYNTHETIC: &[&str] = &[
+        "<module>",
+        "<lambda>",
+        "<listcomp>",
+        "<dictcomp>",
+        "<setcomp>",
+        "<genexpr>",
+    ];
+    SYNTHETIC.contains(&name)
+        || (!name.is_empty()
+            && name.len() <= 80
+            && name.split('.').all(|part| {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }))
+}
+
+/// `File "<path>", line N, in fn`: kept (path reduced) only when the file is one of our modules and
+/// the function name is an identifier; any other frame is `[frame]`. `None` when the line is not a
+/// frame at all (the source line printed under a frame is not one and is only counted).
 fn parse_frame(line: &str) -> Option<String> {
     let rest = line.strip_prefix("File \"")?;
     let (path, tail) = rest.rsplit_once("\", line ")?;
@@ -411,22 +629,16 @@ fn parse_frame(line: &str) -> Option<String> {
     }
     let after = &tail[digits.len()..];
     let function = match after.strip_prefix(", in ") {
-        Some(name) => {
-            let name = name.trim_end();
-            let valid = !name.is_empty()
-                && name.len() <= 80
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '<' | '>'));
-            if !valid {
-                return None;
-            }
-            Some(name)
-        }
+        Some(name) => Some(name.trim_end()),
         None if after.trim().is_empty() => None,
         None => return None,
     };
-    let mut out = format!("File \"{}\", line {digits}", module_relative(path));
+    let file = module_relative(path);
+    if !CORE_MODULES.contains(&file.as_str()) || function.is_some_and(|name| !python_function(name))
+    {
+        return Some("[frame]".to_owned());
+    }
+    let mut out = format!("File \"{file}\", line {digits}");
     if let Some(function) = function {
         out.push_str(", in ");
         out.push_str(function);
@@ -434,7 +646,8 @@ fn parse_frame(line: &str) -> Option<String> {
     Some(out)
 }
 
-/// `ValueError: message` becomes `ValueError: [message omitted]`; only the class name is kept.
+/// `ValueError: message` becomes `ValueError: [message omitted]`; an exception class that is not in
+/// the allow-list is `[exception]`. The message is never kept.
 fn parse_exception(line: &str) -> Option<String> {
     if line.starts_with(char::is_whitespace) {
         return None;
@@ -452,52 +665,98 @@ fn parse_exception(line: &str) -> Option<String> {
         && name.split('.').all(|part| {
             !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         });
+    // The shape of an exception line; whether the class is a known one is decided separately.
+    const SUFFIXES: &[&str] = &["Error", "Exception", "Warning", "Exit", "Interrupt"];
+    const SHAPED_NAMES: &[&str] = &[
+        "KeyboardInterrupt",
+        "StopIteration",
+        "StopAsyncIteration",
+        "GeneratorExit",
+        "SystemExit",
+    ];
     let exception = last.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-        && (EXCEPTION_NAMES.contains(&last)
-            || EXCEPTION_SUFFIXES
-                .iter()
-                .any(|suffix| last.ends_with(suffix)));
+        && (SHAPED_NAMES.contains(&last) || SUFFIXES.iter().any(|suffix| last.ends_with(suffix)));
     if !identifier_like || !exception {
         return None;
     }
+    let shown = if allowed_exception(name) {
+        name
+    } else {
+        "[exception]"
+    };
     Some(match message {
-        Some(message) if !message.trim().is_empty() => format!("{name}: [message omitted]"),
-        _ => name.to_owned(),
+        Some(message) if !message.trim().is_empty() => format!("{shown}: [message omitted]"),
+        _ => shown.to_owned(),
     })
 }
 
-/// The kept form of an already redacted line, or `None` when its shape is not a known diagnostic.
+/// `preferences were not saved: <X>`: the class name only when it is an allow-listed exception.
+fn parse_prefs_not_saved(body: &str) -> Option<String> {
+    let rest = body.strip_prefix(PREFS_NOT_SAVED)?;
+    if rest.is_empty() {
+        return Some(PREFS_NOT_SAVED.to_owned());
+    }
+    let class = rest.strip_prefix(": ")?;
+    Some(if allowed_exception(class) {
+        format!("{PREFS_NOT_SAVED}: {class}")
+    } else {
+        PREFS_NOT_SAVED.to_owned()
+    })
+}
+
+/// `protocol message had values that were replaced: ['non_finite_number']`: the list only when every
+/// item is a flag name the core can produce.
+fn parse_values_replaced(body: &str) -> Option<String> {
+    let rest = body.strip_prefix(VALUES_REPLACED)?;
+    if rest.is_empty() {
+        return Some(VALUES_REPLACED.to_owned());
+    }
+    let list = rest.strip_prefix(": [")?.strip_suffix(']')?;
+    let all_known = list
+        .split(", ")
+        .filter(|item| !item.is_empty())
+        .all(|item| {
+            item.strip_prefix('\'')
+                .and_then(|item| item.strip_suffix('\''))
+                .is_some_and(|name| REPLACED_FLAGS.contains(&name))
+        });
+    Some(if all_known {
+        format!("{VALUES_REPLACED}: [{list}]")
+    } else {
+        VALUES_REPLACED.to_owned()
+    })
+}
+
+/// The kept form of a line of the core's output, or `None` when its shape is not a known diagnostic
+/// (it is then only counted). The result is built from known pieces; nothing of the input text
+/// beyond them is copied.
 fn classify(line: &str) -> Option<String> {
     let line = line.trim_end();
+    let (prefixed, body) = match line.strip_prefix(CORE_LOG_PREFIX) {
+        Some(body) => (true, body),
+        None => (false, line),
+    };
+    if prefixed && body == STDIN_CLOSED_LINE {
+        return Some(line.to_owned());
+    }
+    if let Some(notice) = parse_prefs_not_saved(body).or_else(|| parse_values_replaced(body)) {
+        return Some(if prefixed {
+            format!("{CORE_LOG_PREFIX}{notice}")
+        } else {
+            notice
+        });
+    }
+    if prefixed {
+        return Some(format!("{CORE_LOG_PREFIX}[message omitted]"));
+    }
     let trimmed = line.trim_start();
-    if trimmed == "Traceback (most recent call last):" || CHAIN_LINES.contains(&trimmed) {
+    if trimmed == TRACEBACK_HEADER || CHAIN_LINES.contains(&trimmed) {
         return Some(trimmed.to_owned());
     }
     if let Some(frame) = parse_frame(trimmed) {
         return Some(format!("  {frame}"));
     }
-    if let Some(exception) = parse_exception(line) {
-        return Some(exception);
-    }
-    if let Some(rest) = line.strip_prefix(CORE_LOG_PREFIX) {
-        // Redacted whole, then cut: a secret is never left half-visible by the limit.
-        return Some(format!(
-            "{CORE_LOG_PREFIX}{}",
-            clip_to(&redact_mixed_tokens(rest), MAX_LOG_LINE_CHARS)
-        ));
-    }
-    for prefix in FIXED_PREFIXES {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            let plain = rest.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || matches!(c, '_' | '.' | ',' | '\'' | '[' | ']' | ' ' | '-')
-            });
-            if plain && rest.len() <= 200 {
-                return Some(line.to_owned());
-            }
-        }
-    }
-    None
+    parse_exception(line)
 }
 
 /// Where a line of the core's output came from.
@@ -538,10 +797,6 @@ impl Diagnostics {
         *lock(&self.home) = home;
     }
 
-    fn scrub(&self, text: &str) -> String {
-        clip(&redact(text, lock(&self.home).as_deref()))
-    }
-
     fn append(&self, line: &str) {
         let Some(dir) = lock(&self.dir).clone() else {
             return;
@@ -555,28 +810,44 @@ impl Diagnostics {
         }
     }
 
-    /// One Rust-side event or error, for the local log file only: the export never carries it.
-    pub fn log(&self, level: &str, source: &str, message: &str) {
-        let line = format!("{} {level} {source} {}", timestamp(), self.scrub(message));
+    /// One Rust-side event, for the local log file only. The message is a compile-time constant, so
+    /// no runtime text can reach the file through it; `source` is reduced to a known component.
+    pub fn log(&self, level: &'static str, source: &str, message: &'static str) {
+        self.log_with(level, source, message, None, &[]);
+    }
+
+    /// [`Self::log`] with the request type (written only when it is a known one) and numbers.
+    pub fn log_with(
+        &self,
+        level: &'static str,
+        source: &str,
+        message: &'static str,
+        request: Option<&str>,
+        numbers: &[(&'static str, i64)],
+    ) {
+        let mut line = format!("{} {level} {} {message}", timestamp(), source_label(source));
+        if let Some(request) = request {
+            line.push_str(&format!(" request={}", request_label(request)));
+        }
+        for (name, value) in numbers {
+            line.push_str(&format!(" {name}={value}"));
+        }
         self.append(&line);
     }
 
+    /// An error by its stable code (and detail code) only: its message is free text and is never
+    /// written, neither to the file nor to the export.
     pub fn log_error(&self, source: &str, error: &IpcError) {
         let detail = error.detail.map(|d| format!(" ({d})")).unwrap_or_default();
-        self.log(
-            "ERROR",
-            source,
-            &format!("{}{detail}: {}", error.code, error.message),
-        );
-        // The code alone (no message text) is what the export lists, so it cannot carry free text.
+        let source = source_label(source);
+        self.append(&format!(
+            "{} ERROR {source} {}{detail}",
+            timestamp(),
+            error.code
+        ));
         push_bounded(
             &self.errors,
-            format!(
-                "{} {} {}{detail}",
-                timestamp(),
-                identifier(source, 64),
-                error.code
-            ),
+            format!("{} {source} {}{detail}", timestamp(), error.code),
             ERROR_RING_LINES,
         );
     }
@@ -657,7 +928,7 @@ impl Diagnostics {
             format!(
                 "{} request={} duration_ms={} result={} exit_code={} signal={}",
                 timestamp(),
-                identifier(run.request, 48),
+                request_label(run.request),
                 run.duration_ms,
                 run.error.unwrap_or("ok"),
                 number(run.exit_code),
@@ -667,17 +938,14 @@ impl Diagnostics {
         );
     }
 
-    /// A panic: the full (redacted) record goes to the log file; the export only learns that it
-    /// happened and where in the shell's code.
-    pub fn crash(&self, location: &str, detail: &str) {
-        self.append(&format!(
-            "{} CRASH {}",
-            timestamp(),
-            self.scrub(&format!("panic at {location}: {detail}"))
-        ));
+    /// A panic: only its place in the shell's code (a compile-time `file:line`) is recorded, in the
+    /// log file and in the export. The panic message and the backtrace are free text and are not.
+    pub fn crash(&self, location: &str) {
+        let place = module_relative(location);
+        self.append(&format!("{} CRASH panic at {place}", timestamp()));
         push_bounded(
             &self.crashes,
-            format!("{} panic at {}", timestamp(), module_relative(location)),
+            format!("{} panic at {place}", timestamp()),
             CRASH_RING_LINES,
         );
     }
@@ -779,7 +1047,7 @@ fn rotate(dir: &Path) {
     let _ = fs::rename(dir.join(FILE_NAME), numbered(1));
 }
 
-/// A panic is written to the log (redacted, with a backtrace) before the previous hook runs.
+/// A panic is recorded (where, nothing more) before the previous hook runs.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -787,14 +1055,7 @@ pub fn install_panic_hook() {
             .location()
             .map(|at| format!("{}:{}", at.file(), at.line()))
             .unwrap_or_default();
-        let payload = info.payload();
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_owned())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "panic".into());
-        let backtrace = Backtrace::force_capture().to_string().replace('\n', " | ");
-        global().crash(&location, &format!("{message} | {backtrace}"));
+        global().crash(&location);
         previous(info);
     }));
 }

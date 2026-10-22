@@ -68,6 +68,9 @@ const JOB_REQUESTS: &[&str] = &[
     "backups.delete",
     "backups.prune",
 ];
+/// A short request (every request that is not a job) must be answered within this time of its
+/// being written; the core is stopped when it is not (R7). Jobs have no blanket timeout.
+pub const QUERY_DEADLINE: Duration = Duration::from_secs(120);
 const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How long the core may take to exit after its stdin is closed, before it is killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -168,8 +171,12 @@ fn launch_for(app: &AppHandle) -> Result<Launch, IpcError> {
         resource_dir.as_deref(),
         sidecar_paths::dev_options().as_ref(),
     )
-    .map_err(|message| {
-        diagnostics::global().log("ERROR", "core", &message);
+    .map_err(|_| {
+        diagnostics::global().log(
+            "ERROR",
+            "core",
+            "the translation core could not be resolved",
+        );
         IpcError::new(
             code::CORE_SPAWN_FAILED,
             "Packaged translation core is unavailable",
@@ -212,6 +219,12 @@ pub struct ForceStopped {
     pub killed: bool,
 }
 
+/// Proof that maintenance work has the app to itself; see [`ActiveSidecar::maintenance`].
+#[must_use = "the guard is what keeps requests out"]
+pub struct MaintenanceGuard<'a> {
+    _gate: tokio::sync::MutexGuard<'a, ()>,
+}
+
 #[derive(Default)]
 pub struct ActiveSidecar {
     process: Arc<Mutex<Option<ActiveProcess>>>,
@@ -233,6 +246,32 @@ impl ActiveSidecar {
     /// A request is being served or a core process has not been seen to end.
     pub fn busy(&self) -> bool {
         self.request_gate.try_lock().is_err() || self.process().is_some()
+    }
+
+    /// Take the maintenance guard (R10): no request can start while it is held, and it exists only
+    /// when no core is active, none is retained because its end was never observed, and no created
+    /// child is waiting for cleanup. It is held for the whole mutation (credential reset, app reset,
+    /// update install and restart).
+    ///
+    /// `BUSY` when a request holds the gate; `CORE_STATE_UNKNOWN` when a core (or an unsupervised
+    /// child) is still retained after its request ended.
+    pub fn maintenance(&self) -> Result<MaintenanceGuard<'_>, IpcError> {
+        let gate = self.request_gate.try_lock().map_err(|_| {
+            IpcError::new(
+                code::BUSY,
+                "Another PomiTranslate operation is still running",
+            )
+        })?;
+        // The gate is ours, so no request can start or finish while the slot is looked at. A slot
+        // that is still occupied belongs to a request that already ended: its core was not seen to
+        // end. (`busy()` is not used here: it counts the gate we hold as busy.)
+        if self.process().is_some() || core_process::leftovers_pending() {
+            return Err(IpcError::new(
+                code::CORE_STATE_UNKNOWN,
+                "A translation core has not been confirmed stopped; nothing may change underneath it",
+            ));
+        }
+        Ok(MaintenanceGuard { _gate: gate })
     }
 
     /// Free the slot, but only once the core's exit was observed - never because time passed.
@@ -270,6 +309,8 @@ impl ActiveSidecar {
             process.control.kill_tree();
             let _ = fs::remove_file(process.cancel_path);
         }
+        // A child that never made it under supervision gets one more try on the way out.
+        core_process::reap_leftovers();
     }
 
     /// Stop a job that did not react to its cancel marker: close its stdin (a core that listens to
@@ -434,44 +475,40 @@ pub enum Line {
     Reply(Value),
     /// Another request's message.
     Ignore,
-    /// This request's id with a type that does not end the exchange (an unknown event, or a
-    /// terminal reply whose envelope is not valid). Carries the type name only, sanitized.
-    Unexpected(String),
+    /// This request's id with a type that does not end the exchange (an unknown event). Neither
+    /// its type nor its content is kept.
+    Unexpected,
+    /// This request's id on a terminal type (`response.ok` / `response.error`) whose envelope is
+    /// not valid: a protocol fault (R6), not a result and not something to wait out.
+    Malformed,
     /// Not protocol output (after the handshake): classified by diagnostics and skipped, never
     /// fatal. Carries the line, bounded.
     Stray(String),
     Fatal(IpcError),
 }
 
-/// A message type as it may appear in a log: identifier characters only, bounded.
-fn type_name(kind: &str) -> String {
-    let clean: String = kind
-        .chars()
-        .take(64)
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '?'
-            }
-        })
-        .collect();
-    if clean.is_empty() {
-        "?".to_owned()
-    } else {
-        clean
-    }
+/// The error object of a terminal `response.error`: a stable code (`[A-Z0-9_]{1,64}`) and a message
+/// text. Anything else cannot be told to the person and is a protocol fault.
+fn valid_error(error: &Value) -> bool {
+    let code_ok = error
+        .get("code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| {
+            (1..=64).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    code_ok && error.get("message").is_some_and(Value::is_string)
 }
 
-/// A terminal reply must carry the protocol version, and `response.ok` its payload or
-/// `response.error` its error object.
+/// A terminal reply must carry the protocol version, and `response.ok` its payload object or
+/// `response.error` its error object with a code and a message (R6).
 fn valid_reply(message: &Value, kind: &str) -> bool {
     message.get("v").and_then(Value::as_u64) == Some(1)
         && match kind {
-            "response.ok" => message
-                .get("payload")
-                .is_some_and(|payload| !payload.is_null()),
-            _ => message.get("error").is_some_and(Value::is_object),
+            "response.ok" => message.get("payload").is_some_and(Value::is_object),
+            _ => message.get("error").is_some_and(valid_error),
         }
 }
 
@@ -516,11 +553,15 @@ pub fn classify_line(line: &[u8], saw_hello: bool, id: &str) -> Line {
     }
     if kind.ends_with(".progress") {
         Line::Progress(message)
-    } else if matches!(kind, "response.ok" | "response.error") && valid_reply(&message, kind) {
-        // Only a valid terminal reply ends the exchange (H4).
-        Line::Reply(message)
+    } else if matches!(kind, "response.ok" | "response.error") {
+        // Only a valid terminal reply ends the exchange (H4); an invalid one is a fault (R6).
+        if valid_reply(&message, kind) {
+            Line::Reply(message)
+        } else {
+            Line::Malformed
+        }
     } else {
-        Line::Unexpected(type_name(kind))
+        Line::Unexpected
     }
 }
 
@@ -656,9 +697,13 @@ impl Exchange {
                     || termination_error(info.code, info.signal),
                 )))]
             }
-            CoreEvent::Error(message) => {
+            CoreEvent::Error => {
                 // Waiting on the process failed: it may still be running. Not "stopped".
-                diagnostics::global().log("ERROR", "core", &message);
+                diagnostics::global().log(
+                    "ERROR",
+                    "core",
+                    "waiting on the translation core failed",
+                );
                 vec![Step::Done(Err(self.pending_fault.clone().unwrap_or_else(
                     || {
                         IpcError::new(
@@ -726,12 +771,12 @@ impl Exchange {
                             return steps;
                         }
                     }
-                    Line::Unexpected(name) => {
-                        // Type name only: the message itself is never logged.
+                    Line::Unexpected => {
+                        // Neither the message nor its type name is logged: both come from the core.
                         diagnostics::global().log(
                             "WARN",
                             "core",
-                            &format!("ignored a {name} message that does not end the request"),
+                            "ignored a message that does not end the request",
                         );
                         if self.over_stray_budget(line.len(), &mut steps) {
                             return steps;
@@ -740,6 +785,15 @@ impl Exchange {
                     Line::Stray(text) => {
                         diagnostics::global().core_stray_stdout(&text);
                         if self.over_stray_budget(line.len(), &mut steps) {
+                            return steps;
+                        }
+                    }
+                    Line::Malformed => {
+                        let fault = IpcError::new(
+                            code::CORE_PROTOCOL,
+                            "Translation core sent a terminal reply that is not valid",
+                        );
+                        if self.fault_step(fault, &mut steps) {
                             return steps;
                         }
                     }
@@ -921,6 +975,18 @@ pub async fn run(
     request: impl Into<SecretRequest>,
     on_progress: impl Fn(&Value),
 ) -> Result<Value, IpcError> {
+    run_with_deadline(launch, state, request, on_progress, QUERY_DEADLINE).await
+}
+
+/// [`run`] with the completion deadline of a short request as a parameter (so a test need not wait
+/// two minutes).
+async fn run_with_deadline(
+    launch: &Launch,
+    state: &ActiveSidecar,
+    request: impl Into<SecretRequest>,
+    on_progress: impl Fn(&Value),
+    query_limit: Duration,
+) -> Result<Value, IpcError> {
     let started = std::time::Instant::now();
     let request: SecretRequest = request.into();
     let kind = request
@@ -953,15 +1019,14 @@ pub async fn run(
         }
         let _ = fs::remove_file(&launch.cancel_path);
         let spawned = core_process::spawn(&launch.spec()).map_err(|error| {
-            diagnostics::global().log(
+            diagnostics::global().log_with(
                 "ERROR",
                 "core",
-                &format!("could not start the translation core: {error}"),
+                "could not start the translation core",
+                None,
+                &[("os_error", i64::from(error.os_error().unwrap_or(0)))],
             );
-            IpcError::new(
-                code::CORE_SPAWN_FAILED,
-                "Could not start the translation core",
-            )
+            error.into_ipc()
         })?;
         *active = Some(ActiveProcess {
             control: Arc::clone(&spawned.control),
@@ -972,10 +1037,12 @@ pub async fn run(
         });
         spawned
     };
-    diagnostics::global().log(
+    diagnostics::global().log_with(
         "INFO",
         "core",
-        &format!("started the translation core (pid {pid}) for {kind}"),
+        "started the translation core",
+        Some(&kind),
+        &[("pid", i64::from(pid))],
     );
     let forced = state
         .process()
@@ -1010,9 +1077,15 @@ pub async fn run(
 
     let mut session = Exchange::new(&id, &kind);
     let mut cancel_deadline: Option<Instant> = None;
+    // Absolute, from the moment the request was written: chatter does not extend it (R7).
+    let query_deadline = (lane(&kind) == Lane::Query).then(|| Instant::now() + query_limit);
     let result: Result<Value, IpcError> = 'events: loop {
+        let wait_until = [cancel_deadline, query_deadline]
+            .into_iter()
+            .flatten()
+            .min();
         let wait = async {
-            match cancel_deadline {
+            match wait_until {
                 Some(deadline) => timeout_at(deadline, receiver.recv()).await.map_err(|_| ()),
                 None => Ok(receiver.recv().await),
             }
@@ -1025,6 +1098,14 @@ pub async fn run(
                 ))
             }
             Ok(Err(())) => {
+                // Only a short request has a deadline without a cancel grace running.
+                if cancel_deadline.is_none() && query_deadline.is_some() {
+                    control.kill_tree();
+                    break Err(IpcError::new(
+                        code::CORE_TIMEOUT,
+                        "The translation core did not answer in time",
+                    ));
+                }
                 // The faulted writer did not stop in the grace period.
                 break Err(session.fault().unwrap_or_else(|| {
                     IpcError::new(code::CORE_PROTOCOL, "Translation core did not stop")
@@ -1101,7 +1182,7 @@ async fn wait_for_end(
         match timeout_at(deadline, receiver.recv()).await {
             Ok(Some(CoreEvent::Stderr(bytes))) => sink.push(&bytes),
             Ok(Some(CoreEvent::Stdout(_))) => {}
-            Ok(Some(CoreEvent::Exited(_) | CoreEvent::Error(_)) | None) | Err(_) => return,
+            Ok(Some(CoreEvent::Exited(_) | CoreEvent::Error) | None) | Err(_) => return,
         }
     }
 }
@@ -1134,14 +1215,15 @@ async fn shutdown(
         ActiveSidecar::clear(&state.process, control.pid());
         return;
     }
-    diagnostics::global().log(
+    diagnostics::global().log_with(
         "ERROR",
         "core",
-        &format!(
-            "the translation core (pid {}) was not seen to end after being killed{}; the job slot stays occupied",
-            control.pid(),
-            if control.is_unknown() { " (waiting on it failed)" } else { "" }
-        ),
+        "the translation core was not seen to end after being killed; the job slot stays occupied",
+        None,
+        &[
+            ("pid", i64::from(control.pid())),
+            ("wait_failed", i64::from(control.is_unknown())),
+        ],
     );
     let (slot, control) = (Arc::clone(&state.process), Arc::clone(control));
     tokio::spawn(async move {

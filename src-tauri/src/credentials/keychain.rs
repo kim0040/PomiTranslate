@@ -76,6 +76,9 @@ pub mod fake {
         pub entries: Mutex<HashMap<String, String>>,
         pub calls: AtomicUsize,
         pub fail_delete: AtomicBool,
+        /// How many of the next writes fail *after* they changed the entry: the worst case, one that
+        /// has to be undone.
+        pub fail_next_sets: AtomicUsize,
     }
 
     impl KeychainStore for FakeKeychain {
@@ -95,6 +98,14 @@ pub mod fake {
                 .lock()
                 .unwrap()
                 .insert(provider.into(), secret.into());
+            let failing =
+                self.fail_next_sets
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        left.checked_sub(1)
+                    });
+            if failing.is_ok() {
+                return Err(failed("fixture write failure"));
+            }
             Ok(())
         }
         fn delete(&self, provider: &str) -> Result<(), IpcError> {
