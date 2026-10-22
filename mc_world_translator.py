@@ -483,6 +483,9 @@ _PROVIDER_CODE_FAILURES = {
     "PROVIDER_ERROR": "provider_unavailable",
     "NETWORK_ERROR": "provider_unavailable",
     "REQUEST_REJECTED": "bad_request",
+    "REQUEST_TOO_LARGE": "bad_request",
+    "PROVIDER_TIMEOUT": "timeout",
+    "PROVIDER_REDIRECT_REFUSED": "auth",
 }
 
 
@@ -1451,6 +1454,7 @@ class WorldTranslator(TextExtractionMixin):
             error_entry = {
                 "scope": "run",
                 "message": str(exc) or exc.__class__.__name__,
+                "exception": exc.__class__.__name__,
             }
             self.report["status"] = "failed"
             self.report["errors"].append(error_entry)
@@ -1536,21 +1540,42 @@ class WorldTranslator(TextExtractionMixin):
         raise ValueError(f"Unsupported compression type: {compression}")
 
     def backup_once(self, path: Path) -> None:
+        self.backup_many([path])
+
+    def backup_many(self, paths: list[Path]) -> None:
+        """Back up several files with one verification and one publication.
+
+        ``BackupSet.add`` already hashes each source and its copy, so every new entry is checked
+        once; the set is verified as a whole and made the "latest" once, before the first
+        destructive write, instead of once per file.
+        """
         if not self.config["backup"]:
             return
         from mwt.safety import BackupSet
 
         world_dir = Path(self.config["world_dir"]).resolve()
-        resolved = path.resolve()
         external_files = self._external_backup_files()
-        if not resolved.is_relative_to(world_dir) and resolved not in {path.resolve() for path in external_files}:
-            raise ValueError("Backup source is outside the selected world")
+        allowed_external = {item.resolve() for item in external_files}
+        resolved_paths = []
+        for path in paths:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(world_dir) and resolved not in allowed_external:
+                raise ValueError("Backup source is outside the selected world")
+            resolved_paths.append(resolved)
         if self._run_backup is None:
             self._run_backup = BackupSet.new(world_dir, store=self._backup_store(), external_files=external_files)
-        self._run_backup.add(resolved)
-        self._run_backup.verify()
-        self._run_backup.publish_latest()
-        self.report["backup_set_id"] = self._run_backup.backup_id
+        backup = self._run_backup
+        before = len(backup.entries)
+        for resolved in resolved_paths:
+            backup.add(resolved, commit=False)
+        if len(backup.entries) == before:
+            return  # everything was in the set already: nothing new to check or publish
+        backup.commit()
+        if not self._backup_published:
+            backup.verify()
+            backup.publish_latest(verify=False)
+            self._backup_published = True
+        self.report["backup_set_id"] = backup.backup_id
 
     def _preflight_resource_pack_backup_paths(self, world_dir: Path) -> None:
         """Only explicitly selected external ZIP targets may extend the world write scope."""
@@ -2158,14 +2183,6 @@ class WorldTranslator(TextExtractionMixin):
             for item in self.file_scan.values()
         )
 
-    def _keeps_checkpoint(self) -> bool:
-        """A partial run keeps its checkpoint; only a complete job or an explicit discard clears it."""
-        return True
-
-    def _retryable_work_remains(self) -> bool:
-        """Failures a second attempt could fix: files that errored, strings the provider failed on."""
-        return bool(self.file_errors) or bool(self.translator is not None and self.translator.failed)
-
     def _verify_backup_copies(self) -> None:
         """One full check of the backup copies at the end, instead of one after every file."""
         backup = self._run_backup
@@ -2188,8 +2205,10 @@ class WorldTranslator(TextExtractionMixin):
         self.report["provider_requests"] = LLMProviderClient.request_count
         self.report["usage"] = dict(LLMProviderClient.usage)
         self.write_report()
-        if status in {"partial", "needs_retry"} and not self.config["dry_run"] and self._keeps_checkpoint():
-            self.save_checkpoint()  # kept so the remaining work can be retried
+        if status in {"partial", "needs_retry"} and not self.config["dry_run"]:
+            # Only a fully completed job (or an explicit discard) clears its checkpoint. A partial run,
+            # including one whose only problem was a backup that failed verification, stays resumable.
+            self.save_checkpoint()
         else:
             self.clear_checkpoint()
         self._cleanup_staging()
@@ -2209,7 +2228,9 @@ class WorldTranslator(TextExtractionMixin):
         failed = self.translator.failed
         if exc is not None:
             status = "failed" if exc.fatal else "needs_retry"
-            entry = {"scope": "provider", "code": exc.code, "message": str(exc)[:400]}
+            # The raw text stays in the report file; ``failure`` is the structured category progress and results use.
+            entry = {"scope": "provider", "code": exc.code, "failure": classify_failure(exc),
+                     "message": self.translator._raw_failure_text(exc)[:400]}
         else:
             status = "needs_retry"
             entry = {
@@ -2227,7 +2248,8 @@ class WorldTranslator(TextExtractionMixin):
         self.report["usage"] = dict(LLMProviderClient.usage)
         self.write_report()
         self.save_checkpoint()
-        self.emit("translation_stopped", status=status, code=entry["code"], message=entry["message"])
+        self.emit("translation_stopped", status=status, code=entry["code"], failure=entry.get("failure", ""),
+                  message=public_failure_message(entry["failure"]) if "failure" in entry else entry["message"])
         self.release_write_lock()
         return self.report
 

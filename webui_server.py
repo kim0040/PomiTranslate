@@ -508,7 +508,8 @@ class JobManager:
                 job["status"] = final_status
                 job["finished_at"] = now_iso()
                 job["result"] = report
-                job["can_resume"] = final_status == "cancelled"
+                # A partial or needs_retry run keeps its checkpoint, so it can be resumed like a cancelled one.
+                job["can_resume"] = final_status in {"cancelled", "partial", "needs_retry"}
                 if final_status == "cancelled":
                     job["progress"]["phase"] = "cancelled"
                     job["progress"]["current_activity"] = "cancelled"

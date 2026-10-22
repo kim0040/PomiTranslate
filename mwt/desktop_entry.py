@@ -258,6 +258,34 @@ def _public_failure(item: object) -> dict:
     return {"source": str(item.get("source") or ""), "code": code, "reason": FAILURE_REASON_TEXT[code]}
 
 
+# Error scopes whose text can come from a provider or from deep inside a library. The interface gets
+# a code and a fixed sentence for these; the detail stays in the report file.
+_OPAQUE_ERROR_SCOPES = {"provider", "models", "run", "translation"}
+
+
+def _public_error(item: object) -> dict:
+    """An error entry as the interface sees it: scope, code, bounded and redacted text, no raw provider text."""
+    from mc_world_translator import public_failure_message
+    from mwt.secrets import bounded_public_text
+
+    if not isinstance(item, dict):
+        return {"scope": "run", "message": "The operation failed."}
+    result = {key: value for key, value in item.items() if key not in {"message", "error", "exception"}}
+    scope = str(item.get("scope") or "")
+    for field in ("message", "error"):
+        text = item.get(field)
+        if text is None:
+            continue
+        if scope in _OPAQUE_ERROR_SCOPES:
+            failure = str(item.get("failure") or "other")
+            result[field] = public_failure_message(failure) if scope != "run" else "The operation failed."
+        else:
+            result[field] = bounded_public_text(str(text), "", 300)
+    if scope == "run" and item.get("exception"):
+        result["exception"] = str(item["exception"])[:80]
+    return result
+
+
 def _format_location(location: dict) -> str:
     holder = str(location.get("holder") or "").removeprefix("minecraft:")
     pos = location.get("pos")
@@ -1473,7 +1501,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "localhostServer": False,
                     "preTranslate": PRE_TRANSLATE,
                     "writeBlockers": blockers,
-                    "errors": report.get("errors", []),
+                    "errors": [_public_error(item) for item in report.get("errors", [])],
                     "warnings": report.get("warnings", []),
                     "requestEstimate": estimate["requests"],
                     "estimate": estimate,
@@ -1664,7 +1692,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "writeState": report.get("write_state", ""),
                     "preTranslate": PRE_TRANSLATE,
                     "localhostServer": False,
-                    "errors": report.get("errors", []),
+                    "errors": [_public_error(item) for item in report.get("errors", [])],
                     "warnings": report.get("warnings", []),
                     "translation": report.get("translation") or {},
                     "translationFailures": [_public_failure(item) for item in report.get("translation_failures", [])],
