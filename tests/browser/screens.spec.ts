@@ -204,7 +204,7 @@ for (const width of [1440, 840, 320]) {
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
     const sidebar = page.locator('.sidebar');
     const before = await sidebar.boundingBox();
-    await page.getByRole('button', { name: '저장', exact: true }).scrollIntoViewIfNeeded();
+    await page.locator('.danger-zone').scrollIntoViewIfNeeded();
     const after = await sidebar.boundingBox();
     expect(after?.y).toBeCloseTo(before!.y, 0);
     expect(after?.height).toBeCloseTo(before!.height, 0);

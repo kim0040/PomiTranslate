@@ -20,7 +20,8 @@ test('settings save shows pending state and blocks duplicate writes and draft ed
   await expect(page.locator('#model')).toBeDisabled();
   await expect(page.getByRole('button', { name: '키 변경', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: '번역 작업', exact: true })).toBeDisabled();
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+  // Saved: nothing is left to save, so the save bar is gone.
+  await expect(page.locator('.action-bar')).toHaveCount(0);
   await expect(page.locator('#model')).toHaveValue('pending-save-fixture');
   await expect(page.locator('#model')).toBeEnabled();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
@@ -97,9 +98,13 @@ test('story preset preserves file rules and invalid saved translation input bloc
   await expect(page.getByLabel('아이템 이름', { exact: true })).toBeChecked();
   await page.getByText('저장형 수동 번역', { exact: true }).click();
   await page.locator('#source-overrides').fill('{broken');
+  // Broken input changes nothing in the draft, so there is nothing to save; next to another pending change it blocks saving.
+  await expect(page.locator('.action-bar')).toHaveCount(0);
+  await page.getByLabel('아이템 이름', { exact: true }).uncheck();
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+  await page.getByLabel('아이템 이름', { exact: true }).check();
   await page.locator('#source-overrides').fill('{}');
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
+  await expect(page.locator('.action-bar')).toHaveCount(0);
   await page.locator('#source-overrides').fill('{"Fixture source":"새 직접 번역"}');
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
 });
