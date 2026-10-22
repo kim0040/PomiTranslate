@@ -11,6 +11,7 @@
 - Cargo lock의 외부 package 525개 중 333개 metadata 확인, 192개 `UNVERIFIED`(로컬 source cache 없음).
 - JavaScript 설치 metadata 72개 확인. 이 목록은 모든 OS의 optional npm package가 설치됐음을 뜻하지 않습니다.
 - Python 설치 metadata 14개 확인. 도구·test 의존성도 포함하며 모두 앱에 포함된다는 뜻은 아닙니다.
+- 번들 글꼴 1개(Pretendard Variable 1.3.9, SIL OFL 1.1)는 package metadata가 아니라 `public/fonts/`의 파일과 그 라이선스 원문에서 확인했습니다. 아래 [번들 글꼴](#번들-글꼴) 표를 참고하세요.
 - `OR`는 대체 선택, `AND`는 복수 조건입니다. `/`와 파일별 예외는 원문을 확인합니다. metadata가 라이선스 원문·copyright·NOTICE를 대신하지 않습니다.
 - [제3자 고지](../../THIRD_PARTY_NOTICES.md) · [검토 판정과 배포 보류](license-review.md)
 
@@ -641,3 +642,13 @@ Python interpreter 및 표준 라이브러리 조건은 [Python 3.12 license](ht
 | pyinstaller | 6.16.0 | GPL-2.0-or-later with bundling exception; selected files Apache-2.0 | [version source](https://pypi.org/project/pyinstaller/6.16.0/#files) |
 | pyinstaller-hooks-contrib | 2026.7 | Apache-2.0 / GPL-2.0 (file-specific; review hooks exception) | [version source](https://pypi.org/project/pyinstaller-hooks-contrib/2026.7/#files) |
 | setuptools | 84.0.0 | MIT | [version source](https://pypi.org/project/setuptools/84.0.0/#files) |
+
+## 번들 글꼴
+
+앱 화면에 포함되는 글꼴 파일입니다. 라이선스 원문은 `public/fonts/Pretendard-OFL.txt`이며 앱의 오픈소스 라이선스 목록(`public/licenses/THIRD_PARTY_LICENSES.txt`)에도 같은 원문이 들어 있습니다.
+
+| Font | Version | License metadata | Source |
+| --- | --- | --- | --- |
+| Pretendard Variable (`PretendardVariable.woff2`) | 1.3.9 | OFL-1.1 (Copyright (c) 2021 Kil Hyung-jin, Reserved Font Name Pretendard) | [orioncactus/pretendard](https://github.com/orioncactus/pretendard) |
+
+`src/components/Brand.svelte`의 로고 글자는 Pretendard 글리프에서 만든 윤곽선 경로이며 OFL이 허용하는 파생입니다. 글꼴 파일 자체를 다른 이름으로 배포하지 않습니다.

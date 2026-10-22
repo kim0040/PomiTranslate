@@ -5,7 +5,8 @@
 //   node scripts/generate-licenses.mjs --check    # fail when the committed file is out of date
 //
 // It covers the Rust crates compiled into the shell for every desktop target, the JavaScript that
-// the page bundles, and the Python packages and interpreter inside the translation core. Proc-macro
+// the page bundles, the font in public/fonts/, and the Python packages and interpreter inside the
+// translation core. Proc-macro
 // and build-only crates run on the build machine and are not shipped, so they are left out.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, copyFileSync } from 'node:fs';
@@ -164,6 +165,26 @@ function pythonPackages() {
   return JSON.parse(run(interpreter, ['-c', PYTHON_SCRIPT, join(root, 'requirements.txt')])).map((pkg) => ({ note: '', ...pkg }));
 }
 
+// --- Bundled fonts ------------------------------------------------------------------------------
+// public/fonts/ ships with the page, so the font's own license text goes into the notices too. The
+// brand lockup in src/components/Brand.svelte is traced from Pretendard glyph outlines, which the OFL
+// permits for a derivative that does not use the Reserved Font Name; the entry says so.
+function fontPackages() {
+  const file = join(root, 'public', 'fonts', 'Pretendard-OFL.txt');
+  if (!existsSync(file)) throw new Error('public/fonts/Pretendard-OFL.txt is missing; the bundled font needs its license text');
+  return [{
+    name: 'Pretendard Variable',
+    version: '1.3.9',
+    license: 'OFL-1.1',
+    source: 'https://github.com/orioncactus/pretendard',
+    note: '',
+    texts: [
+      { name: 'NOTICE', text: 'Bundled as public/fonts/PretendardVariable.woff2 (Copyright (c) 2021 Kil Hyung-jin). The PomiTranslate logo lettering in the interface is vector outlines derived from Pretendard, which the SIL Open Font License permits.' },
+      { name: 'Pretendard-OFL.txt', text: readFileSync(file, 'utf8').replace(/\r\n/g, '\n').trim() }
+    ]
+  }];
+}
+
 // --- Output -------------------------------------------------------------------------------------
 function section(title, packages) {
   const sorted = [...packages].sort((a, b) => a.name.localeCompare(b.name) || String(a.version).localeCompare(String(b.version)));
@@ -196,6 +217,7 @@ function section(title, packages) {
 const rust = rustPackages();
 const javascript = javascriptPackages();
 const python = pythonPackages();
+const fonts = fontPackages();
 const lockHash = (file) => {
   const result = spawnSync('git', ['hash-object', file], { cwd: root, encoding: 'utf8' });
   return result.status === 0 ? result.stdout.trim().slice(0, 12) : 'unknown';
@@ -216,7 +238,8 @@ const body = [
   header,
   section(`Desktop shell (Rust crates, ${rust.length})`, rust),
   section(`Interface (JavaScript packages, ${javascript.length})`, javascript),
-  section(`Translation core (Python, ${python.length})`, python)
+  section(`Translation core (Python, ${python.length})`, python),
+  section(`Bundled fonts (${fonts.length})`, fonts)
 ].join('\n');
 
 if (process.argv.includes('--check')) {
@@ -230,5 +253,5 @@ if (process.argv.includes('--check')) {
   mkdirSync(outDir, { recursive: true });
   writeFileSync(outFile, body);
   copyFileSync(join(root, 'LICENSE'), join(outDir, 'LICENSE.txt'));
-  console.log(`Wrote ${outFile}: ${rust.length} Rust, ${javascript.length} JavaScript, ${python.length} Python entries, ${(body.length / 1024).toFixed(0)} KB`);
+  console.log(`Wrote ${outFile}: ${rust.length} Rust, ${javascript.length} JavaScript, ${python.length} Python, ${fonts.length} font entries, ${(body.length / 1024).toFixed(0)} KB`);
 }
