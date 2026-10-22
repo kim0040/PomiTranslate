@@ -106,3 +106,7 @@ jobs:
         run: python tests/test_retry_contract.py
       - name: Review follow-ups for write reporting, layout gate, locks and diagnostics
         run: python tests/test_review_a_followups.py
+      - name: Review drafts survive restarts and stay bounded
+        run: python tests/test_review_drafts.py
+      - name: Backup deletion and pruning respect locks, last copies and open recoveries
+        run: python tests/test_backup_admin.py

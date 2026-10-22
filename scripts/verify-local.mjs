@@ -56,6 +56,8 @@ const PYTHON_TESTS = [
   ['Guarded recovery, conflicts and interrupted restores', 'tests/test_recovery.py'],
   ['Provider/core retry contract by error kind', 'tests/test_retry_contract.py'],
   ['Review follow-ups for write reporting, layout gate, locks and diagnostics', 'tests/test_review_a_followups.py'],
+  ['Review drafts survive restarts and stay bounded', 'tests/test_review_drafts.py'],
+  ['Backup deletion and pruning respect locks, last copies and open recoveries', 'tests/test_backup_admin.py'],
 ];
 
 const GROUPS = ['python', 'frontend', 'rust'];
