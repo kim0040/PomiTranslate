@@ -52,6 +52,7 @@ def test_bootstrap_lists_and_recovery_rolls_back() -> None:
         assert set(job) >= {"jobId", "kind", "worldPath", "worldName", "createdAt", "unitsTotal", "unitsVerified",
                             "unitsUnknown", "needsAttention", "legacy"}
         assert job["kind"] == "translate" and job["legacy"] is False and job["needsAttention"] is True
+        assert job["state"] in {"committing", "partial"} and job["blocking"] is True, job
         assert job["unitsTotal"] == 5 and job["unitsVerified"] < job["unitsTotal"]
         assert snapshot(world, pack) != baseline, "listing must not repair anything"
 
@@ -98,8 +99,18 @@ def test_recovery_keep_and_errors() -> None:
         assert held["type"] == "response.error" and held["error"]["code"] == "TARGET_LOCKED", held
         assert snapshot(world, pack) == crashed
 
-        kept = request(data, "recovery.start", {"jobId": job_id, "mode": "keep"})[-1]
+        # Keep only verifies. The crash left a region and its payload on different sides, so it is refused,
+        # the job stays open and blocking, and nothing in the world moves.
+        refused = request(data, "recovery.start", {"jobId": job_id, "mode": "keep"})[-1]
+        assert refused["type"] == "response.ok" and refused["payload"]["state"] == "recovery_conflict", refused
+        assert {c["code"] for c in refused["payload"]["conflicts"]} == {"UNIT_INCONSISTENT"}, refused
+        assert snapshot(world, pack) == crashed
+        listed = request(data, "app.bootstrap", {"credentialOwner": "rust"})[-1]["payload"]["interruptedJobs"]
+        assert [(j["jobId"], j["state"], j["blocking"]) for j in listed] == [(job_id, "recovery_conflict", True)], listed
+        # Only an explicit acceptance settles it anyway, and the conflicts are recorded.
+        kept = request(data, "recovery.start", {"jobId": job_id, "mode": "keep", "acceptConflicts": True})[-1]
         assert kept["type"] == "response.ok" and kept["payload"]["state"] == "kept", kept
+        assert kept["payload"]["conflicts"], kept
         assert snapshot(world, pack) == crashed
         assert request(data, "app.bootstrap", {"credentialOwner": "rust"})[-1]["payload"]["interruptedJobs"] == []
         again = request(data, "recovery.start", {"jobId": job_id, "mode": "rollback"})[-1]

@@ -86,19 +86,36 @@ def crash_and_recover(point: str, nth: int) -> None:
         MATRIX_ROWS.append((point, nth, "rolled_back", "baseline"))
 
 
+def keep_outcome(path: Path, root: Path, pack: Path, world: Path, baseline: dict, label: tuple) -> str:
+    """Keep is verify-only: it settles a consistent world as ``kept`` and reports an inconsistent one
+    (``UNIT_INCONSISTENT``, job still open and blocking), never touching a file. Returns the state."""
+    before = snapshot(world, pack)
+    result = recover_job(path, "keep", authorized_external=[pack], lock_dir=root / "locks")
+    assert snapshot(world, pack) == before, (label, "keep must not change the world")
+    if result["state"] == "kept":
+        assert not result["conflicts"], (label, result)
+        assert journal.Journal.load(path).settled
+        assert list_interrupted(stores(root)) == []
+    else:
+        assert result["state"] == "recovery_conflict", (label, result)
+        assert result["conflicts"] and {c["code"] for c in result["conflicts"]} == {"UNIT_INCONSISTENT"}, (label, result)
+        assert not journal.Journal.load(path).settled
+        assert [item["jobId"] for item in list_interrupted(stores(root)) if item["kind"] != "recovery"] == [path.parent.name]
+        again = recover_job(path, "rollback", authorized_external=[pack], lock_dir=root / "locks")
+        assert again["state"] == "rolled_back", (label, again)
+        assert snapshot(world, pack) == baseline, (label, "rollback after a refused keep reaches the baseline")
+    world_is_readable(world)
+    return result["state"]
+
+
 def crash_and_keep(point: str, nth: int) -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         world, pack = build_world(root)
+        baseline = snapshot(world, pack)
         crash_job(world, root, pack, Crash(point, nth))
-        crashed = snapshot(world, pack)
-        path = only_job(root)
-        result = recover_job(path, "keep", authorized_external=[pack], lock_dir=root / "locks")
-        assert result["state"] in {"kept", "partial"} and not result["conflicts"], (point, nth, result)
-        assert snapshot(world, pack) == crashed, (point, nth, "keep must not change the world")
-        assert journal.Journal.load(path).settled
-        assert list_interrupted(stores(root)) == []
-        world_is_readable(world)
+        state = keep_outcome(only_job(root), root, pack, world, baseline, (point, nth))
+        MATRIX_ROWS.append((point, nth, f"keep -> {state}", "consistent" if state == "kept" else "refused, then baseline"))
 
 
 def test_clean_job_commits() -> None:
@@ -168,20 +185,21 @@ def test_recovery_can_be_interrupted() -> None:
                             pass
                     assert crash.fired, (name, nth)
                     assert not journal.Journal.load(path).settled, "an interrupted recovery leaves the job open"
-                    mid = snapshot(world, pack)
                     # The job is still listed (once), and a new translation still waits for it.
                     listed = [item["jobId"] for item in list_interrupted(stores(root)) if item["kind"] != "recovery"]
                     assert listed == [path.parent.name], (name, nth, listed)
-                    result = recover_job(path, mode, authorized_external=[pack], lock_dir=root / "locks")
-                    assert not result["conflicts"], (name, nth, mode, result)
                     if mode == "rollback":
+                        result = recover_job(path, mode, authorized_external=[pack], lock_dir=root / "locks")
+                        assert not result["conflicts"], (name, nth, mode, result)
                         assert result["state"] == "rolled_back", (name, nth, result)
                         assert snapshot(world, pack) == baseline, (name, nth, "rollback after an interrupted recovery")
+                        outcome = "baseline"
                     else:
-                        assert snapshot(world, pack) == mid, (name, nth, "keep changes nothing")
+                        state = keep_outcome(path, root, pack, world, baseline, (name, nth))
+                        outcome = "kept as is" if state == "kept" else "refused, then baseline"
                     assert list_interrupted(stores(root)) == [], (name, nth, mode, list_interrupted(stores(root)))
                     world_is_readable(world)
-                    MATRIX_ROWS.append((f"recovery:{name}", nth, f"then {mode}", "baseline" if mode == "rollback" else "kept as is"))
+                    MATRIX_ROWS.append((f"recovery:{name}", nth, f"then {mode}", outcome))
 
 
 def test_foreign_edit_is_quarantined() -> None:
@@ -247,8 +265,10 @@ def test_enospc_leaves_no_torn_file() -> None:
             recover = [item for item in list_interrupted(stores(root))]
             for item in recover:
                 recover_job(find_journal(item["jobId"], stores(root)), "rollback", authorized_external=[pack], lock_dir=root / "locks")
-        MATRIX_ROWS.append(("ENOSPC at 2nd publish", 2, state, "DISK_FULL, no torn files"))
-        del baseline
+        assert list_interrupted(stores(root)) == []
+        assert snapshot(world, pack) == baseline, "after recovery every file is byte-exact the baseline"
+        assert not leftovers(world, pack), leftovers(world, pack)
+        MATRIX_ROWS.append(("ENOSPC at 2nd publish", 2, state, "DISK_FULL, no torn files, baseline after recovery"))
 
 
 def test_shared_external_zip_lock() -> None:
