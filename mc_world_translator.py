@@ -533,19 +533,21 @@ def classify_failure(exc: BaseException) -> str:
     kind = getattr(exc, "kind", None)
     if isinstance(kind, str) and kind:
         error_code = getattr(exc, "error_code", None) or getattr(exc, "code", None)
+        # Decisive kinds map directly. rate_limit, rejected, transient and unknown fall through to the
+        # status checks below, which tell quota from rate limit, a missing model from a bad request and
+        # a gateway timeout from an outage.
         if kind == "timeout":
             return "timeout"
-        if kind in {"rate_limit", "auth"}:
-            if error_code == "NO_CREDIT":
-                return "quota"
-            return "rate_limit" if kind == "rate_limit" else "auth"
+        if error_code == "NO_CREDIT":
+            return "quota"
+        if kind == "auth":
+            return "auth"
         if kind == "config":
             return "unsupported_model" if getattr(exc, "status", None) == 404 or error_code == "MODEL_NOT_FOUND" else "bad_request"
-        if kind in {"rejected", "too_large", "filtered"}:
+        if kind in {"too_large", "filtered"}:
             return "bad_request"
         if kind == "redirect":
             return "auth"
-        return "provider_unavailable"  # transient, unknown
     message = str(exc).lower()
     status = getattr(exc, "status", None)
     if isinstance(status, int):
@@ -570,6 +572,8 @@ def classify_failure(exc: BaseException) -> str:
     if isinstance(exc, ProviderError):
         timed_out = getattr(exc, "error_code", None) == "PROVIDER_TIMEOUT" or "timed out" in message or "timeout" in message
         return "timeout" if timed_out else "provider_unavailable"
+    if isinstance(kind, str) and kind:
+        return {"rate_limit": "rate_limit", "rejected": "bad_request"}.get(kind, "provider_unavailable")
     if isinstance(exc, TimeoutError):
         return "timeout"
     if "incomplete translation json" in message or isinstance(exc, json.JSONDecodeError):
