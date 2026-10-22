@@ -52,6 +52,10 @@ const PYTHON_TESTS = [
   ['Provider redirects, own-key routing, redaction, request budgets', 'tests/test_provider_hardening.py'],
   ['Formatter and Minecraft placeholder preservation', 'tests/test_text_tokens.py'],
   ['Legacy web UI token, Host, Origin and JSON checks', 'tests/test_webui_security.py'],
+  ['Write journal, staged transaction and fault-injection matrix', 'tests/test_journal.py'],
+  ['Guarded recovery, conflicts and interrupted restores', 'tests/test_recovery.py'],
+  ['Provider/core retry contract by error kind', 'tests/test_retry_contract.py'],
+  ['Review follow-ups for write reporting, layout gate, locks and diagnostics', 'tests/test_review_a_followups.py'],
 ];
 
 const GROUPS = ['python', 'frontend', 'rust'];
