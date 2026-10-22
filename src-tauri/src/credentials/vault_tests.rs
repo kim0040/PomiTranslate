@@ -1554,28 +1554,43 @@ fn an_unknown_history_is_cleared_only_by_the_acknowledgement_which_deletes_nothi
 }
 
 #[test]
-fn acknowledging_changes_nothing_when_there_is_no_saved_marker_and_keeps_every_other_entry() {
+fn acknowledging_forgets_only_unestablished_entries_and_keeps_owned_ones_for_the_purge() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
     assert!(!vault.acknowledge_unknown(dir.path()).unwrap(), "no record");
     vault
         .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
         .unwrap();
+    assert!(
+        !vault.acknowledge_unknown(dir.path()).unwrap(),
+        "only owned entries: nothing to clear"
+    );
+    // A pending entry the app cannot vouch for, plus a saved marker.
     write_record(dir.path(), "gemini", Ownership::Pending(Previous::Absent));
-    assert!(!vault.acknowledge_unknown(dir.path()).unwrap());
-    // A saved marker is cleared, but a pending entry is still reported and never deleted.
+    put_foreign(&fake, "gemini");
     let ledger = Ledger::new(dir.path());
     let ledger::Read::Present(mut record) = ledger.read().unwrap() else {
         panic!("record")
     };
     record.unreconciled = true;
     ledger.save(&record).unwrap();
+    let before = fake.calls.load(Ordering::SeqCst);
     assert!(vault.acknowledge_unknown(dir.path()).unwrap());
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        before,
+        "the acknowledgement never reaches the OS store"
+    );
+    // The person removed what the app could not vouch for; the owned entry is still the app's job.
     let purged = vault.purge(dir.path()).unwrap();
     assert_eq!(purged.keychain_deleted, ["openai"]);
-    assert_eq!(purged.keychain_uncertain, ["gemini"]);
-    assert!(!purged.keychain_unverified);
+    assert!(purged.keychain_uncertain.is_empty(), "{purged:?}");
+    assert!(purged.complete(), "{purged:?}");
     assert!(!fake.entries.lock().unwrap().contains_key("openai"));
+    assert!(
+        fake.entries.lock().unwrap().contains_key("gemini"),
+        "an entry the app could not vouch for is never deleted"
+    );
 }
 
 #[test]

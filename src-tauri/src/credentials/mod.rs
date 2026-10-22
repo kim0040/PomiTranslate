@@ -1134,14 +1134,18 @@ impl Credentials {
     }
 
     /// The person says they removed any PomiTranslate entries from the system keychain themselves.
-    /// This clears the unknown-history marker that was already saved and records the time. It never
-    /// touches the OS store, the vault or any other entry of the record, and it reads nothing new
-    /// into the record: with no saved marker there is nothing to clear and the answer is `false`.
+    /// This clears the unknown-history marker and the pending or uncertain entries that were already
+    /// saved (the ones the app could never vouch for), and records the time. Owned entries stay, so a
+    /// purge can still delete them. It never touches the OS store or the vault, and it reads nothing
+    /// new into the record: with nothing to clear the answer is `false`.
     pub fn acknowledge_unknown(&self, root: &Path) -> Result<bool, IpcError> {
         let _sessions = lock_wait(&self.sessions)?;
         let ledger = Ledger::new(root);
         match ledger.read()? {
-            LedgerRead::Present(mut record) if record.unreconciled => {
+            LedgerRead::Present(mut record)
+                if record.unreconciled || !record.unestablished().is_empty() =>
+            {
+                record.forget_unestablished();
                 record.unreconciled = false;
                 record.acknowledged_at = Some(u64::try_from(now_millis()).unwrap_or(u64::MAX));
                 ledger.save(&record)?;

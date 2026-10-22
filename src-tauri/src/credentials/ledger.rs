@@ -158,6 +158,14 @@ impl Record {
             .collect()
     }
 
+    /// Drop every entry that is not established as the app's. Only for the person's own statement
+    /// that they removed the entries themselves; owned entries stay so the app can still delete them.
+    pub fn forget_unestablished(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|_, state| *state == Ownership::Owned);
+        self.entries.len() != before
+    }
+
     /// Nothing is owed and nothing is unknown.
     pub fn is_clear(&self) -> bool {
         self.entries.is_empty() && !self.unreconciled
