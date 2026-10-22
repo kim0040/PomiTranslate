@@ -716,7 +716,9 @@ def test_cancelled_job_resumes_same_backup_set(tmp: Path) -> None:
     assert first["changed_file_count"] == 1
     assert checkpoint.is_file()
     backup_id = first["backup_set_id"]
-    assert next(item for item in list_backup_sets(world) if item["backupSetId"] == backup_id)["fileCount"] == 1
+    # Every original is backed up and verified before the first file is replaced, so a job cut
+    # off after one file already holds both backups (journal state "partial", one unit verified).
+    assert next(item for item in list_backup_sets(world) if item["backupSetId"] == backup_id)["fileCount"] == 2
 
     resumed_config = merge_nested(base, {"runtime": {"resume_from_checkpoint": True}})
     resumed = WorldTranslator(resumed_config, cancel_check=lambda: False).run()

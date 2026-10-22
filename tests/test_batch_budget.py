@@ -73,30 +73,34 @@ def test_fatal_error_is_not_split_or_retried() -> None:
 
 
 def test_rejected_requests_trip_the_job_breaker() -> None:
-    # 400 is not "fatal" on its own, but a job where every request is refused must stop.
+    # 400 is not "fatal" on its own, but a job where every request is refused must stop, and after
+    # three calls (the batch, a fifth of it, one string), not after a dozen.
     fake = Fake(ProviderError("unknown parameter", status=400))
-    batch = translator(fake, batch_size=1)
+    batch = translator(fake, batch_size=40)
     try:
         batch.translate_texts([f"text {i}" for i in range(40)])
         raise AssertionError("the breaker did not trip")
     except ProviderUnavailable as exc:
-        assert "rejected" in str(exc)
-    assert fake.requests <= 13, fake.requests
+        assert "rejected" in str(exc) and exc.code == "REQUEST_REJECTED" and exc.fatal
+    assert fake.requests == 3, fake.requests
+    assert fake.sizes == [40, 8, 1], fake.sizes
 
 
 def test_success_resets_the_breaker() -> None:
-    errors = [ProviderError("bad", status=400)] * 5
-
-    class Flaky(Fake):
+    class Alternating(Fake):
         def translate_mapping(self, payload, **kwargs):
-            if errors:
+            if self.requests % 2 == 0:  # every other request is refused, none three in a row
                 self.requests += 1
-                raise errors.pop()
+                raise ProviderError("bad", status=400)
             return super().translate_mapping(payload, **kwargs)
 
-    batch = translator(Flaky(), batch_size=1, retries=6)
-    result = batch.translate_texts(["only"])
-    assert result == {"only": "T:only"} and not batch.failed
+    fake = Alternating()
+    batch = translator(fake, batch_size=1)
+    texts = [f"text {i}" for i in range(6)]
+    result = batch.translate_texts(texts)
+    assert sum(1 for text in texts if result[text] == f"T:{text}") == 3
+    assert set(batch.failed_codes.values()) == {"bad_request"} and len(batch.failed) == 3
+    assert batch.consecutive_rejections <= 1
 
 
 def test_failure_codes() -> None:

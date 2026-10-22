@@ -24,6 +24,20 @@ _TRANSIENT_WINERRORS = {5, 32, 33}
 _REPLACE_ATTEMPTS = 6
 
 
+class CommittedWriteError(OSError):
+    """The new file replaced the old one, but flushing the directory entry failed afterwards.
+
+    The bytes are at ``committed_path`` (a caller that sees this must count the file as written,
+    forget any digest it remembered for it, and keep the durability failure as an error); only
+    their survival of a power cut is unconfirmed. It is an ``OSError`` so existing handlers keep working.
+    """
+
+    def __init__(self, committed_path: Path, cause: OSError) -> None:
+        super().__init__(getattr(cause, "errno", None), f"{committed_path.name} was written but could not be flushed to disk: {cause}")
+        self.committed_path = Path(committed_path)
+        self.cause = cause
+
+
 def fsync_fd(descriptor: int) -> None:
     """Flush one open file to the device. macOS needs F_FULLFSYNC to pass the drive cache."""
     if sys.platform == "darwin":
@@ -119,7 +133,10 @@ def atomic_write_bytes(
             shutil.copymode(path, tmp_path)
         replace(tmp_path, path)
         tmp_path = None  # published: nothing left to clean up
-        fsync_dir(path.parent)
+        try:
+            fsync_dir(path.parent)
+        except OSError as exc:
+            raise CommittedWriteError(path, exc) from exc
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
