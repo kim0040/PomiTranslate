@@ -76,7 +76,7 @@ Rust 쪽은 정상 종료 요청 뒤 stdin을 닫고 2초를 기다린 다음 �
 ### 응답 형식·시간 제한·실패한 시작
 
 - 요청 id가 같은 종료 응답이 유효하지 않으면 protocol 위반입니다. `response.ok`는 객체 `payload`가 있어야 하고, `response.error`는 `error.code`(`[A-Z0-9_]{1,64}`)와 문자열 `error.message`가 있어야 합니다. 위반이면 월드를 쓰는 요청은 협력 취소와 30초 유예 뒤 종료하고, 질의는 즉시 코어를 끝냅니다(`CORE_PROTOCOL`). 유예 중 코어가 취소에 유효하게 답하면 그 답이 결과입니다.
-- 월드 작업이 아닌 모든 요청(`models.list`, 연결 확인 포함)은 요청을 쓴 시점부터 **120초 절대 제한**이 있습니다. 넘으면 코어를 끝내고 `CORE_TIMEOUT`을 돌려줍니다. 월드 작업에는 일괄 제한이 없습니다.
+- 월드 작업이 아닌 모든 요청(`models.list`, 연결 확인 포함)은 요청을 쓴 시점부터 **요청 종류별 절대 제한**이 있습니다: `prompt.enhance`는 **630초**(저장된 공급자 시간 제한이 최대 600초이므로), 그 밖의 모든 요청은 **120초**입니다. 넘으면 코어를 끝내고 `CORE_TIMEOUT`을 돌려줍니다. 월드 작업에는 일괄 제한이 없습니다.
 - 코어를 만들었지만 감독 아래 두지 못했고 종료도 확인하지 못한 자식은 핸들을 정리용 slot에 보관합니다(Windows: 중단 상태로 남아 아무것도 실행하지 않음). 이후 시작 시도마다 먼저 한정된 횟수로 다시 끝내 보고, 확인될 때까지 새 코어는 시작하지 않으며 결과는 `CORE_STATE_UNKNOWN`입니다. 앱 종료 때도 한 번 더 시도합니다.
 
 ### 응답 크기 제한
@@ -102,7 +102,7 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 - 오류 코드와 시각(출처는 식별자 문자만), 요청 종류·소요 시간·결과 코드·종료 코드·시그널(코어 실행 기록), 패닉이 난 코드 위치(모듈 상대 경로), 개수.
 - 코어 stderr와 비프로토콜 stdout은 줄 전체를 가린(redact) 뒤 **분류**해서, 미리 컴파일된 목록으로만 만든 모양을 남깁니다. 입력 텍스트는 그 조각 밖으로 복사되지 않습니다.
   - Python traceback 머리줄과 예외 연쇄 문구.
-  - `File "…", line N, in fn` 프레임: 파일이 코어의 자체 모듈(`mwt/*.py`, `mc_world_translator.py`, `llm_backends.py`, `webui_server.py`)이고 함수 이름이 식별자일 때만 모듈 상대 경로와 함께 남기고, 그 밖의 프레임은 `[frame]`입니다.
+  - `File "…", line N, in fn` 프레임: 파일이 코어의 자체 모듈(`mwt/*.py`, `mc_world_translator.py`, `llm_backends.py`, `webui_server.py`)일 때만 모듈 상대 경로와 줄 번호를 남기고, 함수 이름은 언제나 `[fn]`으로 바꿉니다(식별자 모양의 비밀값이나 월드 토큰이 함수 이름 자리에 올 수 있기 때문입니다). 그 밖의 프레임은 `[frame]`입니다.
   - 예외 클래스 이름: 내장 예외와 프로젝트 예외 목록에 있을 때만 남기고 아니면 `[exception]`, 메시지는 언제나 `[message omitted]`입니다.
   - 고정 문장 하나, 정확히 `[pomi] stdin closed while a request was running; cancelling`.
   - `preferences were not saved: <X>`는 `<X>`가 허용된 예외일 때만, `protocol message had values that were replaced: [...]`는 목록의 모든 항목이 `_plain()`이 만들 수 있는 플래그 이름일 때만 꼬리를 남기고 아니면 꼬리를 버립니다.
@@ -125,7 +125,10 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 - **OS 키체인 소유 기록**(`keychain-ledger.json`, 비밀 없음, vault 밖이라 저장소 초기화·격리에서도 남음). provider마다 상태는 셋입니다: `owned`(앱이 쓰고 확인됨), `pending`(OS 쓰기 진행 중이거나 결과 불명, 이전 소유 상태를 함께 기록), `uncertain`(있을 수 있으나 앱이 만들었다고 말할 수 없음).
   - 키체인에 쓰기 전에 `pending`(이전 상태 포함)을 먼저 내구적으로 기록합니다. 쓰기가 확인되면 `owned`, 실패했고 보정이 이전 값을 되돌렸으면 이전 소유 상태를 그대로 되돌립니다(원래 남의 항목이었으면 계속 앱 것이 아닙니다). 되돌리지 못했으면 `uncertain`입니다.
   - 앱 초기화(키 삭제)는 `owned`만 지웁니다. `pending`·`uncertain`은 지우지 않고 `KEYCHAIN_UNCONFIRMED`로 보고하며 `keysDeleted`는 거짓입니다. 키체인을 나열하거나 다른 항목을 건드리지 않습니다.
-  - 기록이 없거나 손상된 것은 "빈 기록"이 아니라 **알 수 없음**입니다. 손상된 파일은 `keychain-ledger.json.broken-<ms>`로 보존하고(삭제하지 않음), 거기서 읽을 수 있는 이름과 vault 메타데이터에서 알아낸 항목을 합치며(vault의 `known_keychain`은 확인된 소유로, 이름만 남은 것은 `uncertain`), 불확실 표시(`unreconciled`)를 남깁니다. 표시는 읽을 수 있는 vault와 대조해 모든 항목을 처리한 초기화·삭제 뒤에만 사라집니다. 기록과 vault가 모두 읽히지 않으면 `KEYCHAIN_UNCONFIRMED`이며 완료로 보고하지 않습니다.
+  - **소유 판단은 하나입니다.** 키 하나를 지울 때와 앱 초기화(키 삭제)가 같은 판단(`Record::authority`)을 씁니다: 확인된 `owned`만 OS 삭제를 허락합니다. vault의 키체인 모드는 그것만으로 소유가 아니며(`uncertain`으로만 들어옵니다), `pending`·`uncertain`·기록이 없는데 이력이 알 수 없음인 항목은 OS를 호출하지 않고 `KEYCHAIN_UNCONFIRMED`를 돌려줍니다. vault를 읽을 수 있는지와 무관합니다.
+  - 기록 파일 자체도 vault처럼 보호합니다: 소유자 전용으로 만들고(Unix 0600, Windows는 현재 사용자 전용 ACL), 링크를 따라가지 않고 열며, 읽을 때 일반 파일·링크 1개·소유자 일치(Unix)·그룹/기타 쓰기 불가를 확인합니다. 이 검사를 통과하지 못한 기록은 신뢰하지 않고 보존용으로 격리한 뒤 **알 수 없음** 상태로 들어갑니다.
+  - 기록이 없거나 손상·불신된 것은 "빈 기록"이 아니라 **알 수 없음**입니다. 손상된 파일은 `keychain-ledger.json.broken-<ms>`로 보존하고(삭제하지 않음), 거기서 읽을 수 있는 이름, vault 메타데이터, 그리고 저장소 초기화로 보관된 이전 vault(`credentials.broken-*`)의 메타데이터를 합칩니다. 이력을 덮을 때만 불확실 표시(`unreconciled`)를 남기지 않습니다: 보관된 vault가 모두 읽혔고 현재 vault도 읽혔으며, 기록이 있었다는 증거(손상 파일·이전 사본)가 있으면 보관본이나 현재 vault 중 하나에 키체인 행이 실제로 있어야 합니다. **새로 만든(교체된) vault는 증인이 아닙니다.**
+  - 불확실 표시는 **내구적**입니다. 손실이 발견된 그 시점에만 판단하고, 저장된 표시는 이후 새 vault가 읽힌다고 해서 지워지지 않습니다. 지우는 방법은 (a) 손실 시점에 보관된 메타데이터로 이력이 완전히 복원된 경우, (b) 사용자의 명시적 확인 `credentials.acknowledgeUnknownKeychain`뿐입니다. 이 요청은 표시를 지우고 시각(`acknowledged_at`)만 기록하며 OS 키체인·vault·다른 항목을 건드리지 않습니다(`pending`·`uncertain` 항목은 그대로 남아 계속 보고됩니다). 표시가 남아 있는 동안 `native_reset.keysDeleted`는 거짓이고 `errors`에 `KEYCHAIN_UNCONFIRMED`가 있습니다.
   - vault 메타데이터(저장소 초기화·삭제)를 지우기 전에 발견했거나 삭제에 실패한 모든 항목을 기록에 먼저 씁니다. 기록을 쓰지 못하면 vault를 옮기거나 지우지 않습니다. `native_reset.keysDeleted`는 모든 항목이 정리된 경우에만 참입니다.
 
 코어 환경 변수: `POMI_APP_VERSION`, `POMI_BUILD_SHA`, `POMI_BUILD_DATE`, `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`. API 키 환경 변수는 비워서 전달합니다.
