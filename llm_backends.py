@@ -835,6 +835,7 @@ class LLMProviderClient(metaclass=_ClientMeta):
         """
         label = self._label()
         if 300 <= exc.code < 400:
+            exc.close()
             return ProviderError(
                 f"{label} answered with a redirect (HTTP {exc.code}). Redirects are refused because they could "
                 "send the API key to another address; use the final endpoint address in the settings.",
@@ -845,6 +846,8 @@ class LLMProviderClient(metaclass=_ClientMeta):
             raw, _ = _read_limited(exc, MAX_ERROR_BODY_BYTES)
         except (OSError, http.client.HTTPException, TimeoutError):
             raw = b""
+        finally:
+            exc.close()
         body = self._redact(raw.decode("utf-8", errors="replace"))
         retry_after, requested = _retry_after_seconds(exc.headers)
         status = exc.code
