@@ -165,7 +165,7 @@
     .sidebar { height: auto; flex-direction: row; align-items: center; gap: var(--space-2); padding: var(--space-2); border-inline-end: 0; border-block-end: 1px solid var(--border); overflow: visible; }
     .titlebar { display: none; }
     .brand { min-height: 40px; }
-    nav { flex: 1; grid-template-columns: repeat(4, minmax(40px, 1fr)); }
+    nav { flex: 1; grid-template-columns: repeat(5, minmax(40px, 1fr)); }
     .foot { display: none; }
   }
 </style>

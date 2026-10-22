@@ -329,5 +329,7 @@
     main { --pane-pad-x: var(--space-3); padding: var(--space-4) var(--space-3) var(--space-6); }
     .toolbar { padding-inline: var(--space-2); }
     .world-chip { display: none; }
+    /* With the chip gone the bar holds nothing on a non-workspace page, so it is not drawn. */
+    .toolbar:not(:has(:global(.stepper))) { display: none; }
   }
 </style>
