@@ -29,7 +29,7 @@ use serde_json::Value;
 use tauri::{Emitter, Manager, State, WindowEvent};
 
 use error::{code, IpcError};
-use sidecar::ActiveSidecar;
+use sidecar::{ActiveSidecar, SecretRequest};
 
 /// The build this app was made from (`build.rs`): short commit, `+dirty` when the tree had uncommitted
 /// changes, and the UTC build date.
@@ -45,6 +45,7 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "settings.import_legacy",
     "settings.set",
     "credentials.delete",
+    "credentials.confirmEndpoint",
     "worlds.list",
     "worlds.remember",
     "worlds.forget",
@@ -199,33 +200,99 @@ async fn credential_reset_storage(
     )
 }
 
+/// What `native_reset` did, whatever went wrong on the way (M6). The page reads this to say exactly
+/// what was and was not removed; a failure of one step never hides the others.
+#[derive(Serialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ResetOutcome {
+    /// Every credential store (the OS entries this app wrote, the vault, the key directory and the
+    /// set-aside copies) was emptied and confirmed. False when keys were not asked for, too.
+    keys_deleted: bool,
+    /// Some stores were emptied and some could not be confirmed; see `errors`.
+    keys_partially_deleted: bool,
+    /// The saved run reports are gone.
+    reports_cleared: bool,
+    /// Stable codes of what failed, without repeats.
+    errors: Vec<&'static str>,
+}
+
+impl ResetOutcome {
+    fn note(&mut self, code: &'static str) {
+        if !self.errors.contains(&code) {
+            self.errors.push(code);
+        }
+    }
+
+    fn absorb_purge(&mut self, purged: &credentials::Purged) {
+        self.keys_deleted = purged.complete();
+        self.keys_partially_deleted =
+            !self.keys_deleted && (!purged.keychain_deleted.is_empty() || purged.files_removed);
+        for (_, reason) in &purged.keychain_failed {
+            self.note(match *reason {
+                code::KEYCHAIN_UNAVAILABLE => code::KEYCHAIN_UNAVAILABLE,
+                _ => code::KEYCHAIN_FAILED,
+            });
+        }
+        if purged.keychain_unverified {
+            self.note(code::KEYCHAIN_UNCONFIRMED);
+        }
+        for reason in &purged.errors {
+            self.note(reason);
+        }
+        if !purged.files_removed && purged.errors.is_empty() {
+            self.note(code::VAULT_IO);
+        }
+    }
+}
+
 /// The Rust-owned half of "reset the app" (RB-9): saved keys first (when asked), then the run
-/// reports. The page resets the core's own data only after this succeeds, so a failure here leaves
-/// everything the core owns untouched and the message can say exactly what was and was not removed.
+/// reports. The page resets the core's own data only after this reports `keysDeleted` (when keys
+/// were asked for) and `reportsCleared`. Every step runs even when an earlier one failed, and the
+/// outcome says which ones did; only a busy gate is an error.
 #[tauri::command]
 async fn native_reset(
     app: tauri::AppHandle,
     state: State<'_, ActiveSidecar>,
     delete_keys: bool,
-) -> Result<(), IpcError> {
+) -> Result<ResetOutcome, IpcError> {
     let _gate = state.request_gate.try_lock().map_err(|_| {
         IpcError::new(
             code::BUSY,
             "Another PomiTranslate operation is still running",
         )
     })?;
-    let root = app_data_root(&app)?;
-    logged(
-        "native_reset",
-        vault(&app, move |credentials, root| {
-            if delete_keys {
-                credentials.purge(root).map_err(credential_unavailable)?;
+    let outcome = vault(&app, move |credentials, root| {
+        Ok(reset_native(credentials, root, delete_keys))
+    })
+    .await;
+    match outcome {
+        Ok(outcome) => {
+            for reason in &outcome.errors {
+                diagnostics::global().log("ERROR", "native_reset", reason);
             }
-            clear_reports(&root.join("reports"))
-        })
-        .await,
-    )
-    .map(|()| drop(root))
+            Ok(outcome)
+        }
+        Err(error) => logged("native_reset", Err(error)),
+    }
+}
+
+fn reset_native(
+    credentials: &credentials::Credentials,
+    root: &Path,
+    delete_keys: bool,
+) -> ResetOutcome {
+    let mut outcome = ResetOutcome::default();
+    if delete_keys {
+        match credentials.purge(root) {
+            Ok(purged) => outcome.absorb_purge(&purged),
+            Err(error) => outcome.note(error.code),
+        }
+    }
+    match clear_reports(&root.join("reports")) {
+        Ok(()) => outcome.reports_cleared = true,
+        Err(error) => outcome.note(error.code),
+    }
+    outcome
 }
 
 fn clear_reports(reports: &Path) -> Result<(), IpcError> {
@@ -235,7 +302,13 @@ fn clear_reports(reports: &Path) -> Result<(), IpcError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(failed()),
     };
-    for entry in entries.flatten() {
+    // Every entry is tried; an entry that cannot be listed or removed fails the whole step.
+    let mut clean = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            clean = false;
+            continue;
+        };
         let path = entry.path();
         let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
         let removed = if is_dir {
@@ -243,9 +316,13 @@ fn clear_reports(reports: &Path) -> Result<(), IpcError> {
         } else {
             fs::remove_file(&path)
         };
-        removed.map_err(|_| failed())?;
+        clean &= removed.is_ok();
     }
-    Ok(())
+    if clean {
+        Ok(())
+    } else {
+        Err(failed())
+    }
 }
 
 #[tauri::command]
@@ -268,8 +345,11 @@ async fn sidecar_request(
 async fn handle_request(
     app: &tauri::AppHandle,
     state: &ActiveSidecar,
-    mut request: Value,
+    request: Value,
 ) -> Result<Value, IpcError> {
+    // From here on the request is wiped when it is dropped, whichever way this function ends: the
+    // key is put into it later, and nothing between that and the core's stdin can strand a copy (M5).
+    let mut request = SecretRequest::new(request);
     let invalid = |message: &str| IpcError::new(code::INVALID_REQUEST, message.to_owned());
     let kind = request
         .get("type")
@@ -319,6 +399,34 @@ async fn handle_request(
             "id": id,
             "type": "response.ok",
             "payload": {"provider": provider, "deleted": true, "apiKeyStored": false}
+        }));
+    }
+    if kind == "credentials.confirmEndpoint" {
+        // The person confirms that the Custom key saved before keys were bound to an endpoint
+        // belongs to the endpoint now configured (H5).
+        let payload = request
+            .get_mut("payload")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid("Invalid payload"))?;
+        if provider != "custom" {
+            return Err(IpcError::new(
+                code::CREDENTIAL_PROVIDER_INVALID,
+                "Only the Custom provider has an endpoint to confirm",
+            ));
+        }
+        provider_boundary::validate(payload)?;
+        let endpoint = provider_boundary::bound_endpoint(payload);
+        let target = provider.clone();
+        let status = vault(app, move |credentials, root| {
+            credentials.confirm_endpoint(root, &target, endpoint.as_deref())
+        })
+        .await
+        .map_err(credential_unavailable)?;
+        return Ok(serde_json::json!({
+            "v": 1,
+            "id": id,
+            "type": "response.ok",
+            "payload": {"provider": provider, "confirmed": status.stored, "apiKeyStored": status.stored}
         }));
     }
     if CREDENTIAL_OWNER_REQUESTS.contains(&kind.as_str()) {
@@ -397,7 +505,8 @@ async fn handle_request(
             let root = app_data_root(app)?;
             let credentials = app.state::<credentials::Credentials>();
             settings_transaction::save(
-                request,
+                // The key was taken out of this request above: nothing in it needs wiping.
+                request.into_value(),
                 |request| sidecar::exchange(app, state, request),
                 || {
                     credentials
@@ -723,6 +832,8 @@ pub fn run() {
             update_cancel,
             exit_gate::exit_set_settings_dirty,
             exit_gate::exit_confirm,
+            exit_gate::exit_keep_waiting,
+            exit_gate::exit_cancel,
             exit_gate::exit_force
         ])
         .on_window_event(|window, event| {
@@ -812,6 +923,7 @@ mod tests {
             "review.draft.get",
             "review.draft.set",
             "review.draft.clear",
+            "credentials.delete",
         ] {
             assert!(is_allowed_request(kind), "{kind} must be allowed");
         }
@@ -1001,5 +1113,175 @@ mod tests {
         assert_eq!(fs::read_dir(&reports).unwrap().count(), 0);
         assert!(keep.exists());
         clear_reports(&dir.path().join("missing")).unwrap();
+    }
+
+    #[test]
+    fn the_endpoint_confirmation_is_an_allowed_request_that_never_gets_a_key() {
+        assert!(is_allowed_request("credentials.confirmEndpoint"));
+        assert!(!KEY_INJECTED_REQUESTS.contains(&"credentials.confirmEndpoint"));
+        assert!(!CREDENTIAL_OWNER_REQUESTS.contains(&"credentials.confirmEndpoint"));
+        assert_eq!(
+            sidecar::lane("credentials.confirmEndpoint"),
+            sidecar::Lane::Query
+        );
+    }
+
+    // --- M6: the reset reports what it did, whatever failed --------------------------------------
+
+    const KEY: &str = "fixture-secret-never-persist-in-plaintext-1942";
+
+    #[test]
+    fn a_reset_clears_the_reports_and_confirms_the_keys_when_everything_worked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        credentials
+            .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
+            .unwrap();
+        fs::create_dir_all(dir.path().join("reports")).unwrap();
+        fs::write(dir.path().join("reports/a.json"), b"{}").unwrap();
+        let outcome = reset_native(&credentials, dir.path(), true);
+        assert_eq!(
+            outcome,
+            ResetOutcome {
+                keys_deleted: true,
+                keys_partially_deleted: false,
+                reports_cleared: true,
+                errors: vec![],
+            }
+        );
+        assert!(fake.entries.lock().unwrap().is_empty());
+        assert!(!dir.path().join("credentials").exists());
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_deleted_is_reported_and_the_rest_of_the_reset_still_runs() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        credentials
+            .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
+            .unwrap();
+        fs::create_dir_all(dir.path().join("reports")).unwrap();
+        fs::write(dir.path().join("reports/a.json"), b"{}").unwrap();
+        fake.fail_delete.store(true, Ordering::SeqCst);
+
+        let outcome = reset_native(&credentials, dir.path(), true);
+        assert!(!outcome.keys_deleted, "{outcome:?}");
+        assert!(
+            outcome.keys_partially_deleted,
+            "the files are gone: {outcome:?}"
+        );
+        assert!(
+            outcome.reports_cleared,
+            "reports are cleared regardless: {outcome:?}"
+        );
+        assert_eq!(outcome.errors, [code::KEYCHAIN_FAILED]);
+        assert!(fake.entries.lock().unwrap().contains_key("openai"));
+
+        // The retry finishes it, because the ownership record kept the entry.
+        fake.fail_delete.store(false, Ordering::SeqCst);
+        let retry = reset_native(&credentials, dir.path(), true);
+        assert!(retry.keys_deleted && retry.errors.is_empty(), "{retry:?}");
+        assert!(fake.entries.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn without_delete_keys_nothing_credential_related_is_touched_or_claimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        credentials
+            .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
+            .unwrap();
+        let outcome = reset_native(&credentials, dir.path(), false);
+        assert!(!outcome.keys_deleted && !outcome.keys_partially_deleted);
+        assert!(outcome.reports_cleared && outcome.errors.is_empty());
+        assert!(fake.entries.lock().unwrap().contains_key("openai"));
+        assert!(dir.path().join("credentials").is_dir());
+    }
+
+    #[test]
+    fn a_reports_failure_does_not_hide_that_the_keys_were_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        credentials
+            .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
+            .unwrap();
+        // `reports` is a file, not a folder: it cannot be listed.
+        fs::write(dir.path().join("reports"), b"not a folder").unwrap();
+        let outcome = reset_native(&credentials, dir.path(), true);
+        assert!(outcome.keys_deleted, "{outcome:?}");
+        assert!(!outcome.reports_cleared);
+        assert_eq!(outcome.errors, [code::RESET_FAILED]);
+        assert!(fake.entries.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_outcome_reaches_the_page_in_camel_case() {
+        let value = serde_json::to_value(ResetOutcome {
+            keys_deleted: true,
+            keys_partially_deleted: false,
+            reports_cleared: false,
+            errors: vec![code::RESET_FAILED],
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "keysDeleted": true,
+                "keysPartiallyDeleted": false,
+                "reportsCleared": false,
+                "errors": ["RESET_FAILED"]
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_report_that_cannot_be_removed_fails_the_step_but_every_other_entry_is_still_tried() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        fs::create_dir_all(&reports).unwrap();
+        fs::write(reports.join("a-first.json"), b"{}").unwrap();
+        fs::write(reports.join("locked.json"), b"{}").unwrap();
+        fs::write(reports.join("z-last.json"), b"{}").unwrap();
+        // Held open without FILE_SHARE_DELETE: it cannot be removed.
+        let _held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(reports.join("locked.json"))
+            .unwrap();
+        let error = clear_reports(&reports).unwrap_err();
+        assert_eq!(error.code, code::RESET_FAILED);
+        assert!(!reports.join("a-first.json").exists());
+        assert!(!reports.join("z-last.json").exists());
+        assert!(reports.join("locked.json").exists());
+    }
+
+    // --- L1: an empty verification plan is an error, not a pass --------------------------------
+
+    #[test]
+    fn verify_local_refuses_an_empty_step_selection_with_exit_code_two() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let script = root.join("scripts").join("verify-local.mjs");
+        let Ok(output) = std::process::Command::new("node")
+            .arg(&script)
+            .args(["--only", "rust", "--skip", "rust"])
+            .current_dir(&root)
+            .output()
+        else {
+            eprintln!("skipped: node is not available");
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(
+            stderr.contains("No verification steps selected"),
+            "{stderr}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("verify:local PASS"),
+            "an empty plan must not look like a pass"
+        );
     }
 }

@@ -1,8 +1,15 @@
 //! Bounded, redacted diagnostics: a rotating log file under the app's local data directory, a ring of
 //! the translation core's last stderr lines, Rust-side error records and a crash record from the
-//! panic hook (SC-7, NX-1). Nothing here ever receives a stored API key; on top of that every line is
-//! scrubbed for key-shaped text before it is kept, so a provider error echoing a key cannot land in a
-//! file the person might send to support.
+//! panic hook (SC-7, NX-1).
+//!
+//! What leaves the machine is decided here (H3). The support export (`bundle`, and the same text
+//! for "copy diagnostics") never contains free text. It is made of structured records - versions,
+//! platform, error codes with times, request types with durations and exit codes, counts - and of the
+//! core's stderr lines, which are redacted as complete lines and then *classified*: only lines of a
+//! known diagnostic shape survive (a Python traceback header, a frame reduced to a module-relative
+//! path, an exception class name without its message, a line of our own logger). Every other line -
+//! world text a library echoed, provider input, an unusual key - is replaced by a count
+//! (`[n lines omitted]`). The same classification applies to the log file, so neither holds it.
 use std::{
     backtrace::Backtrace,
     collections::VecDeque,
@@ -19,15 +26,19 @@ const FILE_NAME: &str = "pomi-translate.log";
 /// The log rolls over at this size and keeps `KEEP_FILES` files in total (the live one plus rotated).
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const KEEP_FILES: usize = 5;
-/// Last core stderr lines kept in memory and offered with "copy diagnostics".
+/// Last core stderr entries (kept lines and omitted-line counts) in memory and in the export.
 pub const STDERR_RING_LINES: usize = 200;
-const EVENT_RING_LINES: usize = 100;
 /// Error codes (with when and where they happened) kept for the diagnostics bundle.
 const ERROR_RING_LINES: usize = 100;
-/// How much of the rotated log files the bundle carries (the newest part).
-const LOG_TAIL_LINES: usize = 200;
+const RUN_RING_LINES: usize = 100;
+const CRASH_RING_LINES: usize = 20;
 /// A single kept line never exceeds this many characters.
 const MAX_LINE_CHARS: usize = 2000;
+/// A line of our own logger is short by contract; longer ones are cut after redaction.
+const MAX_LOG_LINE_CHARS: usize = 300;
+/// The prefix the translation core puts on the lines of its own logger. Only these lines (and the
+/// fixed shapes in `classify`) are kept from the core's output.
+pub const CORE_LOG_PREFIX: &str = "[pomi] ";
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -35,12 +46,38 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    Kept(String),
+    Omitted(usize),
+}
+
+impl Entry {
+    fn render(&self) -> String {
+        match self {
+            Self::Kept(line) => line.clone(),
+            Self::Omitted(1) => "[1 line omitted]".to_owned(),
+            Self::Omitted(count) => format!("[{count} lines omitted]"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CoreOutput {
+    ring: VecDeque<Entry>,
+    /// Omitted lines not yet noted in the log file (one marker is written for a run of them).
+    pending_omitted: usize,
+    kept_total: usize,
+    omitted_total: usize,
+}
+
 #[derive(Default)]
 pub struct Diagnostics {
     dir: Mutex<Option<PathBuf>>,
-    stderr: Mutex<VecDeque<String>>,
-    events: Mutex<VecDeque<String>>,
+    core: Mutex<CoreOutput>,
     errors: Mutex<VecDeque<String>>,
+    runs: Mutex<VecDeque<String>>,
+    crashes: Mutex<VecDeque<String>>,
     home: Mutex<Option<String>>,
 }
 
@@ -103,13 +140,39 @@ fn looks_like_key(token: &str) -> bool {
         && token.chars().any(|c| c.is_ascii_alphabetic())
 }
 
+/// A whitespace-delimited word that is one secret even though punctuation splits it into several
+/// tokens (`sk-abc.def`, `abc123/DEF456+ghi789==`).
+fn looks_like_key_word(word: &str) -> bool {
+    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if core.len() < 10 {
+        return false;
+    }
+    let lower = core.to_ascii_lowercase();
+    if KEY_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+    let secretish =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/' | '=' | '~');
+    // A relative path made of ordinary words is not a secret; base64 (`+`, `=`) is.
+    let pathlike = core.contains('/') && !core.contains(['+', '=']);
+    core.len() >= 20
+        && core.chars().all(secretish)
+        && core.chars().any(|c| c.is_ascii_digit())
+        && core.chars().any(|c| c.is_ascii_alphabetic())
+        && !pathlike
+}
+
 /// Replace key-shaped text, values that follow a credential keyword, and the person's home folder.
+/// The whole text is scanned, so a secret is never cut in half by a later clip.
 pub fn redact(text: &str, home: Option<&str>) -> String {
     let mut text = text.to_owned();
     if let Some(home) = home.filter(|home| home.len() > 3) {
         text = text.replace(home, "~");
         text = text.replace(&home.replace('\\', "/"), "~");
     }
+    // Whole words first: a secret that punctuation splits (`sk-abc.def`) is taken as one piece
+    // before the token pass could replace only its first half.
+    let text = redact_words(&text);
     let mut out = String::with_capacity(text.len());
     let mut token = String::new();
     let mut redact_next = false;
@@ -137,14 +200,130 @@ pub fn redact(text: &str, home: Option<&str>) -> String {
     out
 }
 
-fn clip(line: &str) -> String {
+/// Characters that end a "word" for the second pass: whitespace and the punctuation that wraps a
+/// value in log text (`key=(abc)`, `"abc"`, `[abc],`).
+fn ends_word(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | ',' | ';' | '<' | '>' | '|'
+        )
+}
+
+/// The part of a word after a leading `name=`, which is where a value would start. `abc==` (base64
+/// padding) is not a name.
+fn value_start(word: &str) -> usize {
+    match word.find('=') {
+        Some(at)
+            if at > 0
+                && word[..at]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                && word[at + 1..].chars().any(|c| c.is_ascii_alphanumeric()) =>
+        {
+            at + 1
+        }
+        _ => 0,
+    }
+}
+
+/// Second pass over whole words: a secret that punctuation split into pieces the token pass let
+/// through is replaced as one piece, keeping the punctuation around it.
+fn redact_words(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+        let from = value_start(word);
+        let value = &word[from..];
+        if looks_like_key_word(value) {
+            let start = value
+                .find(|c: char| c.is_ascii_alphanumeric())
+                .unwrap_or(value.len());
+            let end = value
+                .rfind(|c: char| c.is_ascii_alphanumeric())
+                .map_or(start, |at| at + 1);
+            out.push_str(&word[..from + start]);
+            out.push_str("[REDACTED]");
+            out.push_str(&value[end..]);
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if ends_word(c) {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
+/// The stricter rule for the lines of our own logger, which are kept as text: any run of letters,
+/// digits, `_` and `-` of ten or more characters that mixes letters and digits is replaced. Logger
+/// lines carry short words, counts and names, so little is lost; an odd secret that no shape rule
+/// knows still usually has this shape.
+fn redact_mixed_tokens(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        let mixed = token.len() >= 10
+            && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().any(|c| c.is_ascii_alphabetic());
+        out.push_str(if mixed { "[REDACTED]" } else { token });
+        token.clear();
+    };
+    for c in text.chars() {
+        if is_token_char(c) {
+            token.push(c);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
+
+fn clip_to(line: &str, limit: usize) -> String {
     let single = line.replace(['\r', '\n'], " ");
-    if single.chars().count() <= MAX_LINE_CHARS {
+    if single.chars().count() <= limit {
         return single;
     }
-    let mut clipped: String = single.chars().take(MAX_LINE_CHARS).collect();
+    let mut clipped: String = single.chars().take(limit).collect();
     clipped.push('…');
     clipped
+}
+
+fn clip(line: &str) -> String {
+    clip_to(line, MAX_LINE_CHARS)
+}
+
+/// Letters, digits and `._:-` only, at most `limit` characters; anything else is not an identifier
+/// and is replaced by `?`. Used for names that come from outside the shell (request types).
+fn identifier(text: &str, limit: usize) -> String {
+    let clean: String = text
+        .chars()
+        .take(limit)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-') {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        "?".to_owned()
+    } else {
+        clean
+    }
 }
 
 fn push_bounded(ring: &Mutex<VecDeque<String>>, line: String, cap: usize) {
@@ -153,6 +332,199 @@ fn push_bounded(ring: &Mutex<VecDeque<String>>, line: String, cap: usize) {
         ring.pop_front();
     }
     ring.push_back(line);
+}
+
+// --- classification of the core's output ----------------------------------------------------------
+
+const CHAIN_LINES: &[&str] = &[
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+];
+const EXCEPTION_SUFFIXES: &[&str] = &["Error", "Exception", "Warning", "Exit", "Interrupt"];
+const EXCEPTION_NAMES: &[&str] = &[
+    "KeyboardInterrupt",
+    "StopIteration",
+    "StopAsyncIteration",
+    "GeneratorExit",
+    "SystemExit",
+];
+/// Fixed messages the core prints on stderr (`mwt/desktop_entry.py`); the tail after the colon is
+/// restricted to identifier-like text.
+const FIXED_PREFIXES: &[&str] = &[
+    "preferences were not saved: ",
+    "protocol message had values that were replaced: ",
+];
+
+/// A path reduced to the part that names our code or a library, never the person's folders.
+fn module_relative(path: &str) -> String {
+    let normal = path.replace('\\', "/");
+    let parts: Vec<&str> = normal.split('/').filter(|part| !part.is_empty()).collect();
+    let tail = |from: usize| parts[from..].join("/");
+    let reduced = if let Some(at) = parts.iter().rposition(|part| *part == "_internal") {
+        tail(at + 1)
+    } else if let Some(at) = parts.iter().rposition(|part| *part == "site-packages") {
+        format!("site-packages/{}", tail(at + 1))
+    } else if let Some(at) = parts
+        .iter()
+        .rposition(|part| part.eq_ignore_ascii_case("lib") || part.starts_with("python3"))
+        .filter(|at| *at + 1 < parts.len())
+    {
+        let skip = usize::from(parts[at + 1].starts_with("python3"));
+        format!("stdlib/{}", tail(at + 1 + skip))
+    } else if let Some(at) = parts
+        .iter()
+        .position(|part| matches!(*part, "mwt" | "packaging"))
+    {
+        tail(at)
+    } else {
+        parts.last().copied().unwrap_or("").to_owned()
+    };
+    let safe =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '<' | '>' | ':');
+    if !reduced.is_empty() && reduced.chars().all(safe) {
+        reduced
+    } else {
+        // Whatever remains is not module-shaped; keep only the file name's safe characters.
+        let name: String = parts
+            .last()
+            .copied()
+            .unwrap_or("")
+            .chars()
+            .map(|c| if safe(c) { c } else { '?' })
+            .collect();
+        if name.is_empty() {
+            "?".to_owned()
+        } else {
+            name
+        }
+    }
+}
+
+/// `File "<path>", line N, in fn` with the path reduced; the source line printed under it is not
+/// a frame and falls through to "omitted".
+fn parse_frame(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("File \"")?;
+    let (path, tail) = rest.rsplit_once("\", line ")?;
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || digits.len() > 9 {
+        return None;
+    }
+    let after = &tail[digits.len()..];
+    let function = match after.strip_prefix(", in ") {
+        Some(name) => {
+            let name = name.trim_end();
+            let valid = !name.is_empty()
+                && name.len() <= 80
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '<' | '>'));
+            if !valid {
+                return None;
+            }
+            Some(name)
+        }
+        None if after.trim().is_empty() => None,
+        None => return None,
+    };
+    let mut out = format!("File \"{}\", line {digits}", module_relative(path));
+    if let Some(function) = function {
+        out.push_str(", in ");
+        out.push_str(function);
+    }
+    Some(out)
+}
+
+/// `ValueError: message` becomes `ValueError: [message omitted]`; only the class name is kept.
+fn parse_exception(line: &str) -> Option<String> {
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (name, message) = match line.split_once(':') {
+        Some((name, message)) => (name, Some(message)),
+        None => (line, None),
+    };
+    if message.is_some_and(|message| !message.is_empty() && !message.starts_with(' ')) {
+        return None;
+    }
+    let last = name.rsplit('.').next().unwrap_or("");
+    let identifier_like = !name.is_empty()
+        && name.len() <= 100
+        && name.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+    let exception = last.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && (EXCEPTION_NAMES.contains(&last)
+            || EXCEPTION_SUFFIXES
+                .iter()
+                .any(|suffix| last.ends_with(suffix)));
+    if !identifier_like || !exception {
+        return None;
+    }
+    Some(match message {
+        Some(message) if !message.trim().is_empty() => format!("{name}: [message omitted]"),
+        _ => name.to_owned(),
+    })
+}
+
+/// The kept form of an already redacted line, or `None` when its shape is not a known diagnostic.
+fn classify(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    let trimmed = line.trim_start();
+    if trimmed == "Traceback (most recent call last):" || CHAIN_LINES.contains(&trimmed) {
+        return Some(trimmed.to_owned());
+    }
+    if let Some(frame) = parse_frame(trimmed) {
+        return Some(format!("  {frame}"));
+    }
+    if let Some(exception) = parse_exception(line) {
+        return Some(exception);
+    }
+    if let Some(rest) = line.strip_prefix(CORE_LOG_PREFIX) {
+        // Redacted whole, then cut: a secret is never left half-visible by the limit.
+        return Some(format!(
+            "{CORE_LOG_PREFIX}{}",
+            clip_to(&redact_mixed_tokens(rest), MAX_LOG_LINE_CHARS)
+        ));
+    }
+    for prefix in FIXED_PREFIXES {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let plain = rest.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '_' | '.' | ',' | '\'' | '[' | ']' | ' ' | '-')
+            });
+            if plain && rest.len() <= 200 {
+                return Some(line.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Where a line of the core's output came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Channel {
+    Stderr,
+    /// Output on stdout that was not protocol traffic.
+    StrayStdout,
+}
+
+impl Channel {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Stderr => "CORE",
+            Self::StrayStdout => "CORE-STDOUT",
+        }
+    }
+}
+
+/// One finished request to the core, as structured data.
+pub struct RunRecord<'a> {
+    pub request: &'a str,
+    pub duration_ms: u128,
+    /// `None` when the request succeeded, else the error code.
+    pub error: Option<&'static str>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
 }
 
 impl Diagnostics {
@@ -183,10 +555,9 @@ impl Diagnostics {
         }
     }
 
-    /// One Rust-side event or error.
+    /// One Rust-side event or error, for the local log file only: the export never carries it.
     pub fn log(&self, level: &str, source: &str, message: &str) {
         let line = format!("{} {level} {source} {}", timestamp(), self.scrub(message));
-        push_bounded(&self.events, line.clone(), EVENT_RING_LINES);
         self.append(&line);
     }
 
@@ -197,123 +568,196 @@ impl Diagnostics {
             source,
             &format!("{}{detail}: {}", error.code, error.message),
         );
-        // The code alone (no message text) is what the bundle lists, so it cannot carry free text.
+        // The code alone (no message text) is what the export lists, so it cannot carry free text.
         push_bounded(
             &self.errors,
-            format!("{} {} {}{detail}", timestamp(), clip(source), error.code),
+            format!(
+                "{} {} {}{detail}",
+                timestamp(),
+                identifier(source, 64),
+                error.code
+            ),
             ERROR_RING_LINES,
         );
     }
 
     /// A line the translation core wrote to stderr.
     pub fn core_stderr(&self, line: &str) {
-        let line = line.trim_end();
-        if line.is_empty() {
+        self.core_line(Channel::Stderr, line);
+    }
+
+    /// A stdout line of the core that was not protocol traffic.
+    pub fn core_stray_stdout(&self, line: &str) {
+        self.core_line(Channel::StrayStdout, line);
+    }
+
+    /// The complete line is redacted first, then classified; only a known shape is kept and the rest
+    /// is counted (H3).
+    pub fn core_line(&self, channel: Channel, line: &str) {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() {
             return;
         }
-        let kept = self.scrub(line);
-        push_bounded(&self.stderr, kept.clone(), STDERR_RING_LINES);
-        self.append(&format!("{} CORE {kept}", timestamp()));
+        let redacted = redact(line, lock(&self.home).as_deref());
+        let mut core = lock(&self.core);
+        match classify(&redacted) {
+            Some(kept) => {
+                let kept = clip(&kept);
+                self.write_omitted_marker(&mut core);
+                core.kept_total += 1;
+                if core.ring.len() == STDERR_RING_LINES {
+                    core.ring.pop_front();
+                }
+                core.ring.push_back(Entry::Kept(kept.clone()));
+                self.append(&format!("{} {} {kept}", timestamp(), channel.tag()));
+            }
+            None => Self::note_omitted(&mut core),
+        }
     }
 
-    pub fn crash(&self, message: &str) {
-        let record = format!("{} CRASH {}", timestamp(), self.scrub(message));
-        push_bounded(&self.events, record.clone(), EVENT_RING_LINES);
-        self.append(&record);
+    /// A line of the core's output that was dropped without being looked at (too long to be a
+    /// diagnostic line).
+    pub fn core_stderr_omitted(&self) {
+        Self::note_omitted(&mut lock(&self.core));
     }
 
-    /// Text for "copy diagnostics": versions, platform, recent events and the core's last stderr.
-    pub fn snapshot(&self) -> String {
-        let mut text = format!(
-            "PomiTranslate {} (build {}, {})\nplatform: {} {}\n\n-- recent events --\n",
-            env!("CARGO_PKG_VERSION"),
-            crate::BUILD_SHA,
-            crate::BUILD_DATE,
-            std::env::consts::OS,
-            std::env::consts::ARCH
+    fn note_omitted(core: &mut CoreOutput) {
+        core.omitted_total += 1;
+        core.pending_omitted += 1;
+        match core.ring.back_mut() {
+            Some(Entry::Omitted(count)) => *count += 1,
+            _ => {
+                if core.ring.len() == STDERR_RING_LINES {
+                    core.ring.pop_front();
+                }
+                core.ring.push_back(Entry::Omitted(1));
+            }
+        }
+    }
+
+    fn write_omitted_marker(&self, core: &mut CoreOutput) {
+        if core.pending_omitted > 0 {
+            let marker = Entry::Omitted(core.pending_omitted).render();
+            self.append(&format!("{} CORE {marker}", timestamp()));
+            core.pending_omitted = 0;
+        }
+    }
+
+    /// The core's output for this request ended: note the lines omitted since the last kept one.
+    pub fn end_core_output(&self) {
+        let mut core = lock(&self.core);
+        self.write_omitted_marker(&mut core);
+    }
+
+    /// A finished request, as structured fields.
+    pub fn core_run(&self, run: &RunRecord<'_>) {
+        let number = |value: Option<i32>| value.map_or("none".to_owned(), |v| v.to_string());
+        push_bounded(
+            &self.runs,
+            format!(
+                "{} request={} duration_ms={} result={} exit_code={} signal={}",
+                timestamp(),
+                identifier(run.request, 48),
+                run.duration_ms,
+                run.error.unwrap_or("ok"),
+                number(run.exit_code),
+                number(run.signal),
+            ),
+            RUN_RING_LINES,
         );
-        for line in lock(&self.events).iter() {
-            text.push_str(line);
-            text.push('\n');
-        }
-        text.push_str("\n-- translation core stderr (last lines) --\n");
-        for line in lock(&self.stderr).iter() {
-            text.push_str(line);
-            text.push('\n');
-        }
-        text
     }
 
-    /// The diagnostics bundle: what "copy diagnostics" shows plus the error codes with their times and
-    /// the tail of the rotated log. Everything is scrubbed again on the way out, so a line that
-    /// reached a log file before a redaction rule existed is still cleaned. No key, request, reply or
-    /// world text is ever collected here.
+    /// A panic: the full (redacted) record goes to the log file; the export only learns that it
+    /// happened and where in the shell's code.
+    pub fn crash(&self, location: &str, detail: &str) {
+        self.append(&format!(
+            "{} CRASH {}",
+            timestamp(),
+            self.scrub(&format!("panic at {location}: {detail}"))
+        ));
+        push_bounded(
+            &self.crashes,
+            format!("{} panic at {}", timestamp(), module_relative(location)),
+            CRASH_RING_LINES,
+        );
+    }
+
+    /// Text for "copy diagnostics": the same content as the exported bundle.
+    pub fn snapshot(&self) -> String {
+        self.bundle(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The diagnostics export. No key, request, reply, world text or message text is ever put
+    /// here: see the module comment for what it is made of.
     pub fn bundle(&self, app_version: &str) -> String {
         let mut text = format!(
-            "PomiTranslate diagnostics\ngenerated: {}\napp version: {app_version}\nbuild: {} ({})\nplatform: {} {}\n\n",
+            "PomiTranslate diagnostics\ngenerated: {}\napp version: {}\nbuild: {} ({})\nplatform: {} {}\n\n",
             timestamp(),
+            identifier(app_version, 40),
             crate::BUILD_SHA,
             crate::BUILD_DATE,
             std::env::consts::OS,
             std::env::consts::ARCH,
         );
-        text.push_str("-- error codes (newest last) --\n");
-        for line in lock(&self.errors).iter() {
-            text.push_str(line);
-            text.push('\n');
-        }
-        text.push_str("\n-- recent events --\n");
-        for line in lock(&self.events).iter() {
-            text.push_str(line);
-            text.push('\n');
-        }
-        text.push_str("\n-- translation core stderr (last 200 lines) --\n");
-        for line in lock(&self.stderr).iter() {
-            text.push_str(line);
-            text.push('\n');
-        }
-        text.push_str("\n-- log tail --\n");
-        for line in self.log_tail(LOG_TAIL_LINES) {
-            text.push_str(&self.scrub(&line));
-            text.push('\n');
-        }
-        text
-    }
-
-    /// The newest `count` lines across the live log and its rotated files.
-    fn log_tail(&self, count: usize) -> Vec<String> {
-        let Some(dir) = lock(&self.dir).clone() else {
-            return vec![];
-        };
-        let mut newest_first: Vec<String> = Vec::new();
-        let files = std::iter::once(dir.join(FILE_NAME))
-            .chain((1..KEEP_FILES).map(|n| dir.join(format!("{FILE_NAME}.{n}"))));
-        for path in files {
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            newest_first.extend(content.lines().rev().map(str::to_owned));
-            if newest_first.len() >= count {
-                break;
+        let section = |text: &mut String, title: &str, ring: &Mutex<VecDeque<String>>| {
+            text.push_str(&format!("-- {title} --\n"));
+            for line in lock(ring).iter() {
+                text.push_str(line);
+                text.push('\n');
             }
+            text.push('\n');
+        };
+        section(&mut text, "error codes (newest last)", &self.errors);
+        section(
+            &mut text,
+            "translation core requests (newest last)",
+            &self.runs,
+        );
+        section(&mut text, "crashes", &self.crashes);
+        let core = lock(&self.core);
+        text.push_str(&format!(
+            "-- translation core stderr (known diagnostic shapes only; last {STDERR_RING_LINES} entries) --\n"
+        ));
+        for entry in core.ring.iter() {
+            text.push_str(&entry.render());
+            text.push('\n');
         }
-        newest_first.truncate(count);
-        newest_first.reverse();
-        newest_first
+        text.push_str(&format!(
+            "\n-- counts --\ncore lines kept: {}\ncore lines omitted: {}\nerror records: {}\nrequests: {}\n",
+            core.kept_total,
+            core.omitted_total,
+            lock(&self.errors).len(),
+            lock(&self.runs).len(),
+        ));
+        text
     }
 
     #[cfg(test)]
     pub fn stderr_lines(&self) -> Vec<String> {
-        lock(&self.stderr).iter().cloned().collect()
+        lock(&self.core).ring.iter().map(Entry::render).collect()
     }
 
     #[cfg(test)]
     pub fn reset(&self) {
-        lock(&self.stderr).clear();
-        lock(&self.events).clear();
+        *lock(&self.core) = CoreOutput::default();
         lock(&self.errors).clear();
+        lock(&self.runs).clear();
+        lock(&self.crashes).clear();
         *lock(&self.dir) = None;
         *lock(&self.home) = None;
+    }
+
+    #[cfg(test)]
+    pub fn log_file_text(&self) -> String {
+        let Some(dir) = lock(&self.dir).clone() else {
+            return String::new();
+        };
+        let files = std::iter::once(dir.join(FILE_NAME))
+            .chain((1..KEEP_FILES).map(|n| dir.join(format!("{FILE_NAME}.{n}"))));
+        files
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -350,161 +794,17 @@ pub fn install_panic_hook() {
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic".into());
         let backtrace = Backtrace::force_capture().to_string().replace('\n', " | ");
-        global().crash(&format!("panic at {location}: {message} | {backtrace}"));
+        global().crash(&location, &format!("{message} | {backtrace}"));
         previous(info);
     }));
 }
 
+/// Test-only: tests that read the process-wide instance take turns.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn key_shaped_text_and_values_after_credential_words_are_redacted() {
-        let text = "request failed: Bearer abcDEF123456789 key sk-or-v1-0123456789abcdef0123 \
-                    AIzaSyA1234567890123456789012345 x-api-key: hunter2hunter2 \
-                    token=short 12345678901234567890abcdefghij";
-        let clean = redact(text, None);
-        for secret in [
-            "abcDEF123456789",
-            "sk-or-v1-0123456789abcdef0123",
-            "AIzaSyA1234567890123456789012345",
-            "hunter2hunter2",
-            "12345678901234567890abcdefghij",
-        ] {
-            assert!(!clean.contains(secret), "{secret} leaked: {clean}");
-        }
-        assert!(clean.contains("request failed"), "{clean}");
-        assert!(
-            clean.contains("token=short"),
-            "short values stay readable: {clean}"
-        );
-    }
-
-    #[test]
-    fn ordinary_words_numbers_and_the_home_folder_are_handled() {
-        let clean = redact(
-            "Scanning C:\\Users\\kim\\Worlds\\Roguefire: 12 files, region r.0.0.mca",
-            Some("C:\\Users\\kim"),
-        );
-        assert_eq!(
-            clean,
-            "Scanning ~\\Worlds\\Roguefire: 12 files, region r.0.0.mca"
-        );
-    }
-
-    #[test]
-    fn long_lines_are_clipped_and_newlines_flattened() {
-        let line = clip(&format!("a\nb{}", "x".repeat(5000)));
-        assert!(line.chars().count() <= MAX_LINE_CHARS + 1);
-        assert!(!line.contains('\n'));
-    }
-
-    #[test]
-    fn the_stderr_ring_keeps_only_the_last_lines_and_redacts() {
-        let diag = Diagnostics::default();
-        for n in 0..(STDERR_RING_LINES + 25) {
-            diag.core_stderr(&format!("line {n}"));
-        }
-        diag.core_stderr("provider said: Bearer sk-live-00112233445566778899");
-        let lines = diag.stderr_lines();
-        assert_eq!(lines.len(), STDERR_RING_LINES);
-        assert_eq!(lines[0], "line 26");
-        assert!(
-            !lines.last().unwrap().contains("sk-live"),
-            "{}",
-            lines.last().unwrap()
-        );
-        assert!(diag.snapshot().contains("line 30"));
-    }
-
-    #[test]
-    fn the_log_file_rotates_at_the_size_limit_and_keeps_five_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let diag = Diagnostics::default();
-        diag.set_dir(dir.path().to_path_buf());
-        let line = "x".repeat(1500);
-        for _ in 0..(MAX_FILE_BYTES as usize / 1500 * 7) {
-            diag.core_stderr(&line);
-        }
-        let mut names: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            [
-                "pomi-translate.log",
-                "pomi-translate.log.1",
-                "pomi-translate.log.2",
-                "pomi-translate.log.3",
-                "pomi-translate.log.4"
-            ]
-        );
-        for name in &names {
-            let size = fs::metadata(dir.path().join(name)).unwrap().len();
-            assert!(size <= MAX_FILE_BYTES + 2000, "{name} is {size} bytes");
-        }
-    }
-
-    #[test]
-    fn the_bundle_lists_error_codes_with_times_the_log_tail_and_no_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let diag = Diagnostics::default();
-        diag.set_dir(dir.path().to_path_buf());
-        diag.log_error(
-            "core:scan.start",
-            &IpcError::new(
-                "CORE_CRASHED",
-                "exit 3 while holding sk-abcdef0123456789abcdef",
-            ),
-        );
-        diag.core_stderr("Traceback: provider echoed Bearer sk-live-00112233445566778899");
-        // A line written to the file before a rule existed is cleaned when the bundle is made.
-        fs::write(
-            dir.path().join(FILE_NAME),
-            "2026-01-01T00:00:00Z INFO app token=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1\nsecond line\n",
-        )
-        .unwrap();
-        let bundle = diag.bundle("9.9.9");
-        assert!(bundle.contains("app version: 9.9.9"));
-        assert!(bundle.contains(&format!("build: {}", crate::BUILD_SHA)));
-        assert!(bundle.contains("platform: "));
-        assert!(bundle.contains("core:scan.start CORE_CRASHED"), "{bundle}");
-        assert!(bundle.contains("second line"));
-        assert!(bundle.contains("-- translation core stderr (last 200 lines) --"));
-        for secret in [
-            "sk-abcdef0123456789abcdef",
-            "sk-live-00112233445566778899",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1",
-        ] {
-            assert!(!bundle.contains(secret), "{secret} leaked:\n{bundle}");
-        }
-        // The error list carries codes and times, never the message text.
-        let errors = bundle.split("-- recent events --").next().unwrap();
-        assert!(!errors.contains("exit 3"), "{errors}");
-    }
-
-    #[test]
-    fn the_suggested_bundle_name_is_dated_text() {
-        let name = bundle_file_name();
-        assert!(
-            name.starts_with("pomi-diagnostics-") && name.ends_with(".txt"),
-            "{name}"
-        );
-        assert_eq!(name.len(), "pomi-diagnostics-20261023.txt".len());
-    }
-
-    #[test]
-    fn a_crash_record_lands_in_the_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let diag = Diagnostics::default();
-        diag.set_dir(dir.path().to_path_buf());
-        diag.crash("panic at lib.rs:1: boom with key sk-abcdef0123456789abcdef");
-        let log = fs::read_to_string(dir.path().join(FILE_NAME)).unwrap();
-        assert!(log.contains("CRASH") && log.contains("boom"));
-        assert!(!log.contains("sk-abcdef0123456789abcdef"));
-    }
+pub fn serial() -> MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    lock(&TURN)
 }
+
+#[cfg(test)]
+mod tests;

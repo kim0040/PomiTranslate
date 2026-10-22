@@ -154,6 +154,33 @@ fn main() {
             }
             reply(&id_of(&line), "{}");
         }
+        "unknown-event" => {
+            // Same-id messages that are not a valid terminal reply, before the real one (H4).
+            hello();
+            let line = read_request();
+            let id = id_of(&line);
+            out(&format!(r#"{{"v":1,"id":"{id}","type":"job.surprise","payload":{{"text":"WORLD-TEXT-IN-EVENT"}}}}"#));
+            out(&format!(r#"{{"v":1,"id":"{id}","type":"response.ok"}}"#));
+            out(&format!(r#"{{"v":2,"id":"{id}","type":"response.error","error":{{}}}}"#));
+            reply(&id, r#"{"done":true}"#);
+        }
+        "stderr-mix" => {
+            // Diagnostic lines of every kind on stderr, then a normal reply (H3).
+            hello();
+            let line = read_request();
+            let id = id_of(&line);
+            note("The villagers of Oakhaven gather at dawn to trade wheat.\n");
+            note("my custom key is Zq9xK2mP7vL4nR8tB3wY5cH1dF6gJ0aa\n");
+            note("Traceback (most recent call last):\n");
+            note("  File \"C:\\Users\\someone\\secret folder\\mwt\\scan.py\", line 12, in run\n");
+            note("    translate(\"WORLD-TEXT-IN-SOURCE\")\n");
+            note("ValueError: WORLD-TEXT-IN-MESSAGE\n");
+            note("[pomi] stage=scan files=3\n");
+            note("[pomi] part one sk-or-v1-ab");
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            note("cdef0123456789abcdef0123 end\n");
+            reply(&id, "{}");
+        }
         "idle-until-eof" => {
             // Stops only because its stdin ended.
             hello();
