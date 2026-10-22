@@ -53,7 +53,11 @@ test('menu commands open settings, open a world and focus search on review', asy
   expect(labels).toEqual({
     openWorld: '월드 열기…', settings: '설정…', find: '찾기…', help: 'PomiTranslate 도움말', tour: '시작 안내',
     shortcuts: '단축키', licenses: '오픈소스 라이선스', report: '문제 신고…', updates: '업데이트 확인…',
-    appearance: '화면 모드', themeSystem: '시스템', themeLight: '라이트', themeDark: '다크'
+    appearance: '화면 모드', themeSystem: '시스템', themeLight: '라이트', themeDark: '다크',
+    quitItem: 'PomiTranslate 종료', fileMenu: '파일', editMenu: '편집', viewMenu: '보기', windowMenu: '창', helpMenu: '도움말',
+    undo: '실행 취소', redo: '다시 실행', cut: '잘라내기', copy: '복사', paste: '붙여넣기', selectAll: '모두 선택',
+    minimize: '최소화', maximize: '확대/축소', closeWindow: '창 닫기', about: 'PomiTranslate 정보', services: '서비스',
+    hide: 'PomiTranslate 가리기', hideOthers: '기타 가리기', showAll: '모두 보기', fullscreen: '전체 화면 시작'
   });
 });
 

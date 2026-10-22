@@ -3,17 +3,19 @@
 use serde_json::{json, Value};
 use std::future::Future;
 
+use crate::error::{code, IpcError};
+
 pub struct CommitError {
     pub uncertain: bool,
+    /// The `VAULT_*` / `KEYCHAIN_*` reason when the credential store could not be used.
+    pub reason: Option<&'static str>,
 }
-impl From<String> for CommitError {
-    fn from(_: String) -> Self {
-        Self { uncertain: false }
-    }
-}
-impl From<&str> for CommitError {
-    fn from(_: &str) -> Self {
-        Self { uncertain: false }
+impl From<IpcError> for CommitError {
+    fn from(error: IpcError) -> Self {
+        Self {
+            uncertain: false,
+            reason: Some(error.code),
+        }
     }
 }
 
@@ -21,18 +23,18 @@ fn ok(message: &Value) -> bool {
     message.get("type").and_then(Value::as_str) == Some("response.ok")
 }
 
-fn settings(message: &Value) -> Result<Value, String> {
+fn settings(message: &Value) -> Result<Value, IpcError> {
     message
         .get("payload")
         .and_then(|p| p.get("settings"))
         .filter(|s| s.is_object())
         .cloned()
-        .ok_or_else(|| "Translation core returned invalid settings".into())
+        .ok_or_else(|| IpcError::new(code::CORE_PROTOCOL, "Translation core returned invalid settings"))
 }
 
 fn failure(id: &str, recovery_required: bool) -> Value {
     json!({"v": 1, "id": id, "type": "response.error", "error": {
-        "code": if recovery_required { "SETTINGS_RECONCILIATION_REQUIRED" } else { "CREDENTIAL_SAVE_FAILED" },
+        "code": if recovery_required { code::SETTINGS_RECONCILIATION_REQUIRED } else { code::CREDENTIAL_SAVE_FAILED },
         "message": if recovery_required {
             "Credential storage failed and preferences could not be restored. Reload current settings before translating."
         } else {
@@ -45,16 +47,16 @@ pub async fn save<T, Exchange, F, Commit>(
     request: Value,
     mut exchange: Exchange,
     commit: Commit,
-) -> Result<(Value, Option<T>), String>
+) -> Result<(Value, Option<T>), IpcError>
 where
     Exchange: FnMut(Value) -> F,
-    F: Future<Output = Result<Value, String>>,
+    F: Future<Output = Result<Value, IpcError>>,
     Commit: FnOnce() -> Result<T, CommitError>,
 {
     let id = request
         .get("id")
         .and_then(Value::as_str)
-        .ok_or("Missing request id")?
+        .ok_or_else(|| IpcError::new(code::INVALID_REQUEST, "Missing request id"))?
         .to_owned();
     let snapshot = exchange(
         json!({"v":1, "id":format!("{id}-snapshot"), "type":"settings.get",
@@ -62,7 +64,8 @@ where
     )
     .await?;
     if !ok(&snapshot) {
-        return Err("Could not read previous settings; nothing was saved".into());
+        // Nothing was saved; the core's own error (with its code) is the answer.
+        return Ok((snapshot, None));
     }
     let previous = settings(&snapshot)?;
     let response = match exchange(request).await {
@@ -90,8 +93,14 @@ where
                 recovered.is_ok_and(|r| ok(&r) && settings(&r).ok().as_ref() == Some(&previous));
             let mut response = failure(&id, !restored);
             if error.uncertain {
-                response["error"]["code"] = json!("CREDENTIAL_SAVE_UNCERTAIN");
+                response["error"]["code"] = json!(code::CREDENTIAL_SAVE_UNCERTAIN);
                 response["error"]["message"] = json!("OS credential recovery could not be verified. Re-enter or delete the API key before translating.");
+            } else if restored {
+                if let Some(reason) = error.reason {
+                    // Say why the store refused: the page offers the matching next step.
+                    response["error"]["code"] = json!(code::CREDENTIAL_UNAVAILABLE);
+                    response["error"]["detail"] = json!(reason);
+                }
             }
             Ok((response, None))
         }
@@ -109,7 +118,7 @@ mod tests {
     fn request() -> Value {
         json!({"v":1,"id":"save","type":"settings.set","payload":{"provider":"openrouter"}})
     }
-    fn run(replies: Vec<Result<Value, String>>, commit_ok: bool) -> (Value, Vec<Value>, bool) {
+    fn run(replies: Vec<Result<Value, IpcError>>, commit_ok: bool) -> (Value, Vec<Value>, bool) {
         let replies = RefCell::new(VecDeque::from(replies));
         let requests = RefCell::new(Vec::new());
         let committed = RefCell::new(false);
@@ -129,7 +138,7 @@ mod tests {
                 if commit_ok {
                     Ok(())
                 } else {
-                    Err("fixture vault failure".into())
+                    Err(CommitError { uncertain: false, reason: None })
                 }
             },
         ))
@@ -174,7 +183,7 @@ mod tests {
     #[test]
     fn failed_or_mismatched_recovery_requires_reconciliation() {
         for reply in [
-            Err("fixture closed".into()),
+            Err(IpcError::new("CORE_STOPPED", "fixture closed")),
             Ok(json!({"type":"response.error"})),
             Ok(response(json!({"model":"unexpected"}))),
         ] {
@@ -203,7 +212,7 @@ mod tests {
         assert!(!committed);
         assert_eq!(requests.len(), 2);
         let (r, _, committed) = run(
-            vec![Ok(response(json!({}))), Err("lost reply".into())],
+            vec![Ok(response(json!({}))), Err(IpcError::new("CORE_STOPPED", "lost reply"))],
             true,
         );
         assert_eq!(r["error"]["code"], "SETTINGS_RECONCILIATION_REQUIRED");
@@ -220,7 +229,7 @@ mod tests {
         let (result, _) = tauri::async_runtime::block_on(save::<(), _, _, _>(
             request(),
             |_| std::future::ready(replies.borrow_mut().pop_front().unwrap()),
-            || Err(CommitError { uncertain: true }),
+            || Err(CommitError { uncertain: true, reason: None }),
         ))
         .unwrap();
         assert_eq!(result["error"]["code"], "CREDENTIAL_SAVE_UNCERTAIN");

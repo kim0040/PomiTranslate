@@ -71,6 +71,9 @@
             <Icon name="download" size={14} /> {t('settings.update.install')}
           </button>
         {/if}
+        {#if app.updateState === 'installing'}
+          <button type="button" class="btn btn-secondary" onclick={() => app.cancelUpdateDownload()}>{t('settings.update.cancel')}</button>
+        {/if}
         <button type="button" class="btn btn-secondary" onclick={openRelease}>{t('settings.update.download')}</button>
         {#if app.update.version !== app.prefs.update_skipped_version}
           <button type="button" class="btn btn-quiet" onclick={() => app.skipUpdate()}>{t('settings.update.skip')}</button>
@@ -98,6 +101,10 @@
   {:else}
     <p class="hint">{t('settings.data.preview')}</p>
   {/if}
+  <div class="diagnostics">
+    <button type="button" class="btn btn-secondary" onclick={() => app.copyDiagnostics()}>{t('diagnostics.copy')}</button>
+    <p class="hint">{t('diagnostics.help')}</p>
+  </div>
 </section>
 
 <section class="card settings-section maintenance danger-zone" aria-labelledby="reset-title">
@@ -129,6 +136,7 @@
   .check strong { font-size: var(--text-sm); }
   .check small { color: var(--text-secondary); font-size: var(--text-xs); }
   .paths { margin: 0; display: grid; gap: var(--space-2); }
+  .diagnostics { display: grid; gap: var(--space-2); justify-items: start; }
   .paths > div { display: grid; grid-template-columns: minmax(140px, 0.6fr) minmax(0, 2fr); gap: var(--space-3); align-items: baseline; }
   .paths dt { color: var(--text-secondary); font-size: var(--text-sm); }
   .paths dd { margin: 0; font-size: var(--text-xs); overflow-wrap: anywhere; }

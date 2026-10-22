@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const { backend, listen } = vi.hoisted(() => ({ backend: vi.fn(), listen: vi.fn() }));
 vi.mock('../../src/lib/api', async () => ({
   ...await vi.importActual<typeof import('../../src/lib/api')>('../../src/lib/api'),
-  callBackend: backend, onProgress: listen, onCloseBlocked: listen, onZoomFailed: listen
+  callBackend: backend, onProgress: listen, onZoomFailed: listen
+}));
+vi.mock('../../src/lib/native', async () => ({
+  ...await vi.importActual<typeof import('../../src/lib/native')>('../../src/lib/native'),
+  onExitConfirm: listen, onExitWaiting: listen, onExitStuck: listen, onOpenWorld: listen
 }));
 import { AppState, defaultSettings } from '../../src/lib/app.svelte';
 import { BackendError } from '../../src/lib/api';
@@ -77,7 +81,8 @@ describe('startup recovery', () => {
     expect(app.banner).toBeNull();
     expect(app.ready).toBe(true);
     expect(backend).toHaveBeenCalledTimes(2);
-    expect(listen).toHaveBeenCalledTimes(3);
+    // progress, zoom failure, the three exit events and a second launch's world folder
+    expect(listen).toHaveBeenCalledTimes(6);
     app.destroy();
   });
 
@@ -104,6 +109,6 @@ describe('startup recovery', () => {
     app.destroy();
     resolve(stop);
     await Promise.resolve();
-    expect(stop).toHaveBeenCalledTimes(3);
+    expect(stop).toHaveBeenCalledTimes(6);
   });
 });

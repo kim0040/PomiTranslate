@@ -3,6 +3,10 @@ import { listen } from '@tauri-apps/api/event';
 
 export type CredentialMode = 'local' | 'session' | 'keychain';
 export type CredentialStatus = { mode: CredentialMode; stored: boolean };
+/** Why the credential store cannot be used right now. "Unavailable" is never the same as "empty". */
+export type CredentialStoreError = 'VAULT_PERMISSIONS' | 'VAULT_SCHEMA' | 'VAULT_CORRUPT' | 'VAULT_IO' | 'VAULT_KEY_MISSING' | 'VAULT_LOCKED';
+/** What the shell knows about the key store. `mode` is the configured one and survives an error. */
+export type CredentialState = { mode?: CredentialMode; stored?: boolean; error?: CredentialStoreError };
 
 export type Provider = 'openai' | 'gemini' | 'anthropic' | 'openrouter' | 'comet' | 'custom';
 export type Locale = 'ko' | 'en' | 'ja';
@@ -199,6 +203,7 @@ export type BootstrapPayload = {
   prefs?: AppPrefs;
   apiKeyStored: boolean;
   credentialMode?: CredentialMode;
+  credentialState?: CredentialState;
   worlds: RecentWorld[];
   worldInspection: WorldInspection | null;
   backups: BackupSummary[];
@@ -243,11 +248,34 @@ export type ProgressEvent = {
 
 export class BackendError extends Error {
   code: string;
-  constructor(message: string, code = '') {
+  /** A second code that says why (for example the VAULT_* reason behind CREDENTIAL_UNAVAILABLE). */
+  detail: string;
+  /** "shell" for errors made by the desktop shell: their English text is never shown to people. */
+  origin: 'shell' | 'core';
+  constructor(message: string, code = '', detail = '', origin: 'shell' | 'core' = 'core') {
     super(message);
     this.name = 'BackendError';
     this.code = code;
+    this.detail = detail;
+    this.origin = origin;
   }
+}
+
+/**
+ * Turn what a rejected shell command carries into a BackendError. The shell sends `{code, message,
+ * detail?}`; only the code is trusted for behaviour. A plain string (an older shell, or a failure of
+ * the bridge itself) becomes TRANSPORT.
+ */
+export function fromShellError(cause: unknown): BackendError {
+  if (cause instanceof BackendError) return cause;
+  if (cause && typeof cause === 'object' && typeof (cause as { code?: unknown }).code === 'string') {
+    const { code, message, detail } = cause as { code: string; message?: unknown; detail?: unknown };
+    return new BackendError(typeof message === 'string' ? message : code, code, typeof detail === 'string' ? detail : '', 'shell');
+  }
+  const text = cause instanceof Error ? cause.message : String(cause);
+  // A bare code (the start-up deadlines of an older shell) still maps to itself.
+  const bare = /^[A-Z][A-Z0-9_]{2,}$/.test(text) ? text : 'TRANSPORT';
+  return new BackendError(text, bare, '', 'shell');
 }
 
 type BackendResponse<T> = {
@@ -255,8 +283,10 @@ type BackendResponse<T> = {
   id: string;
   type: 'response.ok' | 'response.error';
   payload?: T;
-  error?: { code?: string; message?: string; details?: unknown };
+  error?: { code?: string; message?: string; detail?: string; details?: unknown };
 };
+
+const SHELL_RESPONSE_CODES = ['CREDENTIAL_UNAVAILABLE', 'CREDENTIAL_SAVE_FAILED', 'CREDENTIAL_SAVE_UNCERTAIN', 'SETTINGS_RECONCILIATION_REQUIRED'];
 
 let serial = 0;
 // The Rust shell owns one sidecar process at a time. Keep short read requests (candidate paging,
@@ -272,16 +302,16 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
     try {
       response = await invoke<BackendResponse<T>>('sidecar_request', { request: { v: 1, id, type, payload } });
     } catch (cause) {
-      // Rust reports transport and shell failures as text. The queue prevents normal UI requests
-      // from reaching its single-process BUSY guard.
-      const text = cause instanceof Error ? cause.message : String(cause);
-      const code = ['CORE_HANDSHAKE_TIMEOUT', 'BOOTSTRAP_TIMEOUT'].includes(text)
-        ? text : /still running/i.test(text) ? 'BUSY' : 'TRANSPORT';
-      throw new BackendError(text, code);
+      // The shell rejects with a stable code. The queue prevents normal UI requests from reaching
+      // its single-operation BUSY guard.
+      throw fromShellError(cause);
     }
     if (response.id !== id) throw new BackendError('The translation core answered a different request.', 'TRANSPORT');
     if (response.type === 'response.error') {
-      throw new BackendError(response.error?.message || response.error?.code || 'Translation core error', response.error?.code || '');
+      const code = response.error?.code || '';
+      // These four are made by the shell itself, so their English text is never shown.
+      const origin = SHELL_RESPONSE_CODES.includes(code) ? 'shell' : 'core';
+      throw new BackendError(response.error?.message || code || 'Translation core error', code, response.error?.detail || '', origin);
     }
     if (response.type !== 'response.ok' || !response.payload) {
       throw new BackendError('The translation core response was incomplete.', 'TRANSPORT');
@@ -294,20 +324,44 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
   return result;
 }
 
+/** Call a shell command and surface a failure as a BackendError with its stable code. */
+async function shell<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (cause) {
+    throw fromShellError(cause);
+  }
+}
+
 export async function cancelBackend(): Promise<boolean> {
-  return invoke<boolean>('cancel_active');
+  return shell<boolean>('cancel_active');
 }
 
-export async function credentialStatus(provider: string): Promise<CredentialStatus> {
-  return invoke<CredentialStatus>('credential_status', { provider });
+export async function credentialStatus(provider: string): Promise<CredentialState> {
+  return shell<CredentialState>('credential_status', { provider });
 }
 
-export async function importCredential(provider: string): Promise<CredentialStatus> {
-  return invoke<CredentialStatus>('credential_import', { provider });
+export async function importCredential(provider: string, endpoint?: string): Promise<CredentialStatus> {
+  return shell<CredentialStatus>('credential_import', { provider, endpoint: endpoint || null });
+}
+
+/** Set a damaged credential store aside and start an empty one. Keys saved in it are gone. */
+export async function resetCredentialStorage(): Promise<void> {
+  await shell<void>('credential_reset_storage');
+}
+
+/** The shell's half of "reset the app": saved keys (when asked) and the run reports. */
+export async function nativeReset(deleteKeys: boolean): Promise<void> {
+  await shell<void>('native_reset', { deleteKeys });
+}
+
+/** Versions, platform, recent events and the core's last output, with secrets and paths removed. */
+export async function diagnosticsSnapshot(): Promise<string> {
+  return shell<string>('diagnostics_snapshot');
 }
 
 export async function operationActive(): Promise<boolean> {
-  return invoke<boolean>('operation_active');
+  return shell<boolean>('operation_active');
 }
 
 type Unsubscribe = () => void;
@@ -317,11 +371,6 @@ export async function onProgress(handler: (event: ProgressEvent) => void): Promi
   return listen<{ payload?: ProgressEvent }>('pomi-progress', ({ payload }) => {
     if (payload?.payload) handler(payload.payload);
   });
-}
-
-/** Sent by the shell when the window's close button is pressed during an operation. */
-export async function onCloseBlocked(handler: () => void): Promise<Unsubscribe> {
-  return listen('pomi-close-blocked', () => handler());
 }
 
 export async function onZoomFailed(handler: () => void): Promise<Unsubscribe> {

@@ -5,7 +5,11 @@ import {
   callBackend,
   cancelBackend,
   type CredentialMode,
-  onCloseBlocked,
+  type CredentialState,
+  type CredentialStoreError,
+  diagnosticsSnapshot,
+  nativeReset,
+  resetCredentialStorage,
   onZoomFailed,
   onProgress,
   type BackupSummary,
@@ -22,7 +26,10 @@ import {
   type AppPrefs,
   type WorldInspection
 } from './api';
-import { checkForUpdate, installUpdate, onUpdateProgress, openExternal, type MenuAction, type UpdateInfo } from './native';
+import {
+  cancelUpdate, checkForUpdate, confirmExit, forceExit, installUpdate, onExitConfirm, onExitStuck, onExitWaiting,
+  onOpenWorld, onUpdateProgress, openExternal, type MenuAction, type UpdateInfo
+} from './native';
 import { resourcePackOptions } from './resource-pack';
 import { CandidateSource } from './candidates.svelte';
 import { hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
@@ -90,6 +97,13 @@ export class AppState {
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
+  /**
+   * The question the shell asked when the window was closed or Quit was chosen: a running job, unsaved
+   * settings, or both. `waiting` follows "cancel and quit"; `stuck` means the job did not stop in time.
+   */
+  exitPrompt = $state<{ job: boolean; dirty: boolean; phase: 'ask' | 'waiting' | 'stuck' } | null>(null);
+  /** Set by the settings screen: saves its draft and says whether that worked. */
+  saveDraft: (() => Promise<boolean>) | null = null;
   /** A move away from settings that waits until the user saves or drops the changes there. */
   pendingLeave = $state<(() => void) | null>(null);
   /** The workflow step that sent the user to settings, so settings can offer the way back. */
@@ -98,6 +112,8 @@ export class AppState {
   settings = $state<Settings>(defaultSettings());
   apiKeyStored = $state(false);
   credentialMode = $state<CredentialMode>('local');
+  /** Why the key store cannot be used, when it cannot. Saved keys may still be there. */
+  credentialStoreError = $state<CredentialStoreError | null>(null);
   settingsRecoveryRequired = $state(false);
   credentialRecovery = new SvelteSet<string>();
   private settingsRecoveryRevision = 0;
@@ -220,10 +236,34 @@ export class AppState {
     if (cause instanceof BackendError) {
       const key = `error.${cause.code}`;
       if (cause.code === 'BUSY') return t('error.busy');
-      if (hasMessage(key)) return t(key as MessageKey);
+      if (hasMessage(key)) {
+        // A storage failure also says which step repairs it.
+        const why = cause.detail ? `error.${cause.detail}` : '';
+        return why && hasMessage(why) ? `${t(key as MessageKey)} ${t(why as MessageKey)}` : t(key as MessageKey);
+      }
+      // The shell's own English text is for the log, not for people.
+      if (cause.origin === 'shell') return `${t('error.default')} ${t('error.copyDiagnostics')}`;
       return cause.message || t('error.default');
     }
-    return cause instanceof Error ? cause.message : t('error.default');
+    // Anything else that reached here was not made by the core: say so plainly, and keep the detail
+    // for the diagnostics copy rather than showing raw English.
+    return `${t('error.default')} ${t('error.copyDiagnostics')}`;
+  }
+
+  /** Put the shell's diagnostics (versions, recent events, the core's last output) on the clipboard. */
+  async copyDiagnostics(): Promise<void> {
+    try {
+      const text = await diagnosticsSnapshot();
+      await navigator.clipboard.writeText(text);
+      this.notify(t('diagnostics.copied'), 'success');
+    } catch {
+      this.notify(t('diagnostics.copyFailed'), 'error');
+    }
+  }
+
+  /** Record what the shell reported about the key store. */
+  private applyCredentialState(state: CredentialState | undefined): void {
+    this.credentialStoreError = state?.error ?? null;
   }
 
   fail(cause: unknown): void {
@@ -243,7 +283,10 @@ export class AppState {
       // A stalled event subscription must not prevent the initial backend request.
       for (const listening of [
         onProgress((event) => this.handleProgress(event)),
-        onCloseBlocked(() => { this.notify(t('app.closeBlocked'), 'info', 10000); }),
+        onExitConfirm((prompt) => { this.exitPrompt = { ...prompt, phase: 'ask' }; }),
+        onExitWaiting(() => { this.exitPrompt = { job: true, dirty: false, ...this.exitPrompt, phase: 'waiting' }; }),
+        onExitStuck(() => { this.exitPrompt = { job: true, dirty: false, ...this.exitPrompt, phase: 'stuck' }; }),
+        onOpenWorld((path) => { void this.openDropped(path); }),
         onZoomFailed(() => { this.notify(t('app.zoomFailed'), 'error'); })
       ]) {
         void listening.then((stop) => {
@@ -268,7 +311,8 @@ export class AppState {
       this.settings.scan_options = normalizedScanOptions(boot.settings.scan_options);
       setLocale(this.locale);
       this.apiKeyStored = boot.apiKeyStored;
-      this.credentialMode = boot.credentialMode ?? 'local';
+      this.credentialMode = boot.credentialMode ?? this.credentialMode;
+      this.applyCredentialState(boot.credentialState);
       this.recent = boot.worlds;
       this.worldDir = boot.settings.last_world_dir || '';
       this.inspection = boot.worldInspection;
@@ -419,18 +463,78 @@ export class AppState {
    */
   async resetApp(clearKeys: boolean): Promise<boolean> {
     if (this.isBusy) return false;
+    // The shell's half goes first (saved keys when asked, then the run reports). If it fails, the
+    // core's data is untouched and nothing was half reset; if the core's half fails afterwards, the
+    // message says that the keys are already gone.
+    let nativeDone = false;
     try {
+      await nativeReset(clearKeys);
+      nativeDone = true;
       await callBackend('app.reset', { confirm: 'reset' });
-      if (clearKeys) for (const provider of PROVIDERS) await callBackend('credentials.delete', { provider });
       try {
         localStorage.removeItem(NOTICE_KEY);
         localStorage.removeItem('pomi.theme.v1');
       } catch { /* nothing cached */ }
       return true;
     } catch (cause) {
+      const partial = nativeDone ? ` ${t(clearKeys ? 'reset.partialKeys' : 'reset.partial')}` : '';
+      this.banner = { tone: 'error', message: `${this.describe(cause)}${partial}` };
+      return false;
+    }
+  }
+
+  /** Set a damaged key store aside and start an empty one. */
+  async resetKeyStorage(): Promise<boolean> {
+    if (this.isBusy) return false;
+    try {
+      await resetCredentialStorage();
+      this.credentialStoreError = null;
+      this.apiKeyStored = false;
+      this.credentialRecovery.clear();
+      this.notify(t('credential.reset.done'), 'success');
+      return true;
+    } catch (cause) {
       this.fail(cause);
       return false;
     }
+  }
+
+  // --- leaving the app ---------------------------------------------------------------------
+
+  /** Stay: dismiss the question. */
+  exitStay(): void {
+    this.exitPrompt = null;
+  }
+
+  /** Quit. The shell cancels a running job first and quits when it has stopped. */
+  async exitQuit(): Promise<void> {
+    try {
+      await confirmExit();
+    } catch (cause) {
+      this.exitPrompt = null;
+      this.fail(cause);
+    }
+  }
+
+  /** Save the settings draft, then quit. A failed save keeps the app open. */
+  async exitSaveAndQuit(): Promise<void> {
+    const saved = this.saveDraft ? await this.saveDraft() : false;
+    if (saved) await this.exitQuit();
+    else this.notify(t('exit.saveFailed'), 'error', 8000);
+  }
+
+  /** "Quit now": the job did not stop, so the shell ends the core. */
+  async exitNow(): Promise<void> {
+    try {
+      await forceExit();
+    } catch (cause) {
+      this.exitPrompt = null;
+      this.fail(cause);
+    }
+  }
+
+  async cancelUpdateDownload(): Promise<void> {
+    await cancelUpdate();
   }
 
   // --- navigation --------------------------------------------------------------------------
@@ -810,7 +914,7 @@ export class AppState {
   async persistSettings(apiKey = ''): Promise<void> {
     const s = this.settings;
     if (this.credentialRecovery.has(s.provider) && !apiKey) throw new BackendError('', 'CREDENTIAL_SAVE_UNCERTAIN');
-    let saved: { settings: Settings; apiKeyStored: boolean; credentialMode: CredentialMode };
+    let saved: { settings: Settings; apiKeyStored: boolean; credentialMode?: CredentialMode; credentialState?: CredentialState };
     try {
       saved = await callBackend('settings.set', {
         worldDir: this.worldDir,
@@ -852,6 +956,7 @@ export class AppState {
     this.settings.scan_options = normalizedScanOptions(saved.settings.scan_options);
     this.apiKeyStored = saved.apiKeyStored;
     this.credentialMode = saved.credentialMode ?? this.credentialMode;
+    this.applyCredentialState(saved.credentialState);
     this.settingsRecoveryRequired = false;
     this.credentialRecovery.delete(s.provider);
   }
@@ -863,11 +968,12 @@ export class AppState {
     this.resetJob();
     if (this.worldDir) this.step = 'scan';
     try {
-      const saved = await callBackend<{ settings: Settings; apiKeyStored: boolean; credentialMode: CredentialMode }>('settings.get');
+      const saved = await callBackend<{ settings: Settings; apiKeyStored: boolean; credentialMode?: CredentialMode; credentialState?: CredentialState }>('settings.get');
       this.settings = { ...defaultSettings(), ...saved.settings };
       this.settings.scan_options = normalizedScanOptions(saved.settings.scan_options);
       this.apiKeyStored = saved.apiKeyStored;
-      this.credentialMode = saved.credentialMode ?? 'local';
+      this.credentialMode = saved.credentialMode ?? this.credentialMode;
+      this.applyCredentialState(saved.credentialState);
       setLocale(this.locale);
       this.settingsRecoveryRequired = false;
     } catch {

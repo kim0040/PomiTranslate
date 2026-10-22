@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime, Url};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::error::{code, IpcError};
+
 const HOSTS: &[&str] = &[
     "github.com",
     "www.minecraft.net",
@@ -35,13 +37,16 @@ pub fn allowed(url: &str) -> bool {
 }
 
 #[tauri::command]
-pub fn open_external<R: Runtime>(app: AppHandle<R>, url: String) -> Result<(), String> {
+pub fn open_external<R: Runtime>(app: AppHandle<R>, url: String) -> Result<(), IpcError> {
     if !allowed(&url) {
-        return Err("This address is not opened by PomiTranslate".into());
+        return Err(IpcError::new(
+            code::LINK_NOT_ALLOWED,
+            "This address is not opened by PomiTranslate",
+        ));
     }
     app.opener()
         .open_url(url, None::<&str>)
-        .map_err(|_| "The link could not be opened".into())
+        .map_err(|_| IpcError::new(code::LINK_OPEN_FAILED, "The link could not be opened"))
 }
 
 #[derive(serde::Serialize)]
@@ -53,17 +58,18 @@ pub struct DataLocations {
     pub app: String,
 }
 
-fn locations<R: Runtime>(app: &AppHandle<R>) -> Result<(PathBuf, PathBuf), String> {
+fn locations<R: Runtime>(app: &AppHandle<R>) -> Result<(PathBuf, PathBuf), IpcError> {
     let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|_| "Application data directory is unavailable")?;
-    let data = crate::sidecar_paths::core_data_dir(&app_data, &app.config().identifier)?;
+        .map_err(|_| IpcError::new(code::INTERNAL, "Application data directory is unavailable"))?;
+    let data = crate::sidecar_paths::core_data_dir(&app_data, &app.config().identifier)
+        .map_err(|message| IpcError::new(code::INTERNAL, message))?;
     Ok((data, app_data))
 }
 
 #[tauri::command]
-pub fn data_locations<R: Runtime>(app: AppHandle<R>) -> Result<DataLocations, String> {
+pub fn data_locations<R: Runtime>(app: AppHandle<R>) -> Result<DataLocations, IpcError> {
     let (data, app_data) = locations(&app)?;
     Ok(DataLocations {
         data: data.to_string_lossy().into_owned(),
@@ -73,12 +79,13 @@ pub fn data_locations<R: Runtime>(app: AppHandle<R>) -> Result<DataLocations, St
 
 /// Show the data folder in Finder or Explorer, creating it if this is the first launch.
 #[tauri::command]
-pub fn reveal_data_folder<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub fn reveal_data_folder<R: Runtime>(app: AppHandle<R>) -> Result<(), IpcError> {
     let (data, _) = locations(&app)?;
-    std::fs::create_dir_all(&data).map_err(|_| "The data folder could not be created")?;
+    let failed = |message: &str| IpcError::new(code::FOLDER_OPEN_FAILED, message.to_owned());
+    std::fs::create_dir_all(&data).map_err(|_| failed("The data folder could not be created"))?;
     app.opener()
         .open_path(data.to_string_lossy(), None::<&str>)
-        .map_err(|_| "The data folder could not be opened".into())
+        .map_err(|_| failed("The data folder could not be opened"))
 }
 
 #[cfg(test)]
