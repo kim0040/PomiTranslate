@@ -1,6 +1,17 @@
 const STORAGE_KEY = "mc-world-translator-ui-v2";
 const ACTIVE_JOB_KEY = "mc-world-translator-active-job";
 
+// The server puts a per-launch token in the page; every API call has to send it back.
+function sessionToken() {
+  const meta = document.querySelector('meta[name="pomi-session-token"]');
+  return meta ? meta.content : "";
+}
+
+function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}), "X-Pomi-Token": sessionToken() };
+  return fetch(url, { ...options, headers });
+}
+
 const FALLBACK_META = {
   providers: [
     { id: "openai", label: "OpenAI", default_base_url: "https://api.openai.com/v1", env_var: "OPENAI_API_KEY" },
@@ -60,9 +71,9 @@ const I18N = {
     fieldWorldDir: "월드 폴더 경로",
     helpWorldDir: "region, entities, resources.zip 등이 포함된 마인크래프트 월드 폴더를 지정합니다.",
     fieldReportPath: "결과 리포트 저장 경로",
-    helpReportPath: "비워두면 월드 폴더 내 `translation_report.json`으로 저장됩니다.",
+    helpReportPath: "리포트는 서버가 자신의 데이터 폴더에 저장합니다(보안상 이 칸의 경로는 사용되지 않습니다).",
     fieldTranslatePy: "translate.py 경로",
-    helpTranslatePy: "기존 translate.py에서 설정된 API 키, URL, 모델, 시스템 프롬프트를 상속할 원본 파일입니다.",
+    helpTranslatePy: "서버 폴더의 translate.py에서 설정된 API 키, URL, 모델, 시스템 프롬프트를 상속합니다(이 칸의 경로는 사용되지 않습니다).",
     fieldInheritTranslatePy: "translate.py 설정 상속",
     helpInheritTranslatePy: "비어 있는 API 설정 항목을 translate.py 값으로 채웁니다.",
     fieldApiKey: "API 키",
@@ -161,7 +172,7 @@ const I18N = {
     fieldContinueOnError: "파일 오류 발생 시 계속 진행",
     helpContinueOnError: "손상된 파일이 있어도 해당 파일만 건너뛰고 나머지 정상 파일 번역을 계속합니다.",
     fieldCheckpointPath: "체크포인트 파일 경로",
-    helpCheckpointPath: "비워두면 월드 폴더 내 `.translation_checkpoint.json`으로 자동 저장됩니다.",
+    helpCheckpointPath: "체크포인트는 서버가 월드별로 자신의 데이터 폴더에 저장합니다(이 칸의 경로는 사용되지 않습니다).",
     fieldBatchRetries: "배치 실패 시 재시도 횟수",
     helpBatchRetries: "API 일시 오류 발생 시 요청을 재시도할 최대 횟수입니다.",
     fieldWriteRetries: "파일 저장 재시도 횟수",
@@ -342,9 +353,9 @@ const I18N = {
     fieldWorldDir: "World Folder Path",
     helpWorldDir: "Select the Minecraft world folder containing region, entities, and optional resources.zip.",
     fieldReportPath: "Report Output Path",
-    helpReportPath: "Leave blank to save as `translation_report.json` inside the world folder.",
+    helpReportPath: "The server saves reports in its own data folder (a path typed here is ignored for safety).",
     fieldTranslatePy: "translate.py Path",
-    helpTranslatePy: "Legacy script path used to inherit API keys, base URL, model, and prompt defaults.",
+    helpTranslatePy: "The translate.py next to the server is used to inherit API keys, base URL, model, and prompt defaults (a path typed here is ignored).",
     fieldInheritTranslatePy: "Inherit Settings from translate.py",
     helpInheritTranslatePy: "Automatically populate empty API fields using values from translate.py.",
     fieldApiKey: "API Key",
@@ -443,7 +454,7 @@ const I18N = {
     fieldContinueOnError: "Continue on File Error",
     helpContinueOnError: "Skip problematic files and continue processing remaining valid files.",
     fieldCheckpointPath: "Checkpoint File Path",
-    helpCheckpointPath: "Leave blank to use `.translation_checkpoint.json` inside the world folder.",
+    helpCheckpointPath: "The server keeps one checkpoint per world in its own data folder (a path typed here is ignored).",
     fieldBatchRetries: "Batch Retry Limit",
     helpBatchRetries: "Number of retries on transient API failure before splitting batches.",
     fieldWriteRetries: "File Write Retry Limit",
@@ -624,9 +635,9 @@ const I18N = {
     fieldWorldDir: "ワールドフォルダーのパス",
     helpWorldDir: "region、entities、resources.zip を含むマインクラフトのワールドフォルダーを指定します。",
     fieldReportPath: "レポート出力先パス",
-    helpReportPath: "空欄の場合はワールド内の `translation_report.json` に保存されます。",
+    helpReportPath: "レポートはサーバーが自分のデータフォルダーに保存します(安全のため、ここに入力したパスは使われません)。",
     fieldTranslatePy: "translate.py のパス",
-    helpTranslatePy: "APIキー、Base URL、モデル、プロンプト設定を継承する既存スクリプトのパスです。",
+    helpTranslatePy: "サーバーと同じフォルダーの translate.py からAPIキー、Base URL、モデル、プロンプト設定を継承します(ここに入力したパスは使われません)。",
     fieldInheritTranslatePy: "translate.py から設定を継承",
     helpInheritTranslatePy: "空欄のAPI設定項目を translate.py の値で自動補完します。",
     fieldApiKey: "APIキー",
@@ -725,7 +736,7 @@ const I18N = {
     fieldContinueOnError: "ファイルエラー発生時も処理を継続",
     helpContinueOnError: "破損ファイルがあってもそのファイルをスキップし、残りの正常なファイルの処理を続けます。",
     fieldCheckpointPath: "チェックポイント保存先",
-    helpCheckpointPath: "空欄の場合はワールド内の `.translation_checkpoint.json` に保存されます。",
+    helpCheckpointPath: "チェックポイントはサーバーがワールドごとに自分のデータフォルダーへ保存します(ここに入力したパスは使われません)。",
     fieldBatchRetries: "バッチ失敗時の再試行回数",
     helpBatchRetries: "APIの一時的なエラー時に再試行する最大回数です。",
     fieldWriteRetries: "ファイル書き込み再試行回数",
@@ -905,7 +916,7 @@ async function init() {
   applyTheme();
 
   try {
-    const response = await fetch("/api/meta");
+    const response = await apiFetch("/api/meta");
     if (!response.ok) {
       throw new Error(await response.text());
     }
@@ -1053,6 +1064,11 @@ function bindEvents() {
     persistDraft();
     updateBaseUrlHelp();
   });
+
+  // The server decides where reports and checkpoints go and which translate.py it reads.
+  for (const field of [dom.reportPath, dom.translatePyPath, dom.checkpointPath]) {
+    field.disabled = true;
+  }
 
   dom.loadModelsButton.addEventListener("click", loadModels);
   dom.improveStyleButton.addEventListener("click", improveStylePrompt);
@@ -1474,14 +1490,12 @@ function buildPayload(forceDryRun, resumeFromCheckpoint = false) {
 
   return {
     world_dir: draft.worldDir.trim(),
-    report_path: draft.reportPath.trim(),
     dry_run: Boolean(forceDryRun),
     backup: draft.backup,
     backup_suffix: draft.backupSuffix.trim(),
     batch_size: Number(draft.batchSize) || 40,
     temperature: Number(draft.temperature) || 0.3,
     inherit_translate_py: draft.inheritTranslatePy,
-    translate_py_path: draft.translatePyPath.trim(),
     api: {
       provider: draft.provider,
       api_key: draft.apiKey.trim(),
@@ -1520,7 +1534,6 @@ function buildPayload(forceDryRun, resumeFromCheckpoint = false) {
     },
     runtime: {
       checkpoint_enabled: draft.checkpointEnabled,
-      checkpoint_path: draft.checkpointPath.trim(),
       resume_from_checkpoint: resumeFromCheckpoint,
       continue_on_file_error: draft.continueOnFileError,
       max_batch_retries: Number(draft.maxBatchRetries) || 3,
@@ -1533,7 +1546,7 @@ async function loadModels() {
   dom.modelCatalogStatus.textContent = t("modelCatalogLoading");
   dom.loadModelsButton.disabled = true;
   try {
-    const response = await fetch("/api/models", {
+    const response = await apiFetch("/api/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: buildPayload(true) }),
@@ -1598,7 +1611,7 @@ async function improveStylePrompt() {
   dom.improveStyleButton.disabled = true;
   dom.styleAssistStatus.textContent = t("assistLoading");
   try {
-    const response = await fetch("/api/prompt-assist", {
+    const response = await apiFetch("/api/prompt-assist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: buildPayload(true), brief }),
@@ -1699,7 +1712,7 @@ async function resumeJob() {
 async function startJob({ forceDryRun, resumeFromCheckpoint, localEventKey }) {
   setRunButtonsDisabled(true);
   try {
-    const response = await fetch("/api/jobs", {
+    const response = await apiFetch("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: buildPayload(forceDryRun, resumeFromCheckpoint) }),
@@ -1729,7 +1742,7 @@ async function cancelJob() {
 
   dom.cancelButton.disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${state.activeJobId}/cancel`, {
+    const response = await apiFetch(`/api/jobs/${state.activeJobId}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -1766,7 +1779,7 @@ async function pollJob() {
   }
   state.pollInFlight = true;
   try {
-    const response = await fetch(`/api/jobs/${state.activeJobId}`);
+    const response = await apiFetch(`/api/jobs/${state.activeJobId}`);
     const data = await response.json();
     if (!response.ok) {
       throw new Error(data.error || "Polling failed");
@@ -1793,7 +1806,7 @@ async function recoverActiveJob() {
   if (!jobId) return;
 
   try {
-    const response = await fetch(`/api/jobs/${jobId}`);
+    const response = await apiFetch(`/api/jobs/${jobId}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Job recovery failed");
 
