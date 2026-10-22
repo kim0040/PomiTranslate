@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
+import ipaddress
 import json
 import mimetypes
+import re
+import secrets
 import threading
 import uuid
 import webbrowser
@@ -32,6 +37,28 @@ WEB_DIR = BASE_DIR / "webui"
 CONFIG_BASE_PATH = BASE_DIR / "config.example.toml"
 MAX_EVENTS = 400
 MAX_REQUEST_BODY_BYTES = 1_000_000
+MAX_JOB_HISTORY = 50
+TOKEN_HEADER = "X-Pomi-Token"
+TOKEN_META_NAME = "pomi-session-token"
+FINISHED_STATUSES = {"completed", "failed", "cancelled", "partial", "needs_retry"}
+SAFE_SUFFIX = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+
+
+def web_data_dir() -> Path:
+    """Where the web server keeps the reports and checkpoints it decides on itself."""
+    from mwt.userdata import user_data_dir
+
+    return user_data_dir() / "webui"
+
+
+def is_loopback_host(host: str) -> bool:
+    cleaned = host.strip().strip("[]").lower()
+    if cleaned == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(cleaned).is_loopback
+    except ValueError:
+        return False
 
 
 def now_iso() -> str:
@@ -122,15 +149,18 @@ def build_payload_config(payload: dict[str, Any]) -> dict[str, Any]:
     resource_pack = raw.get("resource_pack", {})
     runtime = raw.get("runtime", {})
 
+    # Where output goes is decided by the server (see JobManager.create_job). A path from the page is
+    # ignored: it would let any request overwrite or delete a file with the server's rights.
     config["world_dir"] = ensure_str(raw.get("world_dir"))
-    config["report_path"] = ensure_str(raw.get("report_path"))
+    config["report_path"] = ""
     config["dry_run"] = ensure_bool(raw.get("dry_run"), False)
     config["backup"] = ensure_bool(raw.get("backup"), True)
-    config["backup_suffix"] = ensure_str(raw.get("backup_suffix"), ".bak_translate") or ".bak_translate"
+    suffix = ensure_str(raw.get("backup_suffix"), ".bak_translate")
+    config["backup_suffix"] = suffix if SAFE_SUFFIX.match(suffix) else ".bak_translate"
     config["batch_size"] = max(1, ensure_int(raw.get("batch_size"), 40))
     config["temperature"] = ensure_float(raw.get("temperature"), 0.3)
     config["inherit_translate_py"] = ensure_bool(raw.get("inherit_translate_py"), True)
-    config["translate_py_path"] = ensure_str(raw.get("translate_py_path"), "./translate.py") or "./translate.py"
+    config["translate_py_path"] = DEFAULT_CONFIG["translate_py_path"]  # a page may not point it at another file
 
     provider = ensure_str(api.get("provider"), "comet").lower() or "comet"
     config["api"]["provider"] = provider
@@ -177,7 +207,7 @@ def build_payload_config(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     config["runtime"]["checkpoint_enabled"] = ensure_bool(runtime.get("checkpoint_enabled"), True)
-    config["runtime"]["checkpoint_path"] = ensure_str(runtime.get("checkpoint_path"))
+    config["runtime"]["checkpoint_path"] = ""
     config["runtime"]["resume_from_checkpoint"] = ensure_bool(runtime.get("resume_from_checkpoint"), False)
     config["runtime"]["continue_on_file_error"] = ensure_bool(runtime.get("continue_on_file_error"), True)
     config["runtime"]["max_batch_retries"] = max(1, ensure_int(runtime.get("max_batch_retries"), 3))
@@ -248,14 +278,8 @@ class JobManager:
             if not config["api"]["model"]:
                 raise ValueError("Model is missing. Set it in the UI or your defaults.")
 
-        from mwt.secrets import remember_api_key
-        from mwt.userdata import public_settings_from_config, remember_user_settings, user_data_dir
-
-        remember_user_settings(public_settings_from_config(config), root=user_data_dir())
-        if config["api"]["api_key"]:
-            remember_api_key(config["api"]["provider"], config["api"]["api_key"])
-
         job_id = uuid.uuid4().hex[:10]
+        config["report_path"], config["runtime"]["checkpoint_path"] = self.output_paths(job_id, config["world_dir"])
         job = {
             "id": job_id,
             "status": "queued",
@@ -283,6 +307,7 @@ class JobManager:
             "result": None,
             "can_resume": False,
             "_config": config,
+            "_world_dir": config["world_dir"],
             "_cancel_event": threading.Event(),
         }
 
@@ -292,6 +317,7 @@ class JobManager:
                 raise ValueError("A translation job is already running for this world directory.")
             self.jobs[job_id] = job
             self.active_world_dirs.add(world_dir)
+            self._trim_history()
 
         thread = threading.Thread(target=self._run_job, args=(job_id,), daemon=True)
         try:
@@ -301,7 +327,41 @@ class JobManager:
                 self.jobs.pop(job_id, None)
                 self.active_world_dirs.discard(config["world_dir"])
             raise
+        # Settings and the key are remembered only for a job that was accepted. A request that was
+        # refused (a duplicate world, a missing key) must not change what the next run starts from.
+        self._remember_settings(job_id, config)
         return self.public_job(job_id)
+
+    def output_paths(self, job_id: str, world_dir: str) -> tuple[str, str]:
+        """The report and checkpoint files of a job, inside the server's own data directory."""
+        base = web_data_dir()
+        (base / "reports").mkdir(parents=True, exist_ok=True)
+        (base / "checkpoints").mkdir(parents=True, exist_ok=True)
+        world_key = hashlib.sha256(str(Path(world_dir).resolve()).encode("utf-8")).hexdigest()[:16]
+        return (
+            str(base / "reports" / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{job_id}.json"),
+            str(base / "checkpoints" / f"{world_key}.json"),
+        )
+
+    def _remember_settings(self, job_id: str, config: dict[str, Any]) -> None:
+        from mwt.secrets import remember_api_key
+        from mwt.userdata import public_settings_from_config, remember_user_settings, user_data_dir
+
+        try:
+            remember_user_settings(public_settings_from_config(config), root=user_data_dir())
+            if config["api"]["api_key"]:
+                remember_api_key(config["api"]["provider"], config["api"]["api_key"])
+        except Exception as exc:  # a settings store problem must not undo a job that is already running
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job is not None:
+                    self._append_event(job, {"event": "settings_not_saved", "message": exc.__class__.__name__})
+
+    def _trim_history(self) -> None:
+        """Keep the newest finished jobs only; running jobs are never dropped. Caller holds the lock."""
+        finished = [job for job in self.jobs.values() if job["status"] in FINISHED_STATUSES]
+        for job in sorted(finished, key=lambda item: item["created_at"])[: max(0, len(finished) - MAX_JOB_HISTORY)]:
+            self.jobs.pop(job["id"], None)
 
     def public_job(self, job_id: str) -> dict[str, Any]:
         with self.lock:
@@ -322,8 +382,14 @@ class JobManager:
             return self._public_view(job)
 
     def list_jobs(self) -> list[dict[str, Any]]:
+        """Job overviews. Events and results are large and belong to a single job's own view."""
         with self.lock:
-            jobs = [self._public_view(job) for job in self.jobs.values()]
+            jobs = []
+            for job in self.jobs.values():
+                view = self._public_view(job)
+                view["events"] = []
+                view["result"] = None if job["result"] is None else {"status": job["result"].get("status")}
+                jobs.append(view)
         jobs.sort(key=lambda item: item["created_at"], reverse=True)
         return jobs
 
@@ -475,7 +541,10 @@ class JobManager:
             with self.lock:
                 job = self.jobs.get(job_id)
                 if job is not None:
-                    self.active_world_dirs.discard(job["_config"]["world_dir"])
+                    self.active_world_dirs.discard(job["_world_dir"])
+                    # The request config holds the API key; nothing needs it once the job is over.
+                    job["_config"] = None
+                    self._trim_history()
 
     def _fail_job(self, job_id: str, message: str, recoverable: bool = True) -> None:
         with self.lock:
@@ -500,8 +569,39 @@ class JobManager:
 JOB_MANAGER = JobManager()
 
 
+class AppServer(ThreadingHTTPServer):
+    """The HTTP server plus what every request is checked against: the launch token and the allowed hosts."""
+
+    daemon_threads = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        *,
+        allow_remote: bool = False,
+        token: str | None = None,
+        job_manager: JobManager | None = None,
+    ) -> None:
+        if not allow_remote and not is_loopback_host(address[0]):
+            raise ValueError(
+                f"Refusing to listen on {address[0]}: the web UI can start translations and write files with "
+                "your rights. Use a loopback address, or pass --allow-remote if you really mean to expose it."
+            )
+        super().__init__(address, AppHandler)
+        self.allow_remote = allow_remote
+        self.session_token = token or secrets.token_urlsafe(32)
+        self.job_manager = job_manager or JOB_MANAGER
+        port = self.server_address[1]
+        bound = address[0].strip("[]").lower()
+        names = {bound}
+        if is_loopback_host(bound):
+            names |= {"127.0.0.1", "localhost", "::1"}
+        self.allowed_hosts = {f"[{name}]:{port}" if ":" in name else f"{name}:{port}" for name in names}
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "MinecraftWorldTranslatorUI/1.0"
+    server: AppServer
 
     def do_GET(self) -> None:  # noqa: N802
         self.handle_request(send_body=True)
@@ -509,8 +609,46 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.handle_request(send_body=False)
 
+    def _refuse(self, status: HTTPStatus, message: str) -> bool:
+        self.send_error_json(status, message)
+        return False
+
+    def authorize(self, is_api: bool, *, post: bool) -> bool:
+        """Only the page this server itself served may use the API.
+
+        A web page in the user's browser can send requests to a local port. The Host check stops DNS
+        rebinding, Origin and Sec-Fetch-Site stop other sites, the token stops everything that did not
+        read it from our own page, and the content type stops "simple" cross-site form posts.
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host or (not self.server.allow_remote and host not in self.server.allowed_hosts):
+            return self._refuse(HTTPStatus.FORBIDDEN, "Unexpected Host header.")
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.strip().lower() != f"http://{host}":
+            return self._refuse(HTTPStatus.FORBIDDEN, "Cross-origin requests are not allowed.")
+        if not is_api:
+            return True
+        site = (self.headers.get("Sec-Fetch-Site") or "same-origin").lower()
+        if site not in {"same-origin", "none"}:
+            return self._refuse(HTTPStatus.FORBIDDEN, "Cross-site requests are not allowed.")
+        supplied = self.headers.get(TOKEN_HEADER) or ""
+        if not hmac.compare_digest(supplied.encode("utf-8"), self.server.session_token.encode("utf-8")):
+            return self._refuse(HTTPStatus.FORBIDDEN, "Missing or wrong session token. Reload the page.")
+        if post:
+            content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if content_type != "application/json":
+                return self._refuse(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Content-Type must be application/json.")
+        return True
+
     def handle_request(self, send_body: bool) -> None:
         parsed = urlparse(self.path)
+        if not self.authorize(parsed.path.startswith("/api/"), post=False):
+            return
+        job_manager = self.server.job_manager
+        if parsed.path == "/healthz":
+            # What run_web_ui.command asks to see whether a UI already runs on a port. No token, no data.
+            self.send_json({"ok": True, "app": "pomitranslate-webui"}, send_body=send_body)
+            return
         if parsed.path == "/api/meta":
             self.send_json(
                 {
@@ -539,13 +677,13 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/jobs":
-            self.send_json({"jobs": JOB_MANAGER.list_jobs()}, send_body=send_body)
+            self.send_json({"jobs": job_manager.list_jobs()}, send_body=send_body)
             return
 
         if parsed.path.startswith("/api/jobs/"):
             job_id = parsed.path.rsplit("/", 1)[-1]
             try:
-                job = JOB_MANAGER.public_job(job_id)
+                job = job_manager.public_job(job_id)
             except KeyError:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "Job not found.")
                 return
@@ -556,6 +694,9 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if not self.authorize(True, post=True):
+            return
+        job_manager = self.server.job_manager
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -581,7 +722,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/jobs":
             try:
-                job = JOB_MANAGER.create_job(payload)
+                job = job_manager.create_job(payload)
             except Exception as exc:
                 self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -591,7 +732,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/cancel"):
             job_id = parsed.path.split("/")[-2]
             try:
-                job = JOB_MANAGER.cancel_job(job_id)
+                job = job_manager.cancel_job(job_id)
             except KeyError:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "Job not found.")
                 return
@@ -638,6 +779,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         if send_body:
             self.wfile.write(body)
@@ -660,9 +803,19 @@ class AppHandler(BaseHTTPRequestHandler):
 
         mime_type, _ = mimetypes.guess_type(str(target))
         body = target.read_bytes()
+        is_page = target == (WEB_DIR / "index.html").resolve()
+        if is_page:
+            # The token travels in the page itself. Only a page served from this origin can read it.
+            meta = f'<meta name="{TOKEN_META_NAME}" content="{self.server.session_token}" />'
+            body = body.decode("utf-8").replace("<head>", f"<head>\n    {meta}", 1).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", f"{mime_type or 'application/octet-stream'}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if is_page:
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if send_body:
             self.wfile.write(body)
@@ -673,20 +826,35 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the optional PomiTranslate local web UI.")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1 (this computer only)")
     parser.add_argument("--port", type=int, default=8765, help="Bind port. Default: 8765")
     parser.add_argument("--open-browser", action="store_true", help="Open the browser automatically.")
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow a non-loopback --host. Anyone who can reach the port and load the page can then run translations.",
+    )
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), AppHandler)
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    try:
+        server = AppServer((args.host, args.port), allow_remote=args.allow_remote)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     bound_host, bound_port = server.server_address[:2]
     display_host = args.host
     if bound_host in {"0.0.0.0", "::"}:
         display_host = "127.0.0.1"
     url = f"http://{display_host}:{bound_port}"
+    if not is_loopback_host(args.host):
+        print(
+            f"WARNING: --allow-remote exposes this UI on {args.host}. Every API call still needs the launch "
+            "token, but the page that carries it is served to anyone who can reach the port. "
+            "Use it only on a network you trust.",
+            flush=True,
+        )
     print(f"Minecraft World Translator UI running at {url}")
     print("Press Ctrl+C to stop.")
 

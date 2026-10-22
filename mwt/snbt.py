@@ -169,12 +169,7 @@ class _Parser:
                     out.append(_ESCAPES[code])
                     self.pos += 1
                 elif code in "xuU":
-                    width = {"x": 2, "u": 4, "U": 8}[code]
-                    digits = self.source[self.pos + 1 : self.pos + 1 + width]
-                    if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
-                        raise SnbtError("bad escape")
-                    out.append(chr(int(digits, 16)))
-                    self.pos += 1 + width
+                    out.append(self.code_point(code))
                 elif code == "N" and self.source.startswith("{", self.pos + 1):
                     close = self.source.find("}", self.pos + 2)
                     if close < 0:
@@ -191,6 +186,33 @@ class _Parser:
             self.pos += 1
         raise SnbtError("unclosed string")
 
+    def hex_escape(self, code: str) -> int:
+        """Read the hex digits of a numeric escape; ``self.pos`` is on its letter (x, u or U)."""
+        width = {"x": 2, "u": 4, "U": 8}[code]
+        digits = self.source[self.pos + 1 : self.pos + 1 + width]
+        if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+            raise SnbtError("bad escape")
+        self.pos += 1 + width
+        return int(digits, 16)
+
+    def code_point(self, code: str) -> str:
+        """One character from a numeric escape. A UTF-16 pair written as two 4-digit escapes is one character.
+
+        A surrogate on its own is not text any encoder accepts, and it would make hashing the string
+        fail for the whole region file, so it is refused here and the command is kept as it was.
+        """
+        value = self.hex_escape(code)
+        if 0xD800 <= value <= 0xDBFF:
+            if code == "u" and self.source.startswith("\\u", self.pos):
+                self.pos += 1
+                low = self.hex_escape("u")
+                if 0xDC00 <= low <= 0xDFFF:
+                    return chr(0x10000 + ((value - 0xD800) << 10) + (low - 0xDC00))
+            raise SnbtError("unpaired surrogate escape")
+        if 0xDC00 <= value <= 0xDFFF or value > 0x10FFFF:
+            raise SnbtError("invalid code point escape")
+        return chr(value)
+
     def key(self) -> str:
         char = self.peek()
         if char in "'\"":
@@ -205,6 +227,9 @@ class _Parser:
             return result
         while True:
             name = self.key()
+            if name in result:
+                # Two spans would edit one value; which of the two the game reads is its own business.
+                raise SnbtError(f"duplicate key {name!r}")
             self.expect(":")
             result[name] = self.value(result, name)
             char = self.peek()

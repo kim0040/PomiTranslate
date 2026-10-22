@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
+import random
 import re
+import socket
 import threading
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from mwt.reasoning import (
@@ -14,6 +21,7 @@ from mwt.reasoning import (
     normalize_reasoning,
     reasoning_payload,
 )
+from mwt.secrets import bounded_public_text, redact_log
 from urllib import error, parse, request
 
 
@@ -130,10 +138,15 @@ def infer_provider(provider: str | None, base_url: str) -> str:
         return "openai"
     if "cometapi.com" in lowered:
         return "comet"
-    return "comet"
+    # An address the app does not know is a custom endpoint, never Comet: it must not receive Comet's key.
+    return "custom" if lowered else "comet"
 
 
 def resolve_api_key(provider: str, current: str) -> str:
+    """The key for exactly this provider: the given one, its own environment variable, its own keyring entry.
+
+    Another provider's key is never borrowed, and a Custom endpoint has to be given its own key.
+    """
     if current:
         return current
 
@@ -149,17 +162,6 @@ def resolve_api_key(provider: str, current: str) -> str:
             return stored
     except Exception:
         pass
-
-    fallback_order = [
-        "OPENAI_API_KEY",
-        "COMET_API_KEY",
-        "GEMINI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENROUTER_API_KEY",
-    ]
-    for env_name in fallback_order:
-        if os.getenv(env_name):
-            return os.getenv(env_name, "")
     return ""
 
 
@@ -257,8 +259,63 @@ class ModelCatalogError(RuntimeError):
     pass
 
 
+MAX_RETRY_AFTER_SECONDS = 600.0
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_ERROR_BODY_BYTES = 256 * 1024
+_READ_CHUNK = 64 * 1024
+# 401/403: bad or unauthorized key. 402: no credit. 404: unknown model or endpoint. 405/415: the endpoint
+# does not take this kind of request at all. None of these can be fixed by sending the request again.
+_ALWAYS_FATAL_STATUSES = frozenset({401, 402, 403, 404, 405, 415})
+# 400/422 say the request was rejected. That is a settings problem when it repeats, but it can also be
+# one string a provider's filter dislikes, which splitting the batch isolates. So these become fatal
+# only after this many rejections in a row with no accepted request in between.
+_REJECTED_STATUSES = frozenset({400, 405, 415, 422})
+MAX_CONSECUTIVE_REJECTIONS = 4
+
+_MAX_TOKENS_FIELD = re.compile(r"max_(?:completion_)?tokens")
+_TOO_LARGE = re.compile(
+    r"context[_ ]length|context window|maximum context|too many tokens|prompt is too long|input is too long"
+    r"|request too large|payload too large|reduce the length|token limit|too large|exceeds? the (?:maximum|max|limit)",
+    re.IGNORECASE,
+)
+_CONTENT_FILTER = re.compile(
+    r"content[_ ]filter|content[_ ]policy|responsible ?ai|safety|moderation|flagged|harm_category", re.IGNORECASE
+)
+_PARAMETER_REJECTED = re.compile(
+    r"unsupported|not supported|does not support|doesn't support|unrecognized|unknown (?:parameter|field|argument)"
+    r"|not allowed|invalid parameter|extra inputs are not permitted|only the default|cannot be (?:set|specified)"
+    r"|deprecated|not available with",
+    re.IGNORECASE,
+)
+# Request fields a model may refuse. The client drops one the provider names and tries once more.
+ADAPTABLE_PARAMETERS = ("temperature", "response_format", "max_completion_tokens", "max_tokens", "reasoning")
+
+
+def _named_parameter(body: str) -> str | None:
+    """The adaptable request field a 400 body says the model does not accept, if it clearly names one."""
+    excerpt = body[:8192]
+    if not _PARAMETER_REJECTED.search(excerpt):
+        return None
+    lowered = excerpt.lower()
+    try:
+        error_part = json.loads(excerpt).get("error")
+        structured = error_part.get("param") if isinstance(error_part, dict) else None
+    except (ValueError, AttributeError):
+        structured = None
+    if isinstance(structured, str) and structured in ADAPTABLE_PARAMETERS:
+        return structured
+    for name in ADAPTABLE_PARAMETERS:
+        if re.search(rf"(?<![a-z_]){name}(?![a-z_])", lowered):
+            return name
+    return None
+
+
 class ProviderError(RuntimeError):
-    """A provider call failed. ``fatal`` errors cannot be fixed by retrying."""
+    """A provider call failed. ``fatal`` errors cannot be fixed by retrying the same request.
+
+    ``too_large`` marks a request the provider found too big (HTTP 413, or an explicit context-length
+    answer): those are not fatal, because sending a smaller batch can succeed.
+    """
 
     def __init__(
         self,
@@ -266,18 +323,48 @@ class ProviderError(RuntimeError):
         *,
         status: int | None = None,
         retry_after: float | None = None,
+        retry_after_requested: float | None = None,
+        parameter: str | None = None,
+        too_large: bool = False,
+        filtered: bool = False,
+        persistent: bool = False,
+        error_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
+        # What the provider asked for before any cap; ``retry_after`` is never below it unless capped.
+        self.retry_after_requested = retry_after_requested
+        self.parameter = parameter
+        self.too_large = too_large or status == 413
+        self.filtered = filtered
+        self.persistent = persistent
+        self.error_code = error_code
+
+    @property
+    def retry_after_capped(self) -> bool:
+        return (
+            self.retry_after_requested is not None
+            and self.retry_after_requested > MAX_RETRY_AFTER_SECONDS
+        )
 
     @property
     def fatal(self) -> bool:
-        # 401/403: bad or unauthorized key. 402: no credit. 404: unknown model or endpoint.
-        return self.status in {401, 402, 403, 404}
+        if self.error_code == "PROVIDER_REDIRECT_REFUSED":
+            return True
+        if self.status in _ALWAYS_FATAL_STATUSES:
+            return True
+        if self.status in {400, 422}:
+            # A context-length answer or a content-filter hit on one batch is fixed by splitting it.
+            return self.persistent and not (self.too_large or self.filtered)
+        return False
 
     @property
     def code(self) -> str:
+        if self.error_code:
+            return self.error_code
+        if self.too_large:
+            return "REQUEST_TOO_LARGE"
         if self.status in {401, 403}:
             return "AUTH_FAILED"
         if self.status == 402:
@@ -293,14 +380,37 @@ class ProviderError(RuntimeError):
         return "REQUEST_REJECTED"
 
 
-def _retry_after_seconds(headers: Any) -> float | None:
-    value = headers.get("Retry-After") if headers is not None else None
-    if not value:
+def parse_retry_after(value: Any, *, now: datetime | None = None) -> float | None:
+    """Seconds a ``Retry-After`` header asks for: delay-seconds or an HTTP-date. Never shortened here."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
         return None
     try:
-        return max(0.0, min(float(value), 120.0))
+        seconds = float(text)
     except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - (now or datetime.now(timezone.utc))).total_seconds()
+    if not math.isfinite(seconds):
         return None
+    return max(0.0, seconds)
+
+
+def _retry_after_seconds(headers: Any) -> tuple[float | None, float | None]:
+    """(wait to use, wait requested). The wait is capped at 600 s and spread so workers do not retry in step."""
+    value = headers.get("Retry-After") if headers is not None else None
+    requested = parse_retry_after(value)
+    if requested is None:
+        return None, None
+    wait = min(requested, MAX_RETRY_AFTER_SECONDS)
+    # Jitter only ever lengthens the wait: concurrent workers must not all return at the same instant.
+    return wait + random.uniform(0.0, min(2.0, 0.25 + 0.1 * wait)), requested
 
 
 def _output_modalities(item: dict[str, Any]) -> list[str]:
@@ -376,13 +486,183 @@ def flatten_text_payload(content: Any) -> str:
     return ""
 
 
+_EMPTY_USAGE: dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "cost_reported": False}
+_MAX_TOKEN_COUNT = 10**12
+_MAX_COST = 10**9
+
+
+def _token_count(value: Any) -> int | None:
+    """A reported token count as a plain non-negative int, otherwise unknown. Bools are not counts."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or value != int(value):
+            return None
+        value = int(value)
+    if not isinstance(value, int) or value < 0 or value > _MAX_TOKEN_COUNT:
+        return None
+    return value
+
+
+def _positive_int(value: Any) -> int | None:
+    """A configured whole-number limit, or ``None`` when it is missing, not a number or not positive."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = int(float(value))
+    except (ValueError, OverflowError):
+        return None
+    return number if number > 0 else None
+
+
+def _usage_cost(value: Any) -> float | None:
+    """A reported cost as a finite non-negative float, otherwise unknown."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        cost = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(cost) or cost < 0 or cost > _MAX_COST:
+        return None
+    return cost
+
+
+class _Accounting:
+    """Request and usage totals of one job. Only that job's own client instances write to it."""
+
+    def __init__(self) -> None:
+        self.request_count = 0
+        self.usage: dict[str, Any] = dict(_EMPTY_USAGE)
+
+
+_scope = threading.local()
+
+
+def _current_accounting() -> _Accounting:
+    """The calling thread's job totals. A job's thread creates its clients, so they share its totals."""
+    accounting = getattr(_scope, "accounting", None)
+    if accounting is None:
+        accounting = _scope.accounting = _Accounting()
+    return accounting
+
+
+class _ClientMeta(type):
+    """``LLMProviderClient.request_count`` and ``.usage`` keep their names but belong to the calling job.
+
+    Two jobs in one process (the legacy web server) therefore no longer reset or mix each other's totals.
+    """
+
+    @property
+    def request_count(cls) -> int:
+        return _current_accounting().request_count
+
+    @request_count.setter
+    def request_count(cls, value: int) -> None:
+        _current_accounting().request_count = value
+
+    @property
+    def usage(cls) -> dict[str, Any]:
+        return _current_accounting().usage
+
+    @usage.setter
+    def usage(cls, value: dict[str, Any]) -> None:
+        _current_accounting().usage = value
+
+
+class _RefuseRedirect(request.HTTPRedirectHandler):
+    """Credentials are sent to the configured origin only. A redirect is reported, never followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+class _RequestGuard:
+    """Ends a request once its total time is spent, however slowly the server trickles bytes.
+
+    The socket timeout only limits each single wait. Shutting the socket down also wakes a read that
+    is blocked, so the whole request is bounded and not just each wait.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.deadline = time.monotonic() + seconds
+        self.expired = False
+        self._timer: threading.Timer | None = None
+
+    def attach(self, sock: socket.socket) -> None:
+        remaining = max(0.0, self.deadline - time.monotonic())
+        timer = threading.Timer(remaining, self._expire, args=(sock,))
+        timer.daemon = True
+        self._timer = timer
+        timer.start()
+
+    def _expire(self, sock: socket.socket) -> None:
+        self.expired = True
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def close(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+
+
+def _guarded(base: type, guard: _RequestGuard) -> type:
+    class Guarded(base):  # type: ignore[misc, valid-type]
+        def connect(self) -> None:
+            super().connect()
+            guard.attach(self.sock)
+
+    return Guarded
+
+
+class _GuardedHTTPHandler(request.HTTPHandler):
+    def __init__(self, guard: _RequestGuard) -> None:
+        super().__init__()
+        self._guard = guard
+
+    def http_open(self, req):  # noqa: ANN001
+        return self.do_open(_guarded(http.client.HTTPConnection, self._guard), req)
+
+
+class _GuardedHTTPSHandler(request.HTTPSHandler):
+    def __init__(self, guard: _RequestGuard) -> None:
+        super().__init__()
+        self._guard = guard
+
+    def https_open(self, req):  # noqa: ANN001
+        return self.do_open(_guarded(http.client.HTTPSConnection, self._guard), req, context=self._context)
+
+
+def _read_limited(response: Any, limit: int, guard: _RequestGuard | None = None) -> tuple[bytes, bool]:
+    """Read at most ``limit`` bytes in chunks. The flag says whether the body was longer than that."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if guard is not None and guard.remaining() <= 0:
+            raise TimeoutError("the response was not finished within the request time limit")
+        chunk = response.read1(_READ_CHUNK) if hasattr(response, "read1") else response.read(_READ_CHUNK)
+        if not chunk:
+            return b"".join(chunks), False
+        total += len(chunk)
+        if total > limit:
+            return b"".join(chunks)[:limit], True
+        chunks.append(chunk)
+
+
+DEFAULT_OUTPUT_TOKENS = 4096
 GEMINI_MIN_OUTPUT_TOKENS = 32768
 # The lowest thinking level each Gemini model accepted in this process, learned from 400 replies.
 _GEMINI_LEVEL_FLOOR: dict[str, str] = {}
 
 
-class LLMProviderClient:
-    request_count = 0
+class LLMProviderClient(metaclass=_ClientMeta):
+    _counter_lock = threading.Lock()
 
     def __init__(self, config: dict[str, Any]) -> None:
         api_config = config["api"]
@@ -392,6 +672,7 @@ class LLMProviderClient:
         self.api_key = api_config["api_key"]
         self.model = api_config["model"]
         self.timeout = int(api_config.get("request_timeout", 120))
+        self.max_output_tokens = _positive_int(api_config.get("max_output_tokens"))
         self.wire_format = str(api_config.get("wire_format") or "").strip().lower()
         self.family = self._family_for()
         runtime = config.get("runtime") or {}
@@ -401,6 +682,13 @@ class LLMProviderClient:
         self._catalog_checked = False
         self._catalog_error: ModelCatalogError | None = None
         self._catalog: list[dict[str, Any]] = []
+        # Totals belong to the job whose thread built this client, however many workers share it.
+        self._accounting = _current_accounting()
+        # Request fields this model refused; they stay out of every later request of this client.
+        self._dropped: set[str] = set()
+        self._cap_field_override: str | None = None
+        self._rejections_lock = threading.Lock()
+        self._rejection_streak = 0
 
     def _family_for(self) -> str:
         if self.provider in {"custom", "custom_openai", "custom_anthropic"}:
@@ -485,16 +773,23 @@ class LLMProviderClient:
         user_prompt: str,
         temperature: float,
         expect_json: bool = False,
-        max_output_tokens: int = 4096,
+        max_output_tokens: int | None = None,
     ) -> str:
+        """One completion. ``max_output_tokens`` is a cap the caller asked for; ``None`` asks for none.
+
+        Anthropic requires a cap and Gemini needs room for thought tokens, so they fall back to their
+        own floors; the OpenAI-compatible request carries a cap only when one was given or configured.
+        """
         self.ensure_ready(require_model=True)
         self.try_refresh_text_models()
+        cap = _positive_int(max_output_tokens) or self.max_output_tokens
         if self.family == "openai_compatible":
             return self._complete_openai_compatible(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
                 expect_json=expect_json,
+                max_output_tokens=cap,
             )
         if self.family == "gemini":
             return self._complete_gemini(
@@ -502,14 +797,14 @@ class LLMProviderClient:
                 user_prompt=user_prompt,
                 temperature=temperature,
                 expect_json=expect_json,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=cap or DEFAULT_OUTPUT_TOKENS,
             )
         if self.family == "anthropic":
             return self._complete_anthropic(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 temperature=temperature,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=cap or DEFAULT_OUTPUT_TOKENS,
             )
         raise RuntimeError(f"Unsupported provider family: {self.family}")
 
@@ -529,6 +824,66 @@ class LLMProviderClient:
             )
         return {key: parsed[key] for key in payload}
 
+    def _label(self) -> str:
+        return provider_spec(self.provider)["label"]
+
+    def _http_error(self, exc: error.HTTPError) -> ProviderError:
+        """Turn an error reply into a bounded message with the key already removed.
+
+        The whole body (up to a size limit) is redacted before any of it is cut, so a key that
+        straddles the cut cannot leave a readable prefix behind.
+        """
+        label = self._label()
+        if 300 <= exc.code < 400:
+            exc.close()
+            return ProviderError(
+                f"{label} answered with a redirect (HTTP {exc.code}). Redirects are refused because they could "
+                "send the API key to another address; use the final endpoint address in the settings.",
+                status=exc.code,
+                error_code="PROVIDER_REDIRECT_REFUSED",
+            )
+        try:
+            raw, _ = _read_limited(exc, MAX_ERROR_BODY_BYTES)
+        except (OSError, http.client.HTTPException, TimeoutError):
+            raw = b""
+        finally:
+            exc.close()
+        body = self._redact(raw.decode("utf-8", errors="replace"))
+        retry_after, requested = _retry_after_seconds(exc.headers)
+        status = exc.code
+        names_max_tokens = bool(_MAX_TOKENS_FIELD.search(body[:8192]))
+        parameter = _named_parameter(body) if status in _REJECTED_STATUSES else None
+        too_large = (
+            status in {400, 422}
+            and parameter is None
+            and not names_max_tokens
+            and bool(_TOO_LARGE.search(body[:8192]))
+        )
+        filtered = status in {400, 422} and parameter is None and bool(_CONTENT_FILTER.search(body[:8192]))
+        persistent = False
+        if status in {400, 422} and not (too_large or filtered):
+            with self._rejections_lock:
+                self._rejection_streak += 1
+                persistent = self._rejection_streak >= MAX_CONSECUTIVE_REJECTIONS
+        message = f"{label} request failed with HTTP {status}: {bounded_public_text(body, self.api_key)}"
+        if persistent:
+            message += f" (rejected {MAX_CONSECUTIVE_REJECTIONS} times in a row; check the model, endpoint and settings)"
+        if requested is not None and requested > MAX_RETRY_AFTER_SECONDS:
+            message += (
+                f" (the provider asked to wait {requested:.0f} s; waiting is capped at "
+                f"{MAX_RETRY_AFTER_SECONDS:.0f} s)"
+            )
+        return ProviderError(
+            message,
+            status=status,
+            retry_after=retry_after,
+            retry_after_requested=requested,
+            parameter=parameter,
+            too_large=too_large,
+            filtered=filtered,
+            persistent=persistent,
+        )
+
     def _request_json(
         self,
         method: str,
@@ -542,75 +897,114 @@ class LLMProviderClient:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if method == "POST":  # count translation calls; a model-list lookup is not one
             with LLMProviderClient._counter_lock:
-                LLMProviderClient.request_count += 1
+                self._accounting.request_count += 1
         req = request.Request(url=url, data=body, headers=headers, method=method)
+        label = self._label()
+        guard = _RequestGuard(float(max(1, self.timeout)))
+        opener = request.build_opener(_GuardedHTTPHandler(guard), _GuardedHTTPSHandler(guard), _RefuseRedirect())
         try:
-            with request.urlopen(req, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            message = f"{provider_spec(self.provider)['label']} request failed with HTTP {exc.code}: {detail[:600]}"
-            raise ProviderError(
-                self._redact(message),
-                status=exc.code,
-                retry_after=_retry_after_seconds(exc.headers),
-            ) from exc
-        except error.URLError as exc:
-            message = f"{provider_spec(self.provider)['label']} request failed: {exc.reason}"
-            raise ProviderError(self._redact(message)) from exc
-        except (TimeoutError, OSError) as exc:
-            message = f"{provider_spec(self.provider)['label']} request failed: {exc}"
-            raise ProviderError(self._redact(message)) from exc
+            try:
+                with opener.open(req, timeout=self.timeout) as response:
+                    raw, truncated = _read_limited(response, MAX_RESPONSE_BYTES, guard)
+                if truncated:
+                    raise ProviderError(
+                        f"{label} sent a response larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB.",
+                        error_code="PROVIDER_ERROR",
+                    )
+                text = raw.decode("utf-8")
+            except error.HTTPError as exc:
+                raise self._http_error(exc) from None
+            except (error.URLError, TimeoutError, OSError, http.client.HTTPException, UnicodeDecodeError) as exc:
+                if guard.expired or isinstance(exc, TimeoutError):
+                    raise ProviderError(
+                        f"{label} request did not finish within {self.timeout} s.", error_code="NETWORK_ERROR"
+                    ) from None
+                reason = exc.reason if isinstance(exc, error.URLError) else exc
+                raise ProviderError(self._redact(f"{label} request failed: {reason}")) from None
+        finally:
+            guard.close()
 
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise ProviderError(f"{provider_spec(self.provider)['label']} returned invalid JSON.") from exc
+            raise ProviderError(f"{label} returned invalid JSON.") from exc
+        with self._rejections_lock:
+            self._rejection_streak = 0
         if method == "POST":
-            LLMProviderClient.record_usage(parsed)
+            self.record_usage(parsed, self._accounting)
         return parsed
-
-    _counter_lock = threading.Lock()
-    usage: dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "cost_reported": False}
 
     @classmethod
     def reset_counters(cls) -> None:
+        """Start this job's totals over. Other jobs running in the same process keep theirs."""
         with cls._counter_lock:
-            cls.request_count = 0
-            cls.usage = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "cost_reported": False}
+            accounting = _current_accounting()
+            accounting.request_count = 0
+            accounting.usage = dict(_EMPTY_USAGE)
 
     @classmethod
-    def record_usage(cls, response: Any) -> None:
-        """Add the token counts a provider reports; providers that omit them add nothing."""
+    def record_usage(cls, response: Any, accounting: _Accounting | None = None) -> None:
+        """Add the token counts a provider reports; providers that omit or garble them add nothing.
+
+        They go to ``accounting`` (the job that owns the calling client), by default the calling thread's job.
+        """
         if not isinstance(response, dict):
             return
         usage = response.get("usage")
         cost = None
         if isinstance(usage, dict):
-            prompt = usage.get("prompt_tokens", usage.get("input_tokens"))
-            completion = usage.get("completion_tokens", usage.get("output_tokens"))
-            if isinstance(usage.get("cost"), (int, float)):
-                cost = float(usage["cost"])
+            prompt = _token_count(usage.get("prompt_tokens", usage.get("input_tokens")))
+            completion = _token_count(usage.get("completion_tokens", usage.get("output_tokens")))
+            cost = _usage_cost(usage.get("cost"))
         else:
             meta = response.get("usageMetadata")
-            prompt = meta.get("promptTokenCount") if isinstance(meta, dict) else None
-            completion = meta.get("candidatesTokenCount") if isinstance(meta, dict) else None
+            meta = meta if isinstance(meta, dict) else {}
+            prompt = _token_count(meta.get("promptTokenCount"))
+            completion = _token_count(meta.get("candidatesTokenCount"))
             # Gemini bills thought tokens as output but reports them apart from the answer.
-            thoughts = meta.get("thoughtsTokenCount") if isinstance(meta, dict) else None
-            if isinstance(thoughts, int):
-                completion = (completion if isinstance(completion, int) else 0) + thoughts
+            thoughts = _token_count(meta.get("thoughtsTokenCount"))
+            if thoughts is not None:
+                completion = (completion or 0) + thoughts
         with cls._counter_lock:
+            totals = (accounting or _current_accounting()).usage
             if cost is not None:
-                cls.usage["cost"] += cost
-                cls.usage["cost_reported"] = True
-            if isinstance(prompt, int):
-                cls.usage["prompt_tokens"] += prompt
-            if isinstance(completion, int):
-                cls.usage["completion_tokens"] += completion
+                totals["cost"] += cost
+                totals["cost_reported"] = True
+            if prompt is not None:
+                totals["prompt_tokens"] += prompt
+            if completion is not None:
+                totals["completion_tokens"] += completion
+
+    def _note_adapted(self, name: str) -> None:
+        """Remember in this job's usage that the model refused a request field and it was left out."""
+        with LLMProviderClient._counter_lock:
+            adapted = self._accounting.usage.setdefault("adapted_parameters", [])
+            if name not in adapted:
+                adapted.append(name)
+
+    def _post_adapting(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        removers: dict[str, Any],
+    ) -> Any:
+        """POST once; if the model names one request field it does not accept, drop it and try once more.
+
+        Without this a model that rejects ``temperature`` fails every batch, and each failure is split
+        and retried. A field is only dropped when the error body clearly names it.
+        """
+        try:
+            return self._request_json("POST", url, headers=headers, payload=payload)
+        except ProviderError as exc:
+            name = exc.parameter
+            remover = removers.get(name) if name else None
+            if remover is None or name in self._dropped or not remover(payload, str(exc)):
+                raise
+        self._note_adapted(name)
+        return self._request_json("POST", url, headers=headers, payload=payload)
 
     def _redact(self, message: str) -> str:
-        from mwt.secrets import redact_log
-
         return redact_log(message, self.api_key)
 
     def _openai_headers(self) -> dict[str, str]:
@@ -624,6 +1018,13 @@ class LLMProviderClient:
             headers["X-OpenRouter-Title"] = "PomiTranslate"
         return headers
 
+    def _cap_field(self) -> str:
+        """The request field that caps output on this endpoint. OpenAI's own models only take the newer one."""
+        if self._cap_field_override:
+            return self._cap_field_override
+        official = self.provider == "openai" and parse.urlparse(self.base_url).hostname == "api.openai.com"
+        return "max_completion_tokens" if official else "max_tokens"
+
     def _complete_openai_compatible(
         self,
         *,
@@ -631,6 +1032,7 @@ class LLMProviderClient:
         user_prompt: str,
         temperature: float,
         expect_json: bool,
+        max_output_tokens: int | None = None,
     ) -> str:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -638,27 +1040,63 @@ class LLMProviderClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": temperature,
         }
-        if expect_json and self.supports_json_response:
+        if "temperature" not in self._dropped:
+            payload["temperature"] = temperature
+        if expect_json and self.supports_json_response and "response_format" not in self._dropped:
             payload["response_format"] = {"type": "json_object"}
+        if max_output_tokens and not ({"max_tokens", "max_completion_tokens"} & self._dropped):
+            payload[self._cap_field()] = max_output_tokens
         if self.provider == "openrouter":
             payload["usage"] = {"include": True}
             reasoning = reasoning_payload(self.openrouter_reasoning, self.model_info)
-            if reasoning is not None:
+            if reasoning is not None and "reasoning" not in self._dropped:
                 payload["reasoning"] = reasoning
 
-        response = self._request_json(
-            "POST",
+        def dropper(field: str) -> Any:
+            def drop(body: dict[str, Any], message: str) -> bool:
+                if field not in body:
+                    return False
+                self._dropped.add(field)
+                return body.pop(field, None) is not None
+
+            return drop
+
+        def swap_cap(rejected: str, other: str) -> Any:
+            def swap(body: dict[str, Any], message: str) -> bool:
+                if rejected not in body:
+                    return False
+                value = body.pop(rejected)
+                if other in message:
+                    # "Use 'max_completion_tokens' instead": keep the caller's cap under the field it accepts.
+                    self._cap_field_override = other
+                    body[other] = value
+                else:
+                    self._dropped.update({"max_tokens", "max_completion_tokens"})
+                return True
+
+            return swap
+
+        response = self._post_adapting(
             f"{self.base_url}/chat/completions",
-            headers=self._openai_headers(),
-            payload=payload,
+            self._openai_headers(),
+            payload,
+            {
+                "temperature": dropper("temperature"),
+                "response_format": dropper("response_format"),
+                "reasoning": dropper("reasoning"),
+                "max_tokens": swap_cap("max_tokens", "max_completion_tokens"),
+                "max_completion_tokens": swap_cap("max_completion_tokens", "max_tokens"),
+            },
         )
         choices = response.get("choices") or []
         if not choices:
             raise RuntimeError(f"{provider_spec(self.provider)['label']} returned no choices.")
         message = choices[0].get("message", {})
-        return flatten_text_payload(message.get("content"))
+        text = flatten_text_payload(message.get("content"))
+        if not text and choices[0].get("finish_reason") == "length":
+            raise RuntimeError(f"{self._label()} stopped at the output token limit before finishing the answer.")
+        return text
 
     def _list_models_openai_compatible(self, *, public: bool = False) -> list[dict[str, Any]]:
         url = f"{self.base_url}/models"
@@ -700,10 +1138,11 @@ class LLMProviderClient:
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             "generationConfig": {
-                "temperature": temperature,
                 "maxOutputTokens": max(max_output_tokens, GEMINI_MIN_OUTPUT_TOKENS),
             },
         }
+        if "temperature" not in self._dropped:
+            payload["generationConfig"]["temperature"] = temperature
         if expect_json:
             payload["generationConfig"]["responseMimeType"] = "application/json"
         thinking = gemini_thinking_config(self.openrouter_reasoning, self.model, self.model_info)
@@ -723,6 +1162,12 @@ class LLMProviderClient:
                 )
                 break
             except ProviderError as exc:
+                if exc.parameter == "temperature" and "temperature" not in self._dropped:
+                    # The model takes no temperature: leave it out for the rest of this client's life.
+                    self._dropped.add("temperature")
+                    payload["generationConfig"].pop("temperature", None)
+                    self._note_adapted("temperature")
+                    continue
                 # Models disagree on their lowest level (3.8 flash rejects "minimal"). Use the next
                 # level up rather than failing every batch; "high" is the ceiling.
                 text = str(exc).lower()
@@ -804,18 +1249,24 @@ class LLMProviderClient:
         temperature: float,
         max_output_tokens: int,
     ) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "system": system_prompt,
             "max_tokens": max_output_tokens,
-            "temperature": temperature,
             "messages": [{"role": "user", "content": user_prompt}],
         }
-        response = self._request_json(
-            "POST",
+        if "temperature" not in self._dropped:
+            payload["temperature"] = temperature
+
+        def drop_temperature(body: dict[str, Any], message: str) -> bool:
+            self._dropped.add("temperature")
+            return body.pop("temperature", None) is not None
+
+        response = self._post_adapting(
             f"{self.base_url}/messages",
-            headers=self._anthropic_headers(),
-            payload=payload,
+            self._anthropic_headers(),
+            payload,
+            {"temperature": drop_temperature},
         )
         parts = response.get("content") or []
         return "\n".join(

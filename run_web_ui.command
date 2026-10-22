@@ -28,7 +28,7 @@ open_url() {
 is_ui_alive() {
   local host="$1"
   local port="$2"
-  curl -fsS --max-time 1 "http://${host}:${port}/api/meta" >/dev/null 2>&1
+  curl -fsS --max-time 1 "http://${host}:${port}/healthz" >/dev/null 2>&1
 }
 
 port_in_use() {
@@ -126,6 +126,9 @@ if [ "$PORT_STATE" != "free" ] || [ -z "$PORT_VALUE" ]; then
 fi
 
 ARGS+=(--host "$DEFAULT_HOST" --port "$PORT_VALUE")
+if [ "${MWT_ALLOW_REMOTE:-0}" = "1" ]; then
+  ARGS+=(--allow-remote)
+fi
 if [ "${MWT_SKIP_OPEN:-0}" != "1" ]; then
   ARGS+=(--open-browser)
 fi

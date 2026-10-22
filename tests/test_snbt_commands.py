@@ -113,8 +113,63 @@ def test_json_commands_keep_working_and_bad_ones_are_counted() -> None:
     record("snbt.json_and_unparsed")
 
 
+def test_surrogate_escapes_and_duplicate_keys() -> None:
+    # A valid UTF-16 pair written as two escapes is one character, the same as the 8-digit form.
+    pair = snbt.parse(r'{text:"😀 hi"}')
+    assert pair.value["text"] == "\U0001F600 hi"
+    assert snbt.parse(r'{text:"\U0001F600 hi"}').value["text"] == "\U0001F600 hi"
+    assert snbt.parse(r'{text:"é\x41"}').value["text"] == "éA"
+    pair.value["text"] = "\U0001F600 안녕"
+    assert pair.render() == '{text:"\U0001F600 안녕"}'
+    for bad in (
+        r'{text:"\uD83D"}',  # high surrogate alone
+        r'{text:"\uD83D x"}',  # high surrogate followed by text
+        r'{text:"\uDE00"}',  # low surrogate alone
+        r'{text:"\uDE00\uD83D"}',  # pair in the wrong order
+        r'{text:"\uD83DA"}',  # high surrogate followed by an ordinary character
+        r'{text:"\U0000D83D"}',  # a surrogate through the 8-digit form
+        r'{text:"\U00110000"}',  # beyond U+10FFFF
+        r'{text:"\UFFFFFFFF"}',
+    ):
+        try:
+            snbt.parse(bad)
+        except snbt.SnbtError:
+            pass
+        else:
+            raise AssertionError(f"{bad} must be refused")
+    try:
+        snbt.parse("{text:'Old text',text:'Visible text'}")
+    except snbt.SnbtError:
+        pass
+    else:
+        raise AssertionError("a duplicate key must be refused")
+    snbt.parse("{a:{text:'x'},b:{text:'y'}}")  # the same key in different compounds is fine
+
+    # In a world: the command is kept exactly, counted as unparsed, and the region is not skipped.
+    for command in (
+        r'tellraw @a {text:"\uD83D hello there"}',
+        r"tellraw @a {text:'Old text',text:'Visible text'}",
+    ):
+        texts, written, unparsed = _command_texts(command)
+        assert texts == set() and unparsed == 1 and written == command, (texts, written, unparsed)
+    texts, written, unparsed = _command_texts(r'tellraw @a {text:"😀 hello there"}')
+    assert texts == {"\U0001F600 hello there"} and unparsed == 0
+    assert written == 'tellraw @a {text:"[T] \U0001F600 hello there"}', written
+    record("snbt.surrogates_and_duplicate_keys")
+
+
+def test_lone_surrogate_from_json_does_not_break_extraction() -> None:
+    # json.loads accepts "\ud83d" and returns a string no UTF-8 encoder takes; it must not skip the region.
+    texts, written, unparsed = _command_texts(r'tellraw @a [{"text":"\ud83d broken line"},{"text":"Fine line"}]')
+    assert texts == {"Fine line"}, texts
+    assert unparsed == 0 and "[T] Fine line" in written
+    record("snbt.json_lone_surrogate_is_skipped")
+
+
 def run_all(_tmp: Path) -> list[str]:
     RESULTS.clear()
+    test_surrogate_escapes_and_duplicate_keys()
+    test_lone_surrogate_from_json_does_not_break_extraction()
     test_parse_and_render_change_only_strings()
     test_escapes_and_quotes_round_trip()
     test_snbt_commands_are_found_and_patched()

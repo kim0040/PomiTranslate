@@ -70,6 +70,8 @@ class TextRef:
 
 OnText = Callable[[Any, Any, str], None]
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
 # The component may be JSON (before 1.21.5) or SNBT (1.21.5+), so a quoted string also starts one.
 _COMMAND_JSON = (
     re.compile(r"^(/?(?:.*?\brun\s+)?tellraw\s+\S+\s+)([\[{'\"].*)$", re.DOTALL),
@@ -126,14 +128,34 @@ class TextExtractionMixin:
             return bool(self._KANA.search(text)) and not self._LATIN.search(text) and not self._HANGUL.search(text)
         return False
 
+    def _excluded_ids(self) -> frozenset[str]:
+        """The excluded candidate ids as a set, rebuilt only when the configured list changes.
+
+        The list form is what gets saved; looking an id up in it costs time linear in the number of
+        exclusions for every string of the world.
+        """
+        raw = self.runtime_config.get("excluded_candidate_ids") or ()
+        cached = getattr(self, "_excluded_cache", None)
+        if cached is not None and cached[0] is raw and cached[1] == len(raw):
+            return cached[2]
+        ids = frozenset(item for item in raw if isinstance(item, str))
+        self._excluded_cache = (raw, len(raw), ids)
+        return ids
+
     def should_translate_text(self, text: str) -> bool:
         if not isinstance(text, str):
             return False
         stripped = text.strip()
         if not stripped:
             return False
-        candidate_id = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
-        if candidate_id in self.runtime_config.get("excluded_candidate_ids", []):
+        if not text.isascii():
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError:
+                # A lone surrogate (a JSON "\ud83d" escape, say) cannot be hashed, sent or stored.
+                return False
+        excluded = self._excluded_ids()
+        if excluded and hashlib.sha256(text.encode("utf-8")).hexdigest()[:20] in excluded:
             return False
 
         if stripped in ("@", "#", "!", "?", ".", ",", "-", "~", "/"):
@@ -197,7 +219,10 @@ class TextExtractionMixin:
 
     @staticmethod
     def serialize_text_component(component: Any) -> str:
-        return json.dumps(component, ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps(component, ensure_ascii=False, separators=(",", ":"))
+        # json.loads turns an escaped lone surrogate ("\ud83d") into a character no UTF-8 encoder takes.
+        # Writing it back as the escape it came from keeps the text valid and unchanged.
+        return _LONE_SURROGATE.sub(lambda match: "\\u%04x" % ord(match.group()), text)
 
     def extract_command_json(self, command: str) -> tuple[str, str] | None:
         """Split ``tellraw``/``title`` (also after ``execute ... run``) into command and JSON."""
@@ -369,25 +394,34 @@ class TextExtractionMixin:
         return TextRef(kind, path=path, category=category, detail=detail, scope=scope, **fields)
 
     def _json_component(self, raw: str) -> Any:
-        """The parsed component when ``raw`` is a JSON object or array, otherwise ``None``.
+        """The parsed component when ``raw`` is a JSON object, array or string literal, else ``None``.
 
-        Before 1.21.5 components are stored as JSON strings. From 1.21.5 a plain string is
-        literal text, so a string is only read as JSON when it looks like a JSON container.
+        Before 1.21.5 components are stored as JSON strings, and an unstyled one is a bare string
+        literal such as ``"Hello there"`` (quotes included). From 1.21.5 a plain string is literal
+        text, so a string is only read as JSON when it looks like a JSON container or a complete,
+        non-empty JSON string literal. Re-quoting a translated literal keeps its quotes either way.
         """
-        stripped = raw.lstrip()
-        if not stripped or stripped[0] not in "{[":
+        stripped = raw.strip()
+        if not stripped or stripped[0] not in '{["':
             return None
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             return None
+        if isinstance(parsed, str):
+            return parsed if parsed.strip() else None
         return parsed if isinstance(parsed, (dict, list)) else None
+
+    @staticmethod
+    def _component_root(component: Any) -> Any:
+        """What ``_walk_json`` walks: a bare string literal sits in a one-item list so it can be replaced."""
+        return [component] if isinstance(component, str) else component
 
     def _collect_component_string(self, tag: Any, refs: list[TextRef], path: str, scope: Scope, category: str, detail: str) -> None:
         component = self._json_component(tag.value)
         if component is not None:
             found: list[str] = []
-            self._walk_json(component, lambda container, key, source: found.append(source))
+            self._walk_json(self._component_root(component), lambda container, key, source: found.append(source))
             if found:
                 refs.append(self._ref("json_tag", path, scope, category, detail, tag=tag))
         elif self.should_translate_text(tag.value):
@@ -603,7 +637,9 @@ class TextExtractionMixin:
                     component = json.loads(ref.tag.value)
                 except json.JSONDecodeError:
                     continue
-                self._walk_json(component, lambda container, key, source, ref=ref: add(source, ref))
+                self._walk_json(
+                    self._component_root(component), lambda container, key, source, ref=ref: add(source, ref)
+                )
             elif ref.kind == "command_tag":
                 self._walk_command(
                     {"command": ref.tag.value}, "command", lambda container, key, source, ref=ref: add(source, ref), False
@@ -634,11 +670,13 @@ class TextExtractionMixin:
                     component = self.parse_text_component(ref.tag.value)
                 except json.JSONDecodeError:
                     continue
-                before = self.serialize_text_component(component)
-                self.patch_json_component(component, translations)
-                after = self.serialize_text_component(component)
+                # A bare string literal is walked inside a list and written back as a JSON string.
+                root = self._component_root(component)
+                before = self.serialize_text_component(root)
+                self.patch_json_component(root, translations)
+                after = self.serialize_text_component(root)
                 if after != before:
-                    ref.tag.value = after
+                    ref.tag.value = self.serialize_text_component(root[0]) if root is not component else after
                     changed += 1
             elif ref.kind == "command_tag":
                 updated = self.patch_command_component(ref.tag.value, translations)
