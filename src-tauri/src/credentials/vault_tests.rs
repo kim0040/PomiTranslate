@@ -38,7 +38,12 @@ fn the_first_local_save_commits_the_master_key_and_leaves_no_temporary_file() {
     Credentials::default()
         .save(dir.path(), "openai", Mode::Local, SECRET, None)
         .unwrap();
-    assert_eq!(fs::read(key_dir(dir.path()).join("master.key")).unwrap().len(), 48);
+    assert_eq!(
+        fs::read(key_dir(dir.path()).join("master.key"))
+            .unwrap()
+            .len(),
+        48
+    );
     assert!(!key_dir(dir.path()).join("master.new").exists());
 }
 
@@ -46,16 +51,25 @@ fn the_first_local_save_commits_the_master_key_and_leaves_no_temporary_file() {
 fn a_complete_leftover_key_is_promoted_when_nothing_else_was_encrypted() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
-    vault.save(dir.path(), "openai", Mode::Session, SECRET, None).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Session, SECRET, None)
+        .unwrap();
     let planted = [7u8; 48];
     plant_leftover(dir.path(), &planted);
     vault
         .save(dir.path(), "openrouter", Mode::Local, SECRET, None)
         .unwrap();
-    assert_eq!(fs::read(key_dir(dir.path()).join("master.key")).unwrap(), planted);
+    assert_eq!(
+        fs::read(key_dir(dir.path()).join("master.key")).unwrap(),
+        planted
+    );
     assert!(!key_dir(dir.path()).join("master.new").exists());
     assert_eq!(
-        vault.read(dir.path(), "openrouter", None).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "openrouter", None)
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET
     );
 }
@@ -64,15 +78,26 @@ fn a_complete_leftover_key_is_promoted_when_nothing_else_was_encrypted() {
 fn a_truncated_leftover_key_is_set_aside_and_a_new_key_is_made() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
-    vault.save(dir.path(), "openai", Mode::Session, SECRET, None).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Session, SECRET, None)
+        .unwrap();
     plant_leftover(dir.path(), &[1u8; 10]);
     vault
         .save(dir.path(), "openrouter", Mode::Local, SECRET, None)
         .unwrap();
     let aside = broken_entries(&key_dir(dir.path()), "master.new.broken-");
     assert_eq!(aside.len(), 1);
-    assert_eq!(fs::read(&aside[0]).unwrap(), [1u8; 10], "set aside, never deleted");
-    assert_eq!(fs::read(key_dir(dir.path()).join("master.key")).unwrap().len(), 48);
+    assert_eq!(
+        fs::read(&aside[0]).unwrap(),
+        [1u8; 10],
+        "set aside, never deleted"
+    );
+    assert_eq!(
+        fs::read(key_dir(dir.path()).join("master.key"))
+            .unwrap()
+            .len(),
+        48
+    );
     assert!(!key_dir(dir.path()).join("master.new").exists());
 }
 
@@ -88,7 +113,10 @@ fn a_leftover_key_is_not_promoted_over_credentials_encrypted_under_another_key()
     let error = vault.read(dir.path(), "openrouter", None).unwrap_err();
     assert_eq!(error.code, code::VAULT_KEY_MISSING);
     assert!(!key_dir(dir.path()).join("master.key").exists());
-    assert_eq!(broken_entries(&key_dir(dir.path()), "master.new.broken-").len(), 1);
+    assert_eq!(
+        broken_entries(&key_dir(dir.path()), "master.new.broken-").len(),
+        1
+    );
 }
 
 #[test]
@@ -103,7 +131,11 @@ fn a_leftover_key_that_matches_the_stored_rows_is_promoted_after_a_lost_rename()
     fs::remove_file(&master).unwrap();
     plant_leftover(dir.path(), &bytes);
     assert_eq!(
-        vault.read(dir.path(), "openrouter", None).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "openrouter", None)
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET
     );
     assert!(master.exists());
@@ -117,9 +149,15 @@ fn a_zero_byte_database_from_an_interrupted_creation_is_replaced() {
     drop(private_fs::open(&root.join("credentials.sqlite"), true).unwrap());
     let vault = Credentials::default();
     assert!(!vault.status(dir.path(), "openai").unwrap().stored);
-    vault.save(dir.path(), "openai", Mode::Local, SECRET, None).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Local, SECRET, None)
+        .unwrap();
     assert_eq!(
-        vault.read(dir.path(), "openai", None).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "openai", None)
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET
     );
 }
@@ -133,7 +171,9 @@ fn a_stale_side_file_from_an_interrupted_database_creation_does_not_block_a_new_
     stale.write_all(b"half written").unwrap();
     drop(stale);
     let vault = Credentials::default();
-    vault.save(dir.path(), "openai", Mode::Local, SECRET, None).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Local, SECRET, None)
+        .unwrap();
     assert!(!root.join("credentials.sqlite.new").exists());
     assert!(vault.status(dir.path(), "openai").unwrap().stored);
 }
@@ -147,11 +187,19 @@ fn a_damaged_vault_is_reported_as_state_and_keeps_the_known_mode() {
     vault
         .save(dir.path(), "openrouter", Mode::Session, SECRET, None)
         .unwrap();
-    fs::write(dir.path().join("credentials/credentials.sqlite"), b"this is not sqlite").unwrap();
+    fs::write(
+        dir.path().join("credentials/credentials.sqlite"),
+        b"this is not sqlite",
+    )
+    .unwrap();
     let state = vault.state(dir.path(), "openrouter");
     assert_eq!(state.error, Some(code::VAULT_CORRUPT));
     assert_eq!(state.stored, None, "unavailable is not empty");
-    assert_eq!(state.mode, Some(Mode::Session), "the configured mode is kept");
+    assert_eq!(
+        state.mode,
+        Some(Mode::Session),
+        "the configured mode is kept"
+    );
     assert_eq!(
         vault.read(dir.path(), "openrouter", None).unwrap_err().code,
         code::VAULT_CORRUPT
@@ -174,7 +222,10 @@ fn an_unknown_schema_is_a_schema_error_and_a_missing_key_a_key_error() {
         .unwrap()
         .execute("UPDATE vault_meta SET schema_version=100", [])
         .unwrap();
-    assert_eq!(vault.state(dir.path(), "openrouter").error, Some(code::VAULT_SCHEMA));
+    assert_eq!(
+        vault.state(dir.path(), "openrouter").error,
+        Some(code::VAULT_SCHEMA)
+    );
 }
 
 #[test]
@@ -184,11 +235,18 @@ fn reset_sets_the_vault_aside_recreates_it_and_does_not_need_it_to_be_readable()
     vault
         .save(dir.path(), "openrouter", Mode::Local, SECRET, None)
         .unwrap();
-    fs::write(dir.path().join("credentials/credentials.sqlite"), b"garbage").unwrap();
+    fs::write(
+        dir.path().join("credentials/credentials.sqlite"),
+        b"garbage",
+    )
+    .unwrap();
     assert!(vault.state(dir.path(), "openrouter").error.is_some());
     vault.reset_storage(dir.path()).unwrap();
     assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
-    assert_eq!(broken_entries(dir.path(), "credential-key.broken-").len(), 1);
+    assert_eq!(
+        broken_entries(dir.path(), "credential-key.broken-").len(),
+        1
+    );
     assert!(dir.path().join("credentials").is_dir());
     let state = vault.state(dir.path(), "openrouter");
     assert_eq!(
@@ -203,7 +261,11 @@ fn reset_sets_the_vault_aside_recreates_it_and_does_not_need_it_to_be_readable()
         .save(dir.path(), "openrouter", Mode::Local, "after-reset", None)
         .unwrap();
     assert_eq!(
-        vault.read(dir.path(), "openrouter", None).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "openrouter", None)
+            .unwrap()
+            .unwrap()
+            .as_str(),
         "after-reset"
     );
 }
@@ -215,7 +277,11 @@ fn delete_on_a_vault_that_cannot_be_opened_sets_it_aside_instead_of_failing() {
     vault
         .save(dir.path(), "openrouter", Mode::Local, SECRET, None)
         .unwrap();
-    fs::write(dir.path().join("credentials/credentials.sqlite"), b"garbage").unwrap();
+    fs::write(
+        dir.path().join("credentials/credentials.sqlite"),
+        b"garbage",
+    )
+    .unwrap();
     vault.delete(dir.path(), "openrouter").unwrap();
     assert_eq!(vault.state(dir.path(), "openrouter").stored, Some(false));
     assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
@@ -290,7 +356,10 @@ fn with_fake() -> (Credentials, Fake) {
         }
     }
     let fake = Fake::default();
-    (Credentials::with_keychain(Box::new(Shared(fake.clone()))), fake)
+    (
+        Credentials::with_keychain(Box::new(Shared(fake.clone()))),
+        fake,
+    )
 }
 
 #[test]
@@ -298,14 +367,27 @@ fn keychain_mode_reaches_the_store_and_only_then() {
     use std::sync::atomic::Ordering;
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
-    vault.save(dir.path(), "openai", Mode::Local, SECRET, None).unwrap();
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 0, "Local never touches the keychain");
+    vault
+        .save(dir.path(), "openai", Mode::Local, SECRET, None)
+        .unwrap();
+    assert_eq!(
+        fake.calls.load(Ordering::SeqCst),
+        0,
+        "Local never touches the keychain"
+    );
     vault
         .save(dir.path(), "openrouter", Mode::Keychain, SECRET, None)
         .unwrap();
-    assert_eq!(fake.entries.lock().unwrap().get("openrouter").unwrap(), SECRET);
     assert_eq!(
-        vault.read(dir.path(), "openrouter", None).unwrap().unwrap().as_str(),
+        fake.entries.lock().unwrap().get("openrouter").unwrap(),
+        SECRET
+    );
+    assert_eq!(
+        vault
+            .read(dir.path(), "openrouter", None)
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET
     );
     assert!(vault.status(dir.path(), "openrouter").unwrap().stored);
@@ -318,10 +400,19 @@ fn leaving_keychain_mode_deletes_the_apps_own_entry() {
     vault
         .save(dir.path(), "openrouter", Mode::Keychain, SECRET, None)
         .unwrap();
-    vault.save(dir.path(), "openrouter", Mode::Local, "", None).unwrap();
-    assert!(fake.entries.lock().unwrap().is_empty(), "the keychain copy is gone");
+    vault
+        .save(dir.path(), "openrouter", Mode::Local, "", None)
+        .unwrap();
+    assert!(
+        fake.entries.lock().unwrap().is_empty(),
+        "the keychain copy is gone"
+    );
     assert_eq!(
-        vault.read(dir.path(), "openrouter", None).unwrap().unwrap().as_str(),
+        vault
+            .read(dir.path(), "openrouter", None)
+            .unwrap()
+            .unwrap()
+            .as_str(),
         SECRET,
         "the key moved to the local vault"
     );
@@ -336,7 +427,9 @@ fn delete_and_purge_remove_the_apps_keychain_entry() {
         .unwrap();
     vault.delete(dir.path(), "openrouter").unwrap();
     assert!(fake.entries.lock().unwrap().is_empty());
-    vault.save(dir.path(), "openai", Mode::Keychain, SECRET, None).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
     vault.purge(dir.path()).unwrap();
     assert!(fake.entries.lock().unwrap().is_empty());
 }
@@ -346,7 +439,9 @@ fn a_failed_keychain_delete_keeps_the_vault_files_so_a_retry_sees_the_same_state
     use std::sync::atomic::Ordering;
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
-    vault.save(dir.path(), "openai", Mode::Keychain, SECRET, None).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
     fake.fail_delete.store(true, Ordering::SeqCst);
     assert!(vault.purge(dir.path()).is_err());
     assert!(dir.path().join("credentials").is_dir());
@@ -357,11 +452,16 @@ fn a_failed_keychain_delete_keeps_the_vault_files_so_a_retry_sees_the_same_state
 fn a_keychain_import_copies_into_local_and_leaves_the_original() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
-    fake.entries.lock().unwrap().insert("openai".into(), SECRET.into());
+    fake.entries
+        .lock()
+        .unwrap()
+        .insert("openai".into(), SECRET.into());
     let status = vault.import_keychain(dir.path(), "openai", None).unwrap();
     assert_eq!(status.mode, Mode::Local);
     assert!(fake.entries.lock().unwrap().contains_key("openai"));
-    let empty = vault.import_keychain(dir.path(), "gemini", None).unwrap_err();
+    let empty = vault
+        .import_keychain(dir.path(), "gemini", None)
+        .unwrap_err();
     assert_eq!(empty.code, code::KEYCHAIN_EMPTY);
 }
 
@@ -380,8 +480,13 @@ fn the_platform_store_is_installed_by_the_first_entry() {
 fn the_custom_key_is_only_returned_for_the_endpoint_it_was_saved_for() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
-    vault.save(dir.path(), "custom", Mode::Local, SECRET, Some(EP)).unwrap();
-    assert!(vault.read(dir.path(), "custom", Some(EP)).unwrap().is_some());
+    vault
+        .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
+        .unwrap();
+    assert!(vault
+        .read(dir.path(), "custom", Some(EP))
+        .unwrap()
+        .is_some());
     for other in [Some(OTHER), None] {
         assert_eq!(
             vault.read(dir.path(), "custom", other).unwrap_err().code,
@@ -389,24 +494,42 @@ fn the_custom_key_is_only_returned_for_the_endpoint_it_was_saved_for() {
         );
     }
     // Saving again without a key (a settings change) keeps the old binding.
-    vault.save(dir.path(), "custom", Mode::Local, "", Some(OTHER)).unwrap();
+    vault
+        .save(dir.path(), "custom", Mode::Local, "", Some(OTHER))
+        .unwrap();
     assert_eq!(
-        vault.read(dir.path(), "custom", Some(OTHER)).unwrap_err().code,
+        vault
+            .read(dir.path(), "custom", Some(OTHER))
+            .unwrap_err()
+            .code,
         code::CREDENTIAL_ENDPOINT_MISMATCH
     );
     // A re-entered key binds to the new endpoint.
-    vault.save(dir.path(), "custom", Mode::Local, SECRET, Some(OTHER)).unwrap();
-    assert!(vault.read(dir.path(), "custom", Some(OTHER)).unwrap().is_some());
+    vault
+        .save(dir.path(), "custom", Mode::Local, SECRET, Some(OTHER))
+        .unwrap();
+    assert!(vault
+        .read(dir.path(), "custom", Some(OTHER))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
 fn a_custom_key_saved_before_the_binding_existed_is_bound_on_first_use() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
-    vault.save(dir.path(), "custom", Mode::Local, SECRET, None).unwrap();
-    assert!(vault.read(dir.path(), "custom", Some(EP)).unwrap().is_some());
+    vault
+        .save(dir.path(), "custom", Mode::Local, SECRET, None)
+        .unwrap();
+    assert!(vault
+        .read(dir.path(), "custom", Some(EP))
+        .unwrap()
+        .is_some());
     assert_eq!(
-        vault.read(dir.path(), "custom", Some(OTHER)).unwrap_err().code,
+        vault
+            .read(dir.path(), "custom", Some(OTHER))
+            .unwrap_err()
+            .code,
         code::CREDENTIAL_ENDPOINT_MISMATCH
     );
 }
@@ -415,18 +538,26 @@ fn a_custom_key_saved_before_the_binding_existed_is_bound_on_first_use() {
 fn an_old_database_without_the_endpoint_column_is_upgraded_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
-    vault.save(dir.path(), "custom", Mode::Local, SECRET, Some(EP)).unwrap();
+    vault
+        .save(dir.path(), "custom", Mode::Local, SECRET, Some(EP))
+        .unwrap();
     let conn = Connection::open(dir.path().join("credentials/credentials.sqlite")).unwrap();
-    conn.execute("ALTER TABLE accounts DROP COLUMN endpoint_hash", []).unwrap();
+    conn.execute("ALTER TABLE accounts DROP COLUMN endpoint_hash", [])
+        .unwrap();
     drop(conn);
-    assert!(vault.read(dir.path(), "custom", Some(EP)).unwrap().is_some());
+    assert!(vault
+        .read(dir.path(), "custom", Some(EP))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
 fn only_custom_keys_are_bound_to_an_endpoint() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Credentials::default();
-    vault.save(dir.path(), "openai", Mode::Local, SECRET, Some(EP)).unwrap();
+    vault
+        .save(dir.path(), "openai", Mode::Local, SECRET, Some(EP))
+        .unwrap();
     assert!(vault.read(dir.path(), "openai", None).unwrap().is_some());
 }
 

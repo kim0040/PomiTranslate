@@ -68,7 +68,10 @@ pub fn allow_close(app: &AppHandle) -> bool {
     if control.confirmed.load(Ordering::SeqCst) {
         return true;
     }
-    match prompt_for(job_running(app), control.settings_dirty.load(Ordering::SeqCst)) {
+    match prompt_for(
+        job_running(app),
+        control.settings_dirty.load(Ordering::SeqCst),
+    ) {
         None => true,
         Some(prompt) => {
             if control.waiting.load(Ordering::SeqCst) {
@@ -86,7 +89,9 @@ pub fn allow_close(app: &AppHandle) -> bool {
 /// The Quit menu item and any other deliberate quit.
 pub fn request_exit(app: &AppHandle) {
     if allow_close(app) {
-        app.state::<ExitControl>().confirmed.store(true, Ordering::SeqCst);
+        app.state::<ExitControl>()
+            .confirmed
+            .store(true, Ordering::SeqCst);
         app.exit(0);
     }
 }
@@ -127,7 +132,9 @@ pub fn exit_confirm(app: AppHandle) -> Result<(), IpcError> {
                 return;
             }
         }
-        app.state::<ExitControl>().waiting.store(false, Ordering::SeqCst);
+        app.state::<ExitControl>()
+            .waiting
+            .store(false, Ordering::SeqCst);
         let _ = app.emit("pomi-exit-stuck", ());
     });
     Ok(())
@@ -154,14 +161,36 @@ mod tests {
 
     #[test]
     fn a_job_or_unsaved_settings_ask_and_the_job_comes_first() {
-        assert_eq!(prompt_for(true, false), Some(Prompt { job: true, dirty: false }));
-        assert_eq!(prompt_for(false, true), Some(Prompt { job: false, dirty: true }));
-        assert_eq!(prompt_for(true, true), Some(Prompt { job: true, dirty: true }));
+        assert_eq!(
+            prompt_for(true, false),
+            Some(Prompt {
+                job: true,
+                dirty: false
+            })
+        );
+        assert_eq!(
+            prompt_for(false, true),
+            Some(Prompt {
+                job: false,
+                dirty: true
+            })
+        );
+        assert_eq!(
+            prompt_for(true, true),
+            Some(Prompt {
+                job: true,
+                dirty: true
+            })
+        );
     }
 
     #[test]
     fn the_prompt_reaches_the_page_as_plain_flags() {
-        let value = serde_json::to_value(Prompt { job: true, dirty: false }).unwrap();
+        let value = serde_json::to_value(Prompt {
+            job: true,
+            dirty: false,
+        })
+        .unwrap();
         assert_eq!(value, serde_json::json!({"job": true, "dirty": false}));
     }
 }

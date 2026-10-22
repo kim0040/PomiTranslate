@@ -136,17 +136,30 @@ mod tests {
         for (url, expected) in [
             ("", code::CUSTOM_ENDPOINT_REQUIRED),
             ("file:///tmp/a", code::CUSTOM_ENDPOINT_INVALID),
-            ("https://user:secret@example.com", code::CUSTOM_ENDPOINT_INVALID),
-            ("https://example.com?token=secret", code::CUSTOM_ENDPOINT_INVALID),
+            (
+                "https://user:secret@example.com",
+                code::CUSTOM_ENDPOINT_INVALID,
+            ),
+            (
+                "https://example.com?token=secret",
+                code::CUSTOM_ENDPOINT_INVALID,
+            ),
             ("not a url", code::CUSTOM_ENDPOINT_INVALID),
         ] {
             let mut p = payload(serde_json::json!({"provider":"custom","baseUrl":url}));
             assert_eq!(validate(&mut p).unwrap_err().code, expected, "{url}");
         }
-        let mut p = payload(serde_json::json!({"provider":"custom","baseUrl":"http://127.0.0.1:8080/v1","wireFormat":"openai"}));
+        let mut p = payload(
+            serde_json::json!({"provider":"custom","baseUrl":"http://127.0.0.1:8080/v1","wireFormat":"openai"}),
+        );
         validate(&mut p).unwrap();
-        let mut p = payload(serde_json::json!({"provider":"custom","baseUrl":"https://example.com/v1","wireFormat":"gemini"}));
-        assert_eq!(validate(&mut p).unwrap_err().code, code::UNSUPPORTED_WIRE_FORMAT);
+        let mut p = payload(
+            serde_json::json!({"provider":"custom","baseUrl":"https://example.com/v1","wireFormat":"gemini"}),
+        );
+        assert_eq!(
+            validate(&mut p).unwrap_err().code,
+            code::UNSUPPORTED_WIRE_FORMAT
+        );
     }
 
     #[test]
@@ -180,13 +193,22 @@ mod tests {
 
     #[test]
     fn the_bound_endpoint_ignores_spelling_differences() {
-        let a = payload(serde_json::json!({"provider":"custom","baseUrl":"HTTPS://Models.Example.com:443/v1/"}));
-        let b = payload(serde_json::json!({"provider":"custom","baseUrl":"https://models.example.com/v1"}));
+        let a = payload(
+            serde_json::json!({"provider":"custom","baseUrl":"HTTPS://Models.Example.com:443/v1/"}),
+        );
+        let b = payload(
+            serde_json::json!({"provider":"custom","baseUrl":"https://models.example.com/v1"}),
+        );
         assert_eq!(bound_endpoint(&a), bound_endpoint(&b));
         assert_eq!(bound_endpoint(&a).unwrap(), "https://models.example.com/v1");
-        let c = payload(serde_json::json!({"provider":"custom","baseUrl":"https://models.example.com/v2"}));
+        let c = payload(
+            serde_json::json!({"provider":"custom","baseUrl":"https://models.example.com/v2"}),
+        );
         assert_ne!(bound_endpoint(&a), bound_endpoint(&c));
         let public = payload(serde_json::json!({"provider":"openai"}));
-        assert_eq!(bound_endpoint(&public).unwrap(), "https://api.openai.com/v1");
+        assert_eq!(
+            bound_endpoint(&public).unwrap(),
+            "https://api.openai.com/v1"
+        );
     }
 }

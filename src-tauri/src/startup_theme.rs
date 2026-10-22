@@ -57,12 +57,28 @@ mod tests {
     fn reads_the_saved_mode_and_falls_back_to_the_copy_then_system() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(saved_choice(dir.path()), "system");
-        std::fs::write(dir.path().join("settings.backup.json"), r#"{"app_prefs":{"theme":"dark"}}"#).unwrap();
+        std::fs::write(
+            dir.path().join("settings.backup.json"),
+            r#"{"app_prefs":{"theme":"dark"}}"#,
+        )
+        .unwrap();
         std::fs::write(dir.path().join("settings.json"), "{ damaged").unwrap();
-        assert_eq!(saved_choice(dir.path()), "dark", "a damaged file falls back to its copy");
-        std::fs::write(dir.path().join("settings.json"), r#"{"app_prefs":{"theme":"light"}}"#).unwrap();
+        assert_eq!(
+            saved_choice(dir.path()),
+            "dark",
+            "a damaged file falls back to its copy"
+        );
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"app_prefs":{"theme":"light"}}"#,
+        )
+        .unwrap();
         assert_eq!(saved_choice(dir.path()), "light");
-        std::fs::write(dir.path().join("settings.json"), r#"{"app_prefs":{"theme":"neon"}}"#).unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"app_prefs":{"theme":"neon"}}"#,
+        )
+        .unwrap();
         assert_eq!(saved_choice(dir.path()), "system");
     }
 }

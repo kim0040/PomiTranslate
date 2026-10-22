@@ -94,7 +94,9 @@ mod tests {
 
     #[test]
     fn only_known_https_addresses_and_the_contact_open() {
-        assert!(allowed("https://github.com/kim0040/PomiTranslate/releases/latest"));
+        assert!(allowed(
+            "https://github.com/kim0040/PomiTranslate/releases/latest"
+        ));
         assert!(allowed("https://www.minecraft.net/en-us/eula"));
         assert!(allowed("mailto:mini0227kim@gmail.com"));
         for refused in [
