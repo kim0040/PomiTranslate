@@ -1,4 +1,5 @@
 mod app_menu;
+mod core_process;
 mod credentials;
 mod desktop_links;
 mod diagnostics;
@@ -12,17 +13,28 @@ mod sidecar_paths;
 mod startup;
 mod startup_theme;
 mod updates;
+mod window_geometry;
+
+#[cfg(test)]
+mod test_support;
 
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::Serialize;
 use serde_json::Value;
 use tauri::{Emitter, Manager, State, WindowEvent};
 
 use error::{code, IpcError};
 use sidecar::ActiveSidecar;
+
+/// The build this app was made from (`build.rs`): short commit, `+dirty` when the tree had uncommitted
+/// changes, and the UTC build date.
+pub(crate) const BUILD_SHA: &str = env!("POMI_BUILD_SHA");
+pub(crate) const BUILD_DATE: &str = env!("POMI_BUILD_DATE");
 
 const ALLOWED_REQUESTS: &[&str] = &[
     "app.bootstrap",
@@ -49,6 +61,16 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "translate.resume",
     "backups.list",
     "restore.start",
+    // Unfinished-job recovery and backup maintenance write to worlds or the backup store; they run
+    // as jobs (see `sidecar::lane`). `jobs.recover` is accepted for a core that names it so.
+    "recovery.start",
+    "jobs.recover",
+    "backups.delete",
+    "backups.prune",
+    // Per-world review drafts are small reads and writes of the core's own data.
+    "review.draft.get",
+    "review.draft.set",
+    "review.draft.clear",
 ];
 
 /// Requests whose payload gets `credentialOwner: rust`, so the sidecar never touches the keychain.
@@ -129,7 +151,10 @@ async fn credential_status(
     app: tauri::AppHandle,
     provider: String,
 ) -> Result<credentials::State, IpcError> {
-    vault(&app, move |credentials, root| Ok(credentials.state(root, &provider))).await
+    vault(&app, move |credentials, root| {
+        Ok(credentials.state(root, &provider))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -138,7 +163,9 @@ async fn credential_import(
     provider: String,
     endpoint: Option<String>,
 ) -> Result<credentials::Status, IpcError> {
-    let endpoint = endpoint.as_deref().and_then(provider_boundary::canonical_endpoint);
+    let endpoint = endpoint
+        .as_deref()
+        .and_then(provider_boundary::canonical_endpoint);
     logged(
         "credential_import",
         vault(&app, move |credentials, root| {
@@ -155,10 +182,12 @@ async fn credential_reset_storage(
     app: tauri::AppHandle,
     state: State<'_, ActiveSidecar>,
 ) -> Result<(), IpcError> {
-    let _gate = state
-        .request_gate
-        .try_lock()
-        .map_err(|_| IpcError::new(code::BUSY, "Another PomiTranslate operation is still running"))?;
+    let _gate = state.request_gate.try_lock().map_err(|_| {
+        IpcError::new(
+            code::BUSY,
+            "Another PomiTranslate operation is still running",
+        )
+    })?;
     logged(
         "credential_reset_storage",
         vault(&app, |credentials, root| {
@@ -179,10 +208,12 @@ async fn native_reset(
     state: State<'_, ActiveSidecar>,
     delete_keys: bool,
 ) -> Result<(), IpcError> {
-    let _gate = state
-        .request_gate
-        .try_lock()
-        .map_err(|_| IpcError::new(code::BUSY, "Another PomiTranslate operation is still running"))?;
+    let _gate = state.request_gate.try_lock().map_err(|_| {
+        IpcError::new(
+            code::BUSY,
+            "Another PomiTranslate operation is still running",
+        )
+    })?;
     let root = app_data_root(&app)?;
     logged(
         "native_reset",
@@ -228,7 +259,10 @@ async fn sidecar_request(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    logged(&format!("sidecar_request:{kind}"), handle_request(&app, &state, request).await)
+    logged(
+        &format!("sidecar_request:{kind}"),
+        handle_request(&app, &state, request).await,
+    )
 }
 
 async fn handle_request(
@@ -243,7 +277,10 @@ async fn handle_request(
         .ok_or_else(|| invalid("Missing request type"))?
         .to_string();
     if !is_allowed_request(&kind) {
-        return Err(IpcError::new(code::UNSUPPORTED_REQUEST, "Unsupported request type"));
+        return Err(IpcError::new(
+            code::UNSUPPORTED_REQUEST,
+            "Unsupported request type",
+        ));
     }
     let id = request
         .get("id")
@@ -255,7 +292,10 @@ async fn handle_request(
     }
 
     let _request_guard = state.request_gate.try_lock().map_err(|_| {
-        IpcError::new(code::BUSY, "Another PomiTranslate operation is still running")
+        IpcError::new(
+            code::BUSY,
+            "Another PomiTranslate operation is still running",
+        )
     })?;
 
     let provider = request
@@ -269,9 +309,11 @@ async fn handle_request(
             return Err(invalid("Missing credential provider"));
         }
         let target = provider.clone();
-        vault(app, move |credentials, root| credentials.delete(root, &target))
-            .await
-            .map_err(credential_unavailable)?;
+        vault(app, move |credentials, root| {
+            credentials.delete(root, &target)
+        })
+        .await
+        .map_err(credential_unavailable)?;
         return Ok(serde_json::json!({
             "v": 1,
             "id": id,
@@ -300,13 +342,17 @@ async fn handle_request(
         });
         let requested: Option<credentials::Mode> = match payload.remove("credentialMode") {
             Some(value) => Some(
-                serde_json::from_value(value).map_err(|_| invalid("Unknown credential storage mode"))?,
+                serde_json::from_value(value)
+                    .map_err(|_| invalid("Unknown credential storage mode"))?,
             ),
             None => None,
         };
         let current = {
             let target = provider.clone();
-            vault(app, move |credentials, root| Ok(credentials.state(root, &target))).await?
+            vault(app, move |credentials, root| {
+                Ok(credentials.state(root, &target))
+            })
+            .await?
         };
         let mode = requested.or(current.mode).unwrap_or_default();
         // A settings change that does not touch the key never needs the vault, so a damaged one
@@ -346,25 +392,26 @@ async fn handle_request(
         }
     }
 
-    let (mut response, committed_status) = if let Some((mode, supplied, endpoint)) = pending_credential {
-        let root = app_data_root(app)?;
-        let credentials = app.state::<credentials::Credentials>();
-        settings_transaction::save(
-            request,
-            |request| sidecar::exchange(app, state, request),
-            || {
-                credentials
-                    .save(&root, &provider, mode, &supplied, endpoint.as_deref())
-                    .map_err(|error| settings_transaction::CommitError {
-                        uncertain: error.uncertain,
-                        reason: Some(error.error.code),
-                    })
-            },
-        )
-        .await?
-    } else {
-        (sidecar::exchange(app, state, request).await?, None)
-    };
+    let (mut response, committed_status) =
+        if let Some((mode, supplied, endpoint)) = pending_credential {
+            let root = app_data_root(app)?;
+            let credentials = app.state::<credentials::Credentials>();
+            settings_transaction::save(
+                request,
+                |request| sidecar::exchange(app, state, request),
+                || {
+                    credentials
+                        .save(&root, &provider, mode, &supplied, endpoint.as_deref())
+                        .map_err(|error| settings_transaction::CommitError {
+                            uncertain: error.uncertain,
+                            reason: Some(error.error.code),
+                        })
+                },
+            )
+            .await?
+        } else {
+            (sidecar::exchange(app, state, request).await?, None)
+        };
     if response.get("type").and_then(Value::as_str) == Some("response.ok")
         && matches!(
             kind.as_str(),
@@ -391,10 +438,16 @@ async fn handle_request(
                 error: None,
             }
         } else {
-            vault(app, move |credentials, root| Ok(credentials.state(root, &response_provider))).await?
+            vault(app, move |credentials, root| {
+                Ok(credentials.state(root, &response_provider))
+            })
+            .await?
         };
         if let Some(payload) = response.get_mut("payload").and_then(Value::as_object_mut) {
-            payload.insert("apiKeyStored".into(), Value::Bool(storage.stored.unwrap_or(false)));
+            payload.insert(
+                "apiKeyStored".into(),
+                Value::Bool(storage.stored.unwrap_or(false)),
+            );
             if let Some(mode) = storage.mode {
                 payload.insert(
                     "credentialMode".into(),
@@ -429,7 +482,10 @@ async fn update_install(
     state: State<'_, ActiveSidecar>,
     control: State<'_, updates::UpdateControl>,
 ) -> Result<(), IpcError> {
-    logged("update_install", updates::install(&app, &control, &state).await)
+    logged(
+        "update_install",
+        updates::install(&app, &control, &state).await,
+    )
 }
 
 #[tauri::command]
@@ -440,6 +496,100 @@ fn update_cancel(control: State<'_, updates::UpdateControl>) {
 #[tauri::command]
 fn cancel_active(state: State<'_, ActiveSidecar>) -> Result<bool, IpcError> {
     state.request_cancel()
+}
+
+/// What `force_stop_active` returns.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForceStopResult {
+    /// A core was running and is now gone.
+    was_running: bool,
+    /// It had to be killed because it did not end when its stdin closed.
+    killed: bool,
+    /// The `app.bootstrap` reply read right after the stop, so the page shows the interrupted job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap_error: Option<IpcError>,
+}
+
+/// Wait until the interrupted request has let go of the operation gate and the slot.
+async fn wait_until_idle(state: &ActiveSidecar, limit: Duration) -> bool {
+    let started = tokio::time::Instant::now();
+    while state.busy() {
+        if started.elapsed() >= limit {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    true
+}
+
+/// "Stop now" for a job that did not react to its cancel request (SC-2, SC-6). Allowed only
+/// `FORCE_STOP_AFTER_CANCEL` after the cancel request. The core is stopped as a tree and its exit is
+/// observed before this returns; then the app state is read back (read-only `app.bootstrap`), which
+/// is where the core reports the job it found interrupted.
+#[tauri::command]
+async fn force_stop_active(
+    app: tauri::AppHandle,
+    state: State<'_, ActiveSidecar>,
+) -> Result<ForceStopResult, IpcError> {
+    let stopped = logged(
+        "force_stop_active",
+        state.force_stop(sidecar::FORCE_STOP_AFTER_CANCEL).await,
+    )?;
+    let mut result = ForceStopResult {
+        was_running: stopped.was_running,
+        killed: stopped.killed,
+        bootstrap: None,
+        bootstrap_error: None,
+    };
+    if stopped.was_running {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        let request = serde_json::json!({
+            "v": 1,
+            "id": format!("force-stop-bootstrap-{millis}"),
+            "type": "app.bootstrap",
+            "payload": {}
+        });
+        let outcome = if wait_until_idle(&state, Duration::from_secs(10)).await {
+            handle_request(&app, &state, request).await
+        } else {
+            Err(IpcError::new(
+                code::BUSY,
+                "The stopped job has not released the core yet",
+            ))
+        };
+        match logged("force_stop_active:bootstrap", outcome) {
+            Ok(reply) => result.bootstrap = Some(reply),
+            Err(error) => result.bootstrap_error = Some(error),
+        }
+    }
+    Ok(result)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppInfo {
+    version: &'static str,
+    build_sha: &'static str,
+    build_date: &'static str,
+    os: &'static str,
+    arch: &'static str,
+}
+
+/// Version and build of this app, for About and diagnostics.
+#[tauri::command]
+fn app_info() -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        build_sha: BUILD_SHA,
+        build_date: BUILD_DATE,
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+    }
 }
 
 /// Versions, platform, recent events and the core's last stderr lines, for "copy diagnostics".
@@ -459,7 +609,11 @@ fn world_path_from_args(args: &[String], cwd: &str) -> Option<String> {
             if path.is_relative() {
                 path = Path::new(cwd).join(path);
             }
-            if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("level.dat")) && path.is_file() {
+            if path
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("level.dat"))
+                && path.is_file()
+            {
                 path.pop();
             }
             path.is_dir().then(|| path.to_string_lossy().into_owned())
@@ -493,7 +647,11 @@ fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
                 diagnostics::global().log(
                     "WARN",
                     "navigation",
-                    &format!("blocked navigation to {}://{}", url.scheme(), url.host_str().unwrap_or("")),
+                    &format!(
+                        "blocked navigation to {}://{}",
+                        url.scheme(),
+                        url.host_str().unwrap_or("")
+                    ),
                 );
             }
             allowed
@@ -517,7 +675,9 @@ pub fn run() {
         }))
         .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(window_geometry::state_plugin())
+        .plugin(window_geometry::clamp_plugin())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ActiveSidecar::default())
@@ -543,12 +703,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sidecar_request,
             cancel_active,
+            force_stop_active,
+            app_info,
             credential_status,
             credential_import,
             credential_reset_storage,
             native_reset,
             operation_active,
             diagnostics_snapshot,
+            document_export::diagnostics_export,
             document_export::export_document,
             app_menu::set_menu_labels,
             app_menu::set_menu_theme,
@@ -602,8 +765,16 @@ mod tests {
     #[test]
     fn public_catalog_bypass_is_limited_to_openrouter_model_reads() {
         let public = serde_json::json!({"provider":"openrouter", "publicCatalog":true});
-        assert!(is_public_catalog("models.list", public.as_object().unwrap()));
-        for kind in ["translate.start", "translate.resume", "prompt.enhance", "provider.usage"] {
+        assert!(is_public_catalog(
+            "models.list",
+            public.as_object().unwrap()
+        ));
+        for kind in [
+            "translate.start",
+            "translate.resume",
+            "prompt.enhance",
+            "provider.usage",
+        ] {
             assert!(!is_public_catalog(kind, public.as_object().unwrap()));
         }
         for payload in [
@@ -612,7 +783,10 @@ mod tests {
             serde_json::json!({"provider":"openrouter", "publicCatalog":"true"}),
             serde_json::json!({"provider":"openrouter"}),
         ] {
-            assert!(!is_public_catalog("models.list", payload.as_object().unwrap()));
+            assert!(!is_public_catalog(
+                "models.list",
+                payload.as_object().unwrap()
+            ));
         }
     }
 
@@ -631,6 +805,13 @@ mod tests {
             "models.list",
             "prefs.set",
             "app.reset",
+            "recovery.start",
+            "jobs.recover",
+            "backups.delete",
+            "backups.prune",
+            "review.draft.get",
+            "review.draft.set",
+            "review.draft.clear",
         ] {
             assert!(is_allowed_request(kind), "{kind} must be allowed");
         }
@@ -643,6 +824,34 @@ mod tests {
             "translate",
         ] {
             assert!(!is_allowed_request(kind), "{kind:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn every_request_that_runs_as_a_job_is_allowed_and_none_gets_a_key_or_credential_ownership() {
+        for kind in ALLOWED_REQUESTS {
+            let job = sidecar::lane(kind) == sidecar::Lane::Job;
+            // Backup maintenance, recovery and restore never need the provider key.
+            if job && !matches!(*kind, "translate.start" | "translate.resume" | "scan.start") {
+                assert!(!KEY_INJECTED_REQUESTS.contains(kind), "{kind}");
+                assert!(!CREDENTIAL_OWNER_REQUESTS.contains(kind), "{kind}");
+            }
+        }
+        for kind in [
+            "scan.start",
+            "translate.start",
+            "translate.resume",
+            "restore.start",
+            "recovery.start",
+            "backups.delete",
+            "backups.prune",
+        ] {
+            assert_eq!(sidecar::lane(kind), sidecar::Lane::Job, "{kind}");
+            assert!(is_allowed_request(kind), "{kind}");
+        }
+        for kind in ["review.draft.get", "review.draft.set", "review.draft.clear"] {
+            assert_eq!(sidecar::lane(kind), sidecar::Lane::Query, "{kind}");
+            assert!(!KEY_INJECTED_REQUESTS.contains(&kind));
         }
     }
 
@@ -695,8 +904,13 @@ mod tests {
             assert_eq!(error.code, code::CREDENTIAL_UNAVAILABLE);
             assert_eq!(error.detail, Some(reason));
         }
-        let mismatch = credential_unavailable(IpcError::new(code::CREDENTIAL_ENDPOINT_MISMATCH, "x"));
-        assert_eq!(mismatch.code, code::CREDENTIAL_ENDPOINT_MISMATCH, "passes through unchanged");
+        let mismatch =
+            credential_unavailable(IpcError::new(code::CREDENTIAL_ENDPOINT_MISMATCH, "x"));
+        assert_eq!(
+            mismatch.code,
+            code::CREDENTIAL_ENDPOINT_MISMATCH,
+            "passes through unchanged"
+        );
     }
 
     #[test]
@@ -710,16 +924,30 @@ mod tests {
         let cwd = dir.path().to_string_lossy().into_owned();
         for args in [
             vec![exe.clone(), expected.clone()],
-            vec![exe.clone(), "--flag".into(), world.join("level.dat").to_string_lossy().into_owned()],
+            vec![
+                exe.clone(),
+                "--flag".into(),
+                world.join("level.dat").to_string_lossy().into_owned(),
+            ],
             vec![exe.clone(), "My World".into()],
         ] {
-            assert_eq!(world_path_from_args(&args, &cwd).as_deref(), Some(expected.as_str()), "{args:?}");
+            assert_eq!(
+                world_path_from_args(&args, &cwd).as_deref(),
+                Some(expected.as_str()),
+                "{args:?}"
+            );
         }
         for args in [
             vec![exe.clone()],
             vec![exe.clone(), "--help".into()],
             vec![exe.clone(), "does-not-exist".into()],
-            vec![exe.clone(), world.join("level.dat").to_string_lossy().replace("level.dat", "other.txt")],
+            vec![
+                exe.clone(),
+                world
+                    .join("level.dat")
+                    .to_string_lossy()
+                    .replace("level.dat", "other.txt"),
+            ],
         ] {
             assert_eq!(world_path_from_args(&args, &cwd), None, "{args:?}");
         }
@@ -737,7 +965,10 @@ mod tests {
         ] {
             assert!(navigation_allowed(&url(allowed), None), "{allowed}");
         }
-        assert!(navigation_allowed(&url("http://127.0.0.1:5173/"), Some(&dev)));
+        assert!(navigation_allowed(
+            &url("http://127.0.0.1:5173/"),
+            Some(&dev)
+        ));
         for refused in [
             "https://evil.example/",
             "http://tauri.localhost.evil.example/",
@@ -750,7 +981,10 @@ mod tests {
         ] {
             assert!(!navigation_allowed(&url(refused), None), "{refused}");
         }
-        assert!(!navigation_allowed(&url("http://127.0.0.1:9999/"), Some(&dev)));
+        assert!(!navigation_allowed(
+            &url("http://127.0.0.1:9999/"),
+            Some(&dev)
+        ));
     }
 
     #[test]

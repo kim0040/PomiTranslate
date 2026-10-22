@@ -81,7 +81,9 @@ pub(super) fn wait_for_lock(
             Ok(true) => return Ok(()),
             Ok(false) => {
                 if Instant::now() >= deadline {
-                    return Err(FsError::busy("Credential storage is locked by another operation"));
+                    return Err(FsError::busy(
+                        "Credential storage is locked by another operation",
+                    ));
                 }
                 thread::sleep(LOCK_POLL);
             }
@@ -99,8 +101,8 @@ pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                let transient = cfg!(windows)
-                    && matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33));
+                let transient =
+                    cfg!(windows) && matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33));
                 last = Some(error);
                 if !transient {
                     break;

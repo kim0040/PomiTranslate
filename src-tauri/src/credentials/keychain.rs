@@ -39,7 +39,9 @@ impl KeychainStore for OsKeychain {
         match Self::entry(provider)?.get_password() {
             Ok(value) => Ok(Some(Zeroizing::new(value))),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(failed("Could not read the API key from the OS credential store")),
+            Err(_) => Err(failed(
+                "Could not read the API key from the OS credential store",
+            )),
         }
     }
 
@@ -79,11 +81,20 @@ pub mod fake {
     impl KeychainStore for FakeKeychain {
         fn get(&self, provider: &str) -> Result<Option<Zeroizing<String>>, IpcError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.entries.lock().unwrap().get(provider).cloned().map(Zeroizing::new))
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .get(provider)
+                .cloned()
+                .map(Zeroizing::new))
         }
         fn set(&self, provider: &str, secret: &str) -> Result<(), IpcError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.entries.lock().unwrap().insert(provider.into(), secret.into());
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(provider.into(), secret.into());
             Ok(())
         }
         fn delete(&self, provider: &str) -> Result<(), IpcError> {

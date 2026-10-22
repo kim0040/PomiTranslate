@@ -29,7 +29,12 @@ fn settings(message: &Value) -> Result<Value, IpcError> {
         .and_then(|p| p.get("settings"))
         .filter(|s| s.is_object())
         .cloned()
-        .ok_or_else(|| IpcError::new(code::CORE_PROTOCOL, "Translation core returned invalid settings"))
+        .ok_or_else(|| {
+            IpcError::new(
+                code::CORE_PROTOCOL,
+                "Translation core returned invalid settings",
+            )
+        })
 }
 
 fn failure(id: &str, recovery_required: bool) -> Value {
@@ -138,7 +143,10 @@ mod tests {
                 if commit_ok {
                     Ok(())
                 } else {
-                    Err(CommitError { uncertain: false, reason: None })
+                    Err(CommitError {
+                        uncertain: false,
+                        reason: None,
+                    })
                 }
             },
         ))
@@ -212,7 +220,10 @@ mod tests {
         assert!(!committed);
         assert_eq!(requests.len(), 2);
         let (r, _, committed) = run(
-            vec![Ok(response(json!({}))), Err(IpcError::new("CORE_STOPPED", "lost reply"))],
+            vec![
+                Ok(response(json!({}))),
+                Err(IpcError::new("CORE_STOPPED", "lost reply")),
+            ],
             true,
         );
         assert_eq!(r["error"]["code"], "SETTINGS_RECONCILIATION_REQUIRED");
@@ -229,7 +240,12 @@ mod tests {
         let (result, _) = tauri::async_runtime::block_on(save::<(), _, _, _>(
             request(),
             |_| std::future::ready(replies.borrow_mut().pop_front().unwrap()),
-            || Err(CommitError { uncertain: true, reason: None }),
+            || {
+                Err(CommitError {
+                    uncertain: true,
+                    reason: None,
+                })
+            },
         ))
         .unwrap();
         assert_eq!(result["error"]["code"], "CREDENTIAL_SAVE_UNCERTAIN");

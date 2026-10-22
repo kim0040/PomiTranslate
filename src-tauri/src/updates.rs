@@ -68,7 +68,10 @@ struct ActiveGuard<'a>(&'a UpdateControl);
 impl<'a> ActiveGuard<'a> {
     fn begin(control: &'a UpdateControl) -> Result<Self, IpcError> {
         if control.active.swap(true, Ordering::SeqCst) {
-            return Err(IpcError::new(code::UPDATE_BUSY, "An update is already being downloaded"));
+            return Err(IpcError::new(
+                code::UPDATE_BUSY,
+                "An update is already being downloaded",
+            ));
         }
         control.cancelled.store(false, Ordering::SeqCst);
         Ok(Self(control))
@@ -102,7 +105,10 @@ fn classify(text: &str) -> &'static str {
         code::UPDATE_TIMEOUT
     } else if lower.contains("signature") {
         code::UPDATE_SIGNATURE_INVALID
-    } else if text.contains("404") || text.contains("release JSON") || text.contains("ReleaseNotFound") {
+    } else if text.contains("404")
+        || text.contains("release JSON")
+        || text.contains("ReleaseNotFound")
+    {
         code::UPDATE_NOT_PUBLISHED
     } else {
         code::UPDATE_UNREACHABLE
@@ -113,7 +119,11 @@ fn check_error(error: tauri_plugin_updater::Error) -> IpcError {
     let text = error.to_string();
     let kind = classify(&text);
     // A bad signature is an install problem; for a check it just means unreachable.
-    let kind = if kind == code::UPDATE_SIGNATURE_INVALID { code::UPDATE_UNREACHABLE } else { kind };
+    let kind = if kind == code::UPDATE_SIGNATURE_INVALID {
+        code::UPDATE_UNREACHABLE
+    } else {
+        kind
+    };
     IpcError::new(kind, text)
 }
 
@@ -134,7 +144,10 @@ pub async fn check<R: Runtime>(app: &AppHandle<R>) -> Result<UpdateInfo, IpcErro
             status: "available",
             current_version: current,
             version: Some(update.version.clone()),
-            notes: update.body.clone().map(|body| body.chars().take(4000).collect()),
+            notes: update
+                .body
+                .clone()
+                .map(|body| body.chars().take(4000).collect()),
             date: update.date.map(|date| date.to_string()),
             can_install,
             release_url: RELEASES_URL,
@@ -164,7 +177,10 @@ pub async fn install<R: Runtime>(
     sidecar: &ActiveSidecar,
 ) -> Result<(), IpcError> {
     if verification_key(app).is_none() {
-        return Err(IpcError::new(code::UPDATE_UNSIGNED_BUILD, "This build has no update signing key"));
+        return Err(IpcError::new(
+            code::UPDATE_UNSIGNED_BUILD,
+            "This build has no update signing key",
+        ));
     }
     // No point downloading while a job holds the core; the person retries when it is done.
     if sidecar.busy() {
@@ -181,7 +197,10 @@ pub async fn install<R: Runtime>(
         .map_err(|_| IpcError::new(code::UPDATE_TIMEOUT, "The update check timed out"))?
         .map_err(check_error)?;
     let Some(mut update) = checked else {
-        return Err(IpcError::new(code::UPDATE_NONE, "There is no newer version"));
+        return Err(IpcError::new(
+            code::UPDATE_NONE,
+            "There is no newer version",
+        ));
     };
     // The 30 second request limit belongs to the check; a download is bounded by its stall limit.
     update.timeout = None;
@@ -201,7 +220,8 @@ pub async fn install<R: Runtime>(
                             *clock = Instant::now();
                         }
                         if let Some(window) = &window {
-                            let _ = window.emit("pomi-update-progress", Progress { downloaded, total });
+                            let _ =
+                                window.emit("pomi-update-progress", Progress { downloaded, total });
                         }
                     },
                     || {},
@@ -213,16 +233,26 @@ pub async fn install<R: Runtime>(
     let bytes = loop {
         if control.cancelled.load(Ordering::SeqCst) {
             task.abort();
-            return Err(IpcError::new(code::UPDATE_CANCELLED, "The update download was cancelled"));
+            return Err(IpcError::new(
+                code::UPDATE_CANCELLED,
+                "The update download was cancelled",
+            ));
         }
         match tokio::time::timeout(TICK, &mut task).await {
             Ok(joined) => {
                 break joined
-                    .map_err(|_| IpcError::new(code::UPDATE_INSTALL_FAILED, "The download task ended unexpectedly"))?
+                    .map_err(|_| {
+                        IpcError::new(
+                            code::UPDATE_INSTALL_FAILED,
+                            "The download task ended unexpectedly",
+                        )
+                    })?
                     .map_err(|error| {
                         let text = error.to_string();
                         let kind = classify(&text);
-                        let kind = if kind == code::UPDATE_UNREACHABLE || kind == code::UPDATE_NOT_PUBLISHED {
+                        let kind = if kind == code::UPDATE_UNREACHABLE
+                            || kind == code::UPDATE_NOT_PUBLISHED
+                        {
                             code::UPDATE_INSTALL_FAILED
                         } else {
                             kind
@@ -231,20 +261,27 @@ pub async fn install<R: Runtime>(
                     })?;
             }
             Err(_) => {
-                let idle = last_chunk.lock().map_or(Duration::ZERO, |clock| clock.elapsed());
+                let idle = last_chunk
+                    .lock()
+                    .map_or(Duration::ZERO, |clock| clock.elapsed());
                 if idle >= STALL_TIMEOUT {
                     task.abort();
-                    return Err(IpcError::new(code::UPDATE_STALLED, "The update download stopped receiving data"));
+                    return Err(IpcError::new(
+                        code::UPDATE_STALLED,
+                        "The update download stopped receiving data",
+                    ));
                 }
             }
         }
     };
 
     // Installing replaces the program: hold the gate so no job can start halfway through.
-    let _gate = sidecar
-        .request_gate
-        .try_lock()
-        .map_err(|_| IpcError::new(code::UPDATE_BUSY, "A job started while the update was downloading"))?;
+    let _gate = sidecar.request_gate.try_lock().map_err(|_| {
+        IpcError::new(
+            code::UPDATE_BUSY,
+            "A job started while the update was downloading",
+        )
+    })?;
     update
         .install(bytes)
         .map_err(|error| IpcError::new(code::UPDATE_INSTALL_FAILED, error.to_string()))?;
@@ -257,25 +294,49 @@ mod tests {
 
     #[test]
     fn network_errors_are_classified_into_stable_codes() {
-        assert_eq!(classify("error sending request: operation timed out"), code::UPDATE_TIMEOUT);
-        assert_eq!(classify("Download request failed with status: 404 Not Found"), code::UPDATE_NOT_PUBLISHED);
-        assert_eq!(classify("could not fetch a valid release JSON"), code::UPDATE_NOT_PUBLISHED);
-        assert_eq!(classify("minisign signature verification failed"), code::UPDATE_SIGNATURE_INVALID);
-        assert_eq!(classify("dns error: failed to lookup address"), code::UPDATE_UNREACHABLE);
+        assert_eq!(
+            classify("error sending request: operation timed out"),
+            code::UPDATE_TIMEOUT
+        );
+        assert_eq!(
+            classify("Download request failed with status: 404 Not Found"),
+            code::UPDATE_NOT_PUBLISHED
+        );
+        assert_eq!(
+            classify("could not fetch a valid release JSON"),
+            code::UPDATE_NOT_PUBLISHED
+        );
+        assert_eq!(
+            classify("minisign signature verification failed"),
+            code::UPDATE_SIGNATURE_INVALID
+        );
+        assert_eq!(
+            classify("dns error: failed to lookup address"),
+            code::UPDATE_UNREACHABLE
+        );
     }
 
     #[test]
     fn only_one_download_runs_and_cancel_is_ignored_when_idle() {
         let control = UpdateControl::default();
         control.cancel();
-        assert!(!control.cancelled.load(Ordering::SeqCst), "nothing to cancel");
+        assert!(
+            !control.cancelled.load(Ordering::SeqCst),
+            "nothing to cancel"
+        );
         let first = ActiveGuard::begin(&control).unwrap();
         assert!(control.active());
-        assert_eq!(ActiveGuard::begin(&control).err().unwrap().code, code::UPDATE_BUSY);
+        assert_eq!(
+            ActiveGuard::begin(&control).err().unwrap().code,
+            code::UPDATE_BUSY
+        );
         control.cancel();
         assert!(control.cancelled.load(Ordering::SeqCst));
         drop(first);
         assert!(!control.active());
-        assert!(!control.cancelled.load(Ordering::SeqCst), "a new download starts uncancelled");
+        assert!(
+            !control.cancelled.load(Ordering::SeqCst),
+            "a new download starts uncancelled"
+        );
     }
 }

@@ -15,9 +15,7 @@ use std::sync::{
 
 use serde::Deserialize;
 use tauri::{
-    menu::{
-        AboutMetadata, CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
-    },
+    menu::{AboutMetadata, CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     AppHandle, Emitter, Manager, State, Wry,
 };
 
@@ -143,11 +141,23 @@ pub fn layout(platform: Platform) -> Vec<(Title, Vec<Entry>)> {
             ),
             (
                 Title::Window,
-                vec![P(Kind::Minimize), P(Kind::Maximize), S, P(Kind::CloseWindow)],
+                vec![
+                    P(Kind::Minimize),
+                    P(Kind::Maximize),
+                    S,
+                    P(Kind::CloseWindow),
+                ],
             ),
             (
                 Title::Help,
-                vec![Item(HELP), Item(TOUR), Item(SHORTCUTS), S, Item(LICENSES), Item(REPORT)],
+                vec![
+                    Item(HELP),
+                    Item(TOUR),
+                    Item(SHORTCUTS),
+                    S,
+                    Item(LICENSES),
+                    Item(REPORT),
+                ],
             ),
         ],
         Platform::Other => vec![
@@ -227,7 +237,12 @@ pub struct MenuLabels {
 }
 
 fn clean(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).take(60).collect::<String>().trim().to_owned()
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 impl MenuLabels {
@@ -281,10 +296,40 @@ impl MenuLabels {
             )*};
         }
         take!(
-            open_world, settings, find, help, tour, shortcuts, licenses, report, updates,
-            appearance, theme_system, theme_light, theme_dark, quit_item, file_menu, edit_menu,
-            view_menu, window_menu, help_menu, undo, redo, cut, copy, paste, select_all, minimize,
-            maximize, close_window, about, services, hide, hide_others, show_all, fullscreen
+            open_world,
+            settings,
+            find,
+            help,
+            tour,
+            shortcuts,
+            licenses,
+            report,
+            updates,
+            appearance,
+            theme_system,
+            theme_light,
+            theme_dark,
+            quit_item,
+            file_menu,
+            edit_menu,
+            view_menu,
+            window_menu,
+            help_menu,
+            undo,
+            redo,
+            cut,
+            copy,
+            paste,
+            select_all,
+            minimize,
+            maximize,
+            close_window,
+            about,
+            services,
+            hide,
+            hide_others,
+            show_all,
+            fullscreen
         );
         merged
     }
@@ -343,7 +388,11 @@ fn accelerator(id: &str) -> Option<&'static str> {
         OPEN_WORLD => Some("CmdOrCtrl+O"),
         SETTINGS => Some("CmdOrCtrl+,"),
         FIND => Some("CmdOrCtrl+F"),
-        HELP => Some(if cfg!(target_os = "macos") { "CmdOrCtrl+?" } else { "F1" }),
+        HELP => Some(if cfg!(target_os = "macos") {
+            "CmdOrCtrl+?"
+        } else {
+            "F1"
+        }),
         QUIT => Some("CmdOrCtrl+Q"),
         _ => None,
     }
@@ -364,7 +413,9 @@ pub struct MenuState {
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn predefined(
@@ -416,21 +467,38 @@ fn build(
         let submenu = Submenu::new(app, labels.title(title), true)?;
         for entry in entries {
             match entry {
-                Entry::Item(id) => {
-                    submenu.append(&MenuItem::with_id(app, id, labels.item(id), true, accelerator(id))?)?
-                }
+                Entry::Item(id) => submenu.append(&MenuItem::with_id(
+                    app,
+                    id,
+                    labels.item(id),
+                    true,
+                    accelerator(id),
+                )?)?,
                 Entry::Predefined(kind) => submenu.append(&predefined(app, kind, labels)?)?,
                 Entry::Separator => submenu.append(&PredefinedMenuItem::separator(app)?)?,
                 Entry::Appearance => {
-                    let texts = [&labels.theme_system, &labels.theme_light, &labels.theme_dark];
+                    let texts = [
+                        &labels.theme_system,
+                        &labels.theme_light,
+                        &labels.theme_dark,
+                    ];
                     let mut items = Vec::new();
                     for ((name, id), text) in THEMES.iter().zip(texts) {
-                        let item = CheckMenuItem::with_id(app, *id, text, true, *name == theme, None::<&str>)?;
+                        let item = CheckMenuItem::with_id(
+                            app,
+                            *id,
+                            text,
+                            true,
+                            *name == theme,
+                            None::<&str>,
+                        )?;
                         handles.themes.push((*name, item.clone()));
                         items.push(item);
                     }
-                    let refs: Vec<&dyn IsMenuItem<Wry>> =
-                        items.iter().map(|item| item as &dyn IsMenuItem<Wry>).collect();
+                    let refs: Vec<&dyn IsMenuItem<Wry>> = items
+                        .iter()
+                        .map(|item| item as &dyn IsMenuItem<Wry>)
+                        .collect();
                     submenu.append(&Submenu::with_items(app, &labels.appearance, true, &refs)?)?;
                 }
                 Entry::Zoom => {
@@ -494,7 +562,10 @@ pub fn select(app: &AppHandle, id: &str) -> bool {
         crate::exit_gate::request_exit(app);
         return true;
     }
-    if let Some(level) = id.strip_prefix(ZOOM_PREFIX).and_then(|n| n.parse::<u16>().ok()) {
+    if let Some(level) = id
+        .strip_prefix(ZOOM_PREFIX)
+        .and_then(|n| n.parse::<u16>().ok())
+    {
         apply_zoom(app, level);
         return true;
     }
@@ -558,7 +629,10 @@ pub fn set_menu_labels(
         *stored = merged;
     }
     rebuild(&app, &state).map_err(|error| {
-        IpcError::new(code::MENU_UPDATE_FAILED, format!("Menu could not be rebuilt: {error}"))
+        IpcError::new(
+            code::MENU_UPDATE_FAILED,
+            format!("Menu could not be rebuilt: {error}"),
+        )
     })
 }
 
@@ -572,8 +646,9 @@ pub fn set_menu_theme(state: State<'_, MenuState>, choice: String) -> Result<(),
     *locked(&state.theme) = choice.clone();
     if let Some(handles) = locked(&state.handles).as_ref() {
         for (name, item) in &handles.themes {
-            item.set_checked(*name == choice)
-                .map_err(|_| IpcError::new(code::MENU_UPDATE_FAILED, "Menu could not be updated"))?;
+            item.set_checked(*name == choice).map_err(|_| {
+                IpcError::new(code::MENU_UPDATE_FAILED, "Menu could not be updated")
+            })?;
         }
     }
     Ok(())
@@ -584,7 +659,10 @@ mod tests {
     use super::*;
 
     fn all_entries(platform: Platform) -> Vec<Entry> {
-        layout(platform).into_iter().flat_map(|(_, entries)| entries).collect()
+        layout(platform)
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect()
     }
 
     #[test]
@@ -594,14 +672,23 @@ mod tests {
             !entries.contains(&Entry::Predefined(Kind::Quit)),
             "the predefined Quit posts WM_QUIT and skips the job gate"
         );
-        assert_eq!(entries.iter().filter(|e| **e == Entry::Item(QUIT)).count(), 1);
+        assert_eq!(
+            entries.iter().filter(|e| **e == Entry::Item(QUIT)).count(),
+            1
+        );
         assert_eq!(accelerator(QUIT), Some("CmdOrCtrl+Q"));
     }
 
     #[test]
     fn macos_keeps_the_application_menu_quit_that_reaches_exit_requested() {
         let entries = all_entries(Platform::Mac);
-        assert_eq!(entries.iter().filter(|e| **e == Entry::Predefined(Kind::Quit)).count(), 1);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| **e == Entry::Predefined(Kind::Quit))
+                .count(),
+            1
+        );
         assert!(!entries.contains(&Entry::Item(QUIT)));
     }
 
@@ -609,14 +696,19 @@ mod tests {
     fn every_app_command_appears_exactly_once_on_each_platform() {
         for platform in [Platform::Mac, Platform::Other] {
             let entries = all_entries(platform);
-            for id in [OPEN_WORLD, SETTINGS, FIND, HELP, TOUR, SHORTCUTS, LICENSES, REPORT, UPDATES] {
+            for id in [
+                OPEN_WORLD, SETTINGS, FIND, HELP, TOUR, SHORTCUTS, LICENSES, REPORT, UPDATES,
+            ] {
                 assert_eq!(
                     entries.iter().filter(|e| **e == Entry::Item(id)).count(),
                     1,
                     "{id} on {platform:?}"
                 );
             }
-            assert_eq!(entries.iter().filter(|e| **e == Entry::Appearance).count(), 1);
+            assert_eq!(
+                entries.iter().filter(|e| **e == Entry::Appearance).count(),
+                1
+            );
             assert_eq!(entries.iter().filter(|e| **e == Entry::Zoom).count(), 1);
         }
     }
@@ -630,7 +722,9 @@ mod tests {
                 assert!(!english.title(title).is_empty());
                 for entry in entries {
                     match entry {
-                        Entry::Predefined(kind) => assert!(!english.predefined(kind).is_empty(), "{kind:?}"),
+                        Entry::Predefined(kind) => {
+                            assert!(!english.predefined(kind).is_empty(), "{kind:?}")
+                        }
                         Entry::Item(id) => assert!(!english.item(id).is_empty(), "{id}"),
                         _ => {}
                     }

@@ -1,0 +1,4 @@
+# Build-time tools for the packaged translation core (scripts/build-sidecar.mjs).
+# The runtime pins stay in requirements.txt; install both into the build Python.
+pyinstaller==6.16.0
+pyinstaller-hooks-contrib==2026.9
