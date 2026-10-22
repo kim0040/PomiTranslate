@@ -451,15 +451,21 @@ class ExternalTargetLock:
                 if exc.errno in _NO_LOCKING:
                     raise TargetLocked("This filesystem does not support file locking, so a safe write cannot be guaranteed") from exc
                 raise TargetLocked(f"Another operation is using the resource pack {self.target.name}") from exc
-            self._descriptor = descriptor
-            self._keys = _identity_keys(self.path)
-            for key in self._keys:
-                _HELD[key] = self
-            self.acquired = True
+            except BaseException:
+                os.close(descriptor)
+                raise
+            try:
+                self._descriptor = descriptor
+                self._keys = _identity_keys(self.path)
+                for key in self._keys:
+                    _HELD[key] = self
+                self.acquired = True
+            except BaseException:
+                self._abandon()  # the kernel lock is ours: never leave it held by a half-built object
+                raise
 
-    def release(self) -> None:
-        if not self.acquired:
-            return
+    def _abandon(self) -> None:
+        """Undo whatever a half-finished acquire published: kernel lock, descriptor, registry keys."""
         self.acquired = False
         descriptor, self._descriptor = self._descriptor, None
         if descriptor is not None:
@@ -476,6 +482,12 @@ class ExternalTargetLock:
                 if _HELD.get(key) is self:
                     del _HELD[key]
         self._keys = []
+
+    def release(self) -> None:
+        # A holder whose acquire was cut off has a descriptor but never became "acquired": clean it too.
+        if not self.acquired and self._descriptor is None and not self._keys:
+            return
+        self._abandon()
 
     def __enter__(self) -> "ExternalTargetLock":
         self.acquire()
