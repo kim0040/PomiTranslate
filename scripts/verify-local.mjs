@@ -59,7 +59,8 @@ const PYTHON_TESTS = [
   ['Review drafts survive restarts and stay bounded', 'tests/test_review_drafts.py'],
   ['Backup deletion and pruning respect locks, last copies and open recoveries', 'tests/test_backup_admin.py'],
   ['Journal review fixes: one reconciliation gate, verify-only keep, identity checks', 'tests/test_journal_review.py'],
-  ['Real process kills at every write and recovery boundary', 'tests/test_journal_kill.py'],
+  ['Interrupted resume reconciled, keep quarantines every conflict, per-world generation counter', 'tests/test_journal_reconcile.py'],
+  ['Real process kills at every write, durable replace and recovery boundary', 'tests/test_journal_kill.py'],
   ['The core cancels and exits when the shell closes its stdin', 'tests/test_eof_shutdown.py'],
   ['Review drafts and backup administration through the desktop dispatch', 'tests/test_desktop_dispatch.py'],
 ];

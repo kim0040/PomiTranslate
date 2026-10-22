@@ -155,7 +155,7 @@ def test_generation_refuses_stale_record_even_when_hashes_match() -> None:
         except JournalError as exc:
             assert exc.code in {"JOURNAL_SUPERSEDED", "RECOVERY_REQUIRED"}, exc.code
         # Generations are durable and strictly increasing per world.
-        state = json.loads((stores(root)[0] / "world-state.json").read_text("utf-8"))
+        state = json.loads((stores(root)[0] / f"world-state.{old.doc['worldKey']}.json").read_text("utf-8"))
         assert state["generation"] >= old.generation and state["worldKey"] == old.doc["worldKey"]
         RESULTS.append("generation")
 

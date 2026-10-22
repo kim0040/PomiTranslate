@@ -277,14 +277,15 @@ class TransactionResult:
 
 # ---------------------------------------------------------------- per-world generation
 
-def _state_file(store: Path) -> Path:
-    return Path(store) / WORLD_STATE_NAME
+def _state_file(store: Path, key: str) -> Path:
+    """The counter of one world. The name carries the world, so two worlds that share one backup
+    store (a configured location) never write the same file."""
+    return Path(store) / f"world-state.{key}.json"
 
 
-def read_world_state(store: Path, key: str) -> dict:
-    """``{generation, lastSettledJobId}`` of this world from ``<store>/world-state.json``."""
+def _read_counter(path: Path, key: str) -> dict:
     try:
-        data = json.loads(_state_file(store).read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict) or data.get("worldKey") != key:
@@ -295,30 +296,47 @@ def read_world_state(store: Path, key: str) -> dict:
     return data
 
 
-def _write_world_state(store: Path, key: str, generation: int, last_settled: str) -> None:
+def read_world_state(store: Path, key: str) -> dict:
+    """``{generation, lastSettledJobId}`` of this world from ``<store>/world-state.<key>.json``, or
+    from the single shared ``world-state.json`` an earlier release wrote there (the larger wins)."""
+    current = _read_counter(_state_file(store, key), key)
+    legacy = _read_counter(Path(store) / WORLD_STATE_NAME, key)
+    return legacy if int(legacy.get("generation", -1)) > int(current.get("generation", -1)) else current
+
+
+def _write_world_state(store: Path, key: str, generation: int, last_settled: str, *, strict: bool = False) -> None:
+    """Write the counter durably. ``strict``: a failure is raised as ``JournalWriteFailed`` (the new
+    record must not be accepted without it); otherwise it is best effort - a settled job only notes
+    itself, and the generations found in the records keep the number from going back."""
     try:
         mkdir_durable(Path(store))
-        atomic_write_text(_state_file(store), json.dumps(
+        atomic_write_text(_state_file(store, key), json.dumps(
             {"worldKey": key, "generation": generation, "lastSettledJobId": last_settled}, separators=(",", ":")))
-    except OSError:
-        pass  # the highest generation found in the records themselves still moves forward
+    except OSError as exc:
+        if strict:
+            raise JournalWriteFailed(exc) from exc
 
 
 def allocate_generation(world_dir: Path, store: Path, stores: Iterable[Path] = ()) -> int:
     """The next generation of this world, taken under the world lock when a record is created.
 
-    It is one more than the larger of the durable counter and every record of this world in any
-    known store, so deleting old backups can never make the counter go back.
+    It is one more than the largest of the counter files of this world in every known store and the
+    generation of every record of this world in every known store. The counter of ``store`` is
+    written (and fsynced) before the number is returned: if that fails, ``JournalWriteFailed`` is
+    raised and the caller must not start the job - nothing in the world has been touched yet.
     """
     key = world_key(world_dir)
-    previous = read_world_state(store, key)
-    highest = int(previous.get("generation", 0))
-    for _where, path in iter_journal_files([*stores, store]):
+    known = [Path(item) for item in [*stores, store]]
+    highest = 0
+    for where in known:
+        highest = max(highest, int(read_world_state(where, key).get("generation", 0)))
+    for _where, path in iter_journal_files(known):
         head = peek_header(path)
         if head is not None and head["worldKey"] == key:
             highest = max(highest, head["generation"])
     generation = highest + 1
-    _write_world_state(store, key, generation, str(previous.get("lastSettledJobId", "")))
+    previous = read_world_state(store, key)
+    _write_world_state(store, key, generation, str(previous.get("lastSettledJobId", "")), strict=True)
     return generation
 
 
@@ -551,6 +569,10 @@ def validate_document(doc: Any) -> None:
     for key in ("parentJobId", "supersedes", "supersededBy"):
         if key in doc and (not isinstance(doc[key], str) or (doc[key] and not _ID.fullmatch(doc[key]))):
             raise bad(key)
+    if "stateBeforeSupersede" in doc and doc["stateBeforeSupersede"] not in STATES - {"superseded"}:
+        raise bad("stateBeforeSupersede")
+    if "settledByBeforeSupersede" in doc and not isinstance(doc["settledByBeforeSupersede"], str):
+        raise bad("settledByBeforeSupersede")
     if not Path(doc["worldPath"]).is_absolute():
         raise bad("worldPath")
     if not isinstance(doc.get("units"), list) or not isinstance(doc.get("log"), list):
@@ -1428,6 +1450,7 @@ def _quarantine(host_root: Path, recovery_id: str, items: list[Classified]) -> P
         mkdir_durable(destination.parent)
         _copy_exclusive(item.path, destination)
         copied = True
+        fault_point("quarantine_copied", path=str(item.path))
     return directory if copied else None
 
 
@@ -1435,7 +1458,7 @@ def _temp_pattern(name: str) -> re.Pattern[str]:
     return re.compile(r"\." + re.escape(name) + r"\.[A-Za-z0-9_-]+\.tmp")
 
 
-_BOOKKEEPING_TEMP = re.compile(r"\.(journal|manifest|latest|world-state)\.json\.[A-Za-z0-9_-]+\.tmp")
+_BOOKKEEPING_TEMP = re.compile(r"\.(journal|manifest|latest|world-state(\.[0-9a-f]+)?)\.json\.[A-Za-z0-9_-]+\.tmp")
 
 
 def clean_orphan_temps(journal: Journal, paths: Iterable[Path]) -> int:
@@ -1563,6 +1586,11 @@ def supersede(old_path: Path, by: str, authorized: set[str], *, stores: Iterable
     if journal.settled:
         return
     if by:
+        # What the job was before is recorded in the same rewrite, so an interrupted continuation can
+        # put it back exactly (see ``reconcile_continuations``).
+        journal.doc["stateBeforeSupersede"] = journal.state
+        if "settledBy" in journal.doc:
+            journal.doc["settledByBeforeSupersede"] = str(journal.doc["settledBy"])
         journal.doc["supersededBy"] = by
         journal.doc["settledBy"] = "resume"
         journal.set_state("superseded")
@@ -1570,6 +1598,94 @@ def supersede(old_path: Path, by: str, authorized: set[str], *, stores: Iterable
         journal.doc["settledBy"] = "resume-complete"
         journal.set_state("kept")
     retire_children(journal, authorized, stores)
+
+
+def _published_nothing(journal: Journal, authorized: set[str]) -> bool:
+    """Proof, by rehashing the files now, that this job changed nothing: no target has an outcome that
+    says it was written, and every target still holds the state the job recorded before it began."""
+    for _unit, target in journal.targets():
+        if target["outcome"] in {"written", "verified", "unknown", "restored"}:
+            return False
+        try:
+            if not same_state(state_of(resolve_target(journal, target, authorized)), target["preimage"]):
+                return False
+        except Exception:
+            return False  # a target that cannot be checked proves nothing
+    return True
+
+
+def _put_back(old: Journal) -> bool:
+    """Undo ``supersede``: the continued job is exactly what it was before the resume began (its own
+    generation, units and checkpoints were never touched). False when that state was not recorded."""
+    prior = old.doc.get("stateBeforeSupersede")
+    if prior not in STATES or prior == "superseded":
+        return False
+    old.doc.pop("supersededBy", None)
+    old.doc.pop("stateBeforeSupersede", None)
+    before = old.doc.pop("settledByBeforeSupersede", None)
+    if before is None:
+        old.doc.pop("settledBy", None)
+    else:
+        old.doc["settledBy"] = before
+    old.doc["state"] = prior  # not set_state(): a ``committed`` header over open units is allowed back
+    old._dirty = True
+    old.save()
+    return True
+
+
+def reconcile_continuations(world_dir: Path, stores: Iterable[Path], *, authorized: Iterable[str] = ()) -> list[str]:
+    """Settle the continuation of a job that was cut off before it published anything.
+
+    A resume is a new job ``B`` (``supersedes: A``) whose intent is saved first; only then is ``A``
+    marked superseded; only then does ``B`` write. A process that dies in between leaves ``B`` open and
+    ``A`` open or superseded, and neither could be recovered. For such a ``B`` that provably changed
+    nothing (``_published_nothing``) this puts ``A`` back to the state it had before the resume - if
+    ``A`` was superseded by this very ``B`` - and only then settles ``B`` as ``rolled_back``
+    (``settledBy: unpublished_continuation``), with no write to the world. A ``B`` that cannot be
+    proven unpublished, or an ``A`` whose earlier state was not recorded, is left exactly as it is: the
+    refusal stays, nothing is guessed. Also covers a ``B`` that failed to start without a crash
+    (``rolled_back``/``untouched``) while ``A`` is still superseded by it.
+
+    Callers hold the world write lock. Returns the ids of the continuations it reconciled.
+    """
+    key = world_key(world_dir)
+    allowed = {str(item) for item in authorized}
+    pool: dict[str, Journal] = {}
+    for _store, path in iter_journal_files(stores):
+        try:
+            item = Journal.load(path)
+        except JournalError:
+            continue
+        if world_key(item.world_dir) == key:
+            pool.setdefault(item.job_id, item)
+    reconciled: list[str] = []
+    for later in sorted(pool.values(), key=lambda item: item.generation):
+        earlier_id = str(later.doc.get("supersedes") or "")
+        if not earlier_id:
+            continue
+        open_job = not later.settled
+        failed_start = later.state == "rolled_back" and later.doc.get("settledBy") == "untouched"
+        if not (open_job or failed_start):
+            continue
+        earlier = pool.get(earlier_id)
+        linked = (earlier is not None and earlier.state == "superseded"
+                  and earlier.doc.get("supersededBy") == later.job_id)
+        if failed_start and not linked:
+            continue
+        try:
+            if not _published_nothing(later, allowed):
+                continue
+            if linked and not _put_back(earlier):  # A first: B stays open until A is back
+                continue
+            if open_job:
+                later.doc["settledBy"] = "unpublished_continuation"
+                later.set_state("rolled_back")
+                # A write that was cut off may have left its staged copy beside the target.
+                clean_orphan_temps(later, [resolve_target(later, target, allowed) for _unit, target in later.targets()])
+        except OSError:
+            continue  # nothing more can be saved now; the refusal stays and the next gate tries again
+        reconciled.append(later.job_id)
+    return reconciled
 
 
 def _reconciled(child: Journal, parent: Journal, authorized: set[str], parent_state: str) -> bool:
@@ -1653,8 +1769,15 @@ def recover_job(
         raise JournalError("WORLD_NOT_FOUND", "The world folder of this job does not exist any more")
     store_list, own = _recovery_stores(journal_path, world_dir, stores)
     externals = [Path(t["externalTarget"]) for _u, t in journal.targets() if t["rootKind"] == "external_pack"]
+    authorized = {str(Path(p).resolve(strict=False)) for p in authorized_external or []}
     with hold_world(world_dir, "recovery", external_targets=externals, lock_dir=lock_dir):
+        # A continuation that was cut off before it wrote anything is settled first (the job it
+        # continued comes back); a request about that very job is answered by that settlement.
+        reconciled = reconcile_continuations(world_dir, store_list, authorized=authorized)
         journal = Journal.load(journal_path)  # read again under the guards: it may have been settled meanwhile
+        if journal.job_id in reconciled:
+            return {"jobId": journal.job_id, "mode": mode, "state": "rolled_back", "restoredFiles": 0, "keptFiles": 0,
+                    "conflicts": [], "quarantineDir": None, "settledBy": "unpublished_continuation"}
         if journal.state == "superseded":
             raise JournalError("JOURNAL_SUPERSEDED", "A later run continued this job; it can no longer be recovered",
                                [journal.doc.get("supersededBy", "")] if journal.doc.get("supersededBy") else [])
@@ -1667,7 +1790,6 @@ def recover_job(
         if blockers:
             raise JournalError("RECOVERY_REQUIRED", "Another interrupted job of this world has to be settled first",
                                [item["jobId"] for item in blockers])
-        authorized = {str(Path(p).resolve(strict=False)) for p in authorized_external or []}
         classes = classify(journal, authorized)
         if mode == "keep":
             result = _keep(journal, classes, accept_conflicts, authorized, store_list)
@@ -1686,13 +1808,28 @@ def _keep(journal: Journal, classes: list[Classified], accept_conflicts: bool, a
     journal.doc["recoveryMode"] = "keep"
     fault_point("keep_classified", kind=journal.kind)
     conflicts = keep_conflicts(classes)
-    quarantine = _quarantine(host_root, recovery_id, [item for item in conflicts if item.code == "RECOVERY_CONFLICT"]) if conflicts else None
+    public = [_public_conflict(item) for item in conflicts]
+    quarantine: Path | None = None
+    failure = ""
+    if conflicts:
+        # Every conflict goes in, whatever its code: the copy takes each file that is readable now, so
+        # even the files of an inconsistent unit are kept as they are before anyone accepts or reverts.
+        try:
+            quarantine = _quarantine(host_root, recovery_id, conflicts)
+        except Exception as exc:
+            failure = "DISK_FULL" if is_disk_full(exc) else "RECOVERY_FAILED"
     fault_point("keep_quarantined", kind=journal.kind)
     clear_staging(host_root)
-    public = [_public_conflict(item) for item in conflicts]
     base = {"jobId": journal.job_id, "mode": "keep", "restoredFiles": 0,
             "keptFiles": len({id(item.target) for item in classes} - {id(item.target) for item in conflicts}),
             "conflicts": public, "quarantineDir": str(quarantine) if quarantine else None}
+    if failure:
+        # The foreign bytes could not all be preserved, so nothing is settled - not even an accepted keep.
+        try:
+            journal.set_state("recovery_conflict")
+        except OSError:
+            pass  # the record on disk stays open either way
+        return {**base, "state": "recovery_conflict", "errorCode": failure}
     if conflicts and not accept_conflicts:
         # Nothing is settled: the job stays open and listed, the foreign bytes are safe in quarantine.
         journal.set_state("recovery_conflict")
