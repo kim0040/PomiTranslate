@@ -61,6 +61,7 @@ const PYTHON_TESTS = [
   ['Journal review fixes: one reconciliation gate, verify-only keep, identity checks', 'tests/test_journal_review.py'],
   ['Real process kills at every write and recovery boundary', 'tests/test_journal_kill.py'],
   ['The core cancels and exits when the shell closes its stdin', 'tests/test_eof_shutdown.py'],
+  ['Review drafts and backup administration through the desktop dispatch', 'tests/test_desktop_dispatch.py'],
 ];
 
 const GROUPS = ['python', 'frontend', 'rust'];

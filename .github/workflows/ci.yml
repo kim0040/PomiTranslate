@@ -116,3 +116,5 @@ jobs:
         run: python tests/test_journal_kill.py
       - name: The core cancels and exits when the shell closes its stdin
         run: python tests/test_eof_shutdown.py
+      - name: Review drafts and backup administration through the desktop dispatch
+        run: python tests/test_desktop_dispatch.py

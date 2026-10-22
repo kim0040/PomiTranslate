@@ -29,6 +29,7 @@ from mwt.desktop_settings import (
 from mwt.notices import ABOUT, FIRST_LAUNCH, PRE_TRANSLATE, payload
 from mwt.journal import JournalError, find_journal, list_interrupted, recover_job
 from mwt.locking import MinecraftWorldInUse, TargetLocked, WorldWriteLocked, target_lock_dir
+from mwt.backup_admin import backup_usage
 from mwt.safety import BackupSet, ExternalTargetError, backup_store, legacy_backup_store, list_backup_sets
 from mwt.userdata import APP_PREF_DEFAULTS
 from mwt.desktop_resource_packs import ExternalPackUnavailable, normalize_external_pack_paths, pack_scope_signature, selected_pack_files
@@ -1713,7 +1714,11 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 "v": 1,
                 "id": request_id,
                 "type": "response.ok",
-                "payload": {"backups": list_backup_sets(world, _backup_stores(world, data_dir)), "localhostServer": False},
+                "payload": {
+                    "backups": list_backup_sets(world, _backup_stores(world, data_dir)),
+                    "usage": backup_usage(world, data_dir),
+                    "localhostServer": False,
+                },
             }
         )
         return
@@ -1818,10 +1823,59 @@ def _handle_recovery_start(message: dict, report_dir: Path, data_dir: Path, canc
     emit({"v": 1, "id": request_id, "type": "response.ok", "payload": {**result, "localhostServer": False}})
 
 
+def _module_handler(operation, error_type):
+    """A request answered by one ``operation(payload, data_dir) -> dict`` that raises ``error_type``
+    (with ``code`` and ``message``) for refusals the interface explains."""
+
+    def handler(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | None) -> None:
+        request_id = message.get("id", "")
+        try:
+            result = operation(message.get("payload") or {}, data_dir)
+        except error_type as exc:
+            _reply_error(request_id, exc.code, exc.message)
+            return
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": {**result, "localhostServer": False}})
+
+    return handler
+
+
+def _draft_handler(name: str):
+    def operation(payload: dict, data_dir: Path) -> dict:
+        from mwt import review_drafts
+
+        result = getattr(review_drafts, name)(payload, data_dir)
+        if name == "set_draft":
+            # Drafts of deleted scans, and the oldest beyond the limit, go away as new ones arrive.
+            review_drafts.prune_drafts(data_dir)
+        return result
+
+    from mwt.review_drafts import ReviewDraftError
+
+    # Query lane, no world lock: one small file under <data_dir>/review-drafts, written atomically.
+    return _module_handler(operation, ReviewDraftError)
+
+
+def _backup_handler(name: str):
+    def operation(payload: dict, data_dir: Path) -> dict:
+        from mwt import backup_admin
+
+        return getattr(backup_admin, name)(payload, data_dir)
+
+    from mwt.backup_admin import BackupAdminError
+
+    # Job lane: the module takes the world write lock itself and refuses with WORLD_LOCKED.
+    return _module_handler(operation, BackupAdminError)
+
+
 # Request type -> handler(message, report_dir, data_dir, cancel_path), for requests that live outside
 # the long if-chain in ``handle``. Add new request types here.
 REQUEST_HANDLERS = {
     "recovery.start": _handle_recovery_start,
+    "review.draft.get": _draft_handler("get_draft"),
+    "review.draft.set": _draft_handler("set_draft"),
+    "review.draft.clear": _draft_handler("clear_draft"),
+    "backups.delete": _backup_handler("delete_backup"),
+    "backups.prune": _backup_handler("prune_backups"),
 }
 
 
