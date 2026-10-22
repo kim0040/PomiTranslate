@@ -82,3 +82,13 @@ jobs:
         run: python tests/test_world_discovery.py
       - name: Saved data survives damage and reset keeps backups
         run: python tests/test_user_data_durability.py
+      - name: World write lock and session lock survive crashes
+        run: python tests/test_world_locking.py
+      - name: Durable writes flush only writable handles and clean up
+        run: python tests/test_durable_writes.py
+      - name: Region slots, ZIP members, restore guards and resumable partial runs
+        run: python tests/test_core_integrity.py
+      - name: Batch request budget, failure codes and untrusted-data prompt
+        run: python tests/test_batch_budget.py
+      - name: JSONL channel is UTF-8, protocol-only and crash-proof
+        run: python tests/test_jsonl_channel.py

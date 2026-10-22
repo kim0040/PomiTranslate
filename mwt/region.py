@@ -21,6 +21,10 @@ from pathlib import Path
 
 SECTOR = 4096
 HEADER_SECTORS = 2
+# A real chunk is a few hundred KiB of NBT. These caps stop a corrupt or hostile world from
+# exhausting memory; a chunk over them is left exactly as it is and reported.
+MAX_CHUNK_BYTES = 64 * 1024 * 1024
+MAX_EXTERNAL_CHUNK_FILE_BYTES = 128 * 1024 * 1024
 EXTERNAL_FLAG = 0x80
 SUPPORTED_COMPRESSION = {1, 2, 3, 4}
 LZ4_MAGIC = b"LZ4Block"
@@ -39,6 +43,14 @@ _XXH_P5 = 0x165667B1
 
 class RegionError(ValueError):
     pass
+
+
+class ChunkTooLarge(RegionError):
+    pass
+
+
+class RegionLayoutUnsafe(RegionError):
+    """The sector table is inconsistent, so rewriting the file could move or destroy data."""
 
 
 class UnsupportedCompression(RegionError):
@@ -137,7 +149,7 @@ def compress_lz4_block_stream(raw: bytes) -> bytes:
     return b"".join(parts)
 
 
-def decompress_lz4_block_stream(payload: bytes) -> bytes:
+def decompress_lz4_block_stream(payload: bytes, limit: int = MAX_CHUNK_BYTES) -> bytes:
     if not payload.startswith(LZ4_MAGIC):
         raise RegionError("LZ4 chunk does not start with LZ4Block")
     import lz4.block
@@ -162,6 +174,8 @@ def decompress_lz4_block_stream(payload: bytes) -> bytes:
             break
         if original_len > (1 << (LZ4_LEVEL_BASE + level)):
             raise RegionError("LZ4Block length exceeds the declared block size")
+        if len(output) + original_len > limit:
+            raise ChunkTooLarge("LZ4 chunk expands beyond the size limit")
         if offset + compressed_len > len(payload):
             raise RegionError("Truncated LZ4Block payload")
         body = payload[offset : offset + compressed_len]
@@ -194,15 +208,36 @@ def compress_payload(compression: int, raw_nbt: bytes) -> bytes:
     raise UnsupportedCompression(compression)
 
 
-def decompress_payload(compression: int, payload: bytes) -> bytes:
+def _inflate_bounded(payload: bytes, wbits: int, limit: int, *, members: bool) -> bytes:
+    """Stream-inflate, stopping as soon as the output would pass ``limit``."""
+    output = bytearray()
+    remaining = payload
+    while True:
+        inflater = zlib.decompressobj(wbits)
+        output += inflater.decompress(remaining, limit + 1 - len(output))
+        if len(output) > limit:
+            raise ChunkTooLarge("Chunk expands beyond the size limit")
+        if not inflater.eof:
+            raise RegionError("Truncated compressed chunk")
+        remaining = inflater.unused_data
+        # gzip allows several members and zero padding; zlib is one stream.
+        if not members or not remaining.strip(b"\x00"):
+            return bytes(output)
+
+
+def decompress_payload(compression: int, payload: bytes, limit: int | None = None) -> bytes:
+    if limit is None:
+        limit = MAX_CHUNK_BYTES  # read at call time
     if compression == 1:
-        return gzip.decompress(payload)
+        return _inflate_bounded(payload, 16 + zlib.MAX_WBITS, limit, members=True)
     if compression == 2:
-        return zlib.decompress(payload)
+        return _inflate_bounded(payload, zlib.MAX_WBITS, limit, members=False)
     if compression == 3:
+        if len(payload) > limit:
+            raise ChunkTooLarge("Chunk is larger than the size limit")
         return payload
     if compression == 4:
-        return decompress_lz4_block_stream(payload)
+        return decompress_lz4_block_stream(payload, limit)
     raise UnsupportedCompression(compression)
 
 
@@ -242,6 +277,8 @@ class ChunkRecord:
     unsupported_id: int | None = None
     modified: bool = False
     timestamp: int = 0
+    slot: tuple[int, int] | None = None  # (first sector, sector count) as the header declared it
+    oversize: bool = False  # left untouched because it exceeds the decompression cap
 
 
 @dataclass
@@ -249,6 +286,7 @@ class RegionFile:
     path: Path | None
     chunks: list[ChunkRecord] = field(default_factory=list)
     original_bytes: bytes = b""
+    layout_unsafe: str = ""  # why the sector table cannot be trusted; empty when it can
 
     @classmethod
     def empty(cls) -> RegionFile:
@@ -262,6 +300,7 @@ class RegionFile:
             raise RegionError(f"Region header is too small: {path}")
         locations = data[:SECTOR]
         timestamps = data[SECTOR : SECTOR * 2]
+        region.layout_unsafe = _layout_problem(locations, len(data))
         for index in range(1024):
             loc = locations[index * 4 : index * 4 + 4]
             offset = int.from_bytes(loc[:3], "big")
@@ -275,6 +314,7 @@ class RegionFile:
             end = start + count * SECTOR
             sector = data[start:end]
             record.empty = False
+            record.slot = (offset, count)
             try:
                 record.record_bytes, record.compression, record.external, record.payload = _split_record(sector)
             except RegionError:
@@ -286,6 +326,8 @@ class RegionFile:
                 mcc = external_chunk_path(path, index)
                 if not mcc.is_file():
                     record.malformed = True
+                elif mcc.stat().st_size > MAX_EXTERNAL_CHUNK_FILE_BYTES:
+                    record.malformed = record.oversize = True
                 else:
                     record.mcc_bytes = mcc.read_bytes()
                     if not record.mcc_bytes:
@@ -298,8 +340,14 @@ class RegionFile:
                 record.unsupported_id = base
                 region.chunks.append(record)
                 continue
+            if record.oversize:
+                region.chunks.append(record)
+                continue
             try:
                 record.raw_nbt = decompress_payload(base, record.payload)
+            except ChunkTooLarge:
+                record.malformed = record.oversize = True
+                record.raw_nbt = None
             except Exception:
                 record.malformed = True
                 record.raw_nbt = None
@@ -371,6 +419,8 @@ class RegionFile:
     def build(self, *, allow_unsupported: bool = False) -> tuple[bytes, dict[int, bytes]]:
         if not allow_unsupported and any(chunk.unsupported for chunk in self.chunks):
             raise UnsupportedCompression(self.unsupported_ids[0] if self.unsupported_ids else -1)
+        if self.layout_unsafe:
+            raise RegionLayoutUnsafe(self.layout_unsafe)
         locations = bytearray(SECTOR)
         timestamps = bytearray(SECTOR)
         body = bytearray()
@@ -378,6 +428,17 @@ class RegionFile:
         mcc_files: dict[int, bytes] = {}
         for chunk in self.chunks:
             if chunk.empty:
+                continue
+            if not chunk.modified and chunk.slot is not None and self.original_bytes:
+                # Never repack what was not edited: a malformed or odd slot keeps every sector.
+                first, count = chunk.slot
+                raw = self.original_bytes[first * SECTOR : (first + count) * SECTOR]
+                raw += b"\x00" * (count * SECTOR - len(raw))
+                locations[chunk.index * 4 : chunk.index * 4 + 3] = cursor.to_bytes(3, "big")
+                locations[chunk.index * 4 + 3] = count
+                timestamps[chunk.index * 4 : chunk.index * 4 + 4] = int(chunk.timestamp).to_bytes(4, "big")
+                body.extend(raw)
+                cursor += count
                 continue
             record = chunk.record_bytes
             if not record:
@@ -401,6 +462,27 @@ class RegionFile:
         chunk = self.chunks[index]
         material = chunk.record_bytes + (chunk.mcc_bytes or b"")
         return hashlib.sha256(material).hexdigest()
+
+
+def _layout_problem(locations: bytes, file_size: int) -> str:
+    """Empty string when every declared slot is inside the file and none overlap."""
+    total_sectors = -(-file_size // SECTOR)
+    slots: list[tuple[int, int]] = []
+    for index in range(1024):
+        offset = int.from_bytes(locations[index * 4 : index * 4 + 3], "big")
+        count = locations[index * 4 + 3]
+        if offset == 0 or count == 0:
+            continue
+        if offset < HEADER_SECTORS:
+            return f"chunk {index} slot overlaps the region header"
+        if offset + count > total_sectors:
+            return f"chunk {index} slot extends past the end of the file"
+        slots.append((offset, count))
+    slots.sort()
+    for (first, count), (next_first, _) in zip(slots, slots[1:]):
+        if first + count > next_first:
+            return "chunk slots overlap"
+    return ""
 
 
 def _split_record(sector: bytes) -> tuple[bytes, int, bool, bytes]:

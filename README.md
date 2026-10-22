@@ -20,6 +20,12 @@ What you can do with PomiTranslate:
 > **In development:** the main flows have been exercised in an isolated development app on macOS Apple Silicon. Signed installers, clean-machine Windows/Linux validation and the final paid-translation workflow remain unfinished. [Current status (Korean)](docs/current-state.md) · [Follow-up work (Korean)](docs/follow-up-work.md)
 >
 > NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+>
+> Back up your world before translating. PomiTranslate writes to the world files you select.
+>
+> Text you choose to translate is sent to the API provider you select and may incur charges.
+>
+> PomiTranslate has no purchase, subscription, or in-app payment.
 
 ## How it works
 

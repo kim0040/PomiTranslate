@@ -643,7 +643,9 @@ def test_world_write_lock(tmp: Path) -> None:
         first.release()
     second.acquire()
     second.release()
-    assert not (world / ".pomi-translate" / "write.lock").exists()
+    # The lock file is stable and never unlinked; only the informational owner note goes away.
+    assert (world / ".pomi-translate" / "write.lock").is_file()
+    assert not (world / ".pomi-translate" / "write.owner.json").exists()
     (world / "level.dat").write_bytes(b"\x1f\x8b")
     (world / "session.lock").write_bytes(b"12345678")
     minecraft = MinecraftSessionLocks(world)
@@ -760,7 +762,8 @@ def main() -> None:
             matrix = render_support_matrix(RESULTS)
             destination = ROOT / "docs" / "support-matrix.md"
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(matrix, encoding="utf-8")
+            with destination.open("w", encoding="utf-8", newline="\n") as handle:  # LF on every platform
+                handle.write(matrix)
             assert "compression.gzip: supported" in matrix
             assert "format.bedrock: unsupported" in matrix
             assert "format.linear: unsupported" in matrix

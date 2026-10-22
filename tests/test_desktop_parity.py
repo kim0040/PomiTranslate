@@ -83,10 +83,11 @@ def _expect_value_error(action) -> None:
 
 
 def _files_under(root: Path) -> dict[str, bytes]:
+    """File contents under ``root``. The write-lock bookkeeping folder is not world data."""
     return {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in root.rglob("*")
-        if path.is_file()
+        if path.is_file() and ".pomi-translate" not in path.relative_to(root).parts
     }
 
 

@@ -15,6 +15,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from mwt.durable import atomic_write_text
+
 SCHEMA = 1
 SECRET_FIELDS = {"api_key", "apikey", "secret", "token", "password", "authorization"}
 
@@ -123,23 +125,9 @@ def durable_write_text(path: Path, text: str) -> None:
 
     The data reaches the disk before the rename, and the rename reaches the disk before return.
     """
-    temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-    if sys.platform != "win32":
-        try:
-            directory = os.open(path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(directory)
-        except OSError:
-            pass
-        finally:
-            os.close(directory)
+    # The same primitive the backups use: fsync the file, replace it, flush the folder entry on
+    # POSIX. Windows has no folder flush, and nothing stronger is claimed there.
+    atomic_write_text(path, text, temporary=path.with_name(path.name + ".tmp"))
 
 
 def _write_user_settings(current: dict, root: Path | None) -> None:
@@ -173,7 +161,11 @@ def list_recent_worlds(root: Path | None = None) -> list[dict]:
     for item in raw:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             continue
-        path = str(Path(item["path"]).expanduser().resolve())
+        try:
+            path = str(Path(item["path"]).expanduser().resolve())
+            opened = float(item.get("lastOpened") or 0)
+        except (OSError, ValueError, TypeError, RuntimeError):
+            continue  # a damaged entry is skipped, not fatal
         if path in seen:
             continue
         seen.add(path)
@@ -181,7 +173,7 @@ def list_recent_worlds(root: Path | None = None) -> list[dict]:
             {
                 "path": path,
                 "name": Path(path).name or path,
-                "lastOpened": float(item.get("lastOpened") or 0),
+                "lastOpened": opened,
                 "available": Path(path).is_dir(),
             }
         )
@@ -313,7 +305,7 @@ APP_PREF_DEFAULTS: dict = {
 
 def _valid_pref(key: str, value):
     if key == "theme":
-        if value not in {"system", "light", "dark"}:
+        if not isinstance(value, str) or value not in {"system", "light", "dark"}:
             raise ValueError("theme must be system, light or dark")
         return value
     if key in {"notice_accepted", "tutorial_seen", "update_auto_check"}:
@@ -339,7 +331,7 @@ def load_app_prefs(root: Path | None = None) -> dict:
         for key, value in saved.items():
             try:
                 prefs[key] = _valid_pref(str(key), value)
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
     return prefs
 

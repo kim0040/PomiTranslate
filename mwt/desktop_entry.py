@@ -6,9 +6,11 @@ import argparse
 import hashlib
 import json
 import os
+import math
 import re
 import sys
 import time
+import traceback
 from pathlib import Path
 
 from mwt.extract import CATEGORIES, EXTRACTOR_VERSION
@@ -24,12 +26,29 @@ from mwt.desktop_settings import (
 )
 from mwt.notices import ABOUT, FIRST_LAUNCH, PRE_TRANSLATE, payload
 from mwt.safety import BackupSet, ExternalTargetError, backup_store, legacy_backup_store, list_backup_sets
+from mwt.userdata import APP_PREF_DEFAULTS
 from mwt.desktop_resource_packs import ExternalPackUnavailable, normalize_external_pack_paths, pack_scope_signature, selected_pack_files
 
 
 # A job stopped by the user, by an outage, or by a provider error keeps its translated strings
-# in the checkpoint. Only these states may be continued.
-RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed"}
+# in the checkpoint. A partial run (files that errored, strings the provider failed on) keeps it
+# too, so "retry remaining" only redoes what is left. Only these states may be continued.
+RESUMABLE_STATUSES = {"cancelled", "needs_retry", "failed", "partial"}
+
+# Why a string could not be translated. The interface owns the wording; the raw provider text
+# stays in the report file only.
+FAILURE_REASON_TEXT = {
+    "timeout": "The request timed out.",
+    "auth": "The provider rejected the API key.",
+    "rate_limit": "The provider is limiting requests.",
+    "quota": "The provider account has no remaining quota or credit.",
+    "bad_request": "The provider rejected the request.",
+    "unsupported_model": "The selected model is not available for this request.",
+    "format_mismatch": "The model's answer was not in the expected format.",
+    "provider_unavailable": "The provider could not be reached or had an outage.",
+    "cancelled": "The translation was cancelled.",
+    "other": "The string could not be translated.",
+}
 
 
 def _settings_fingerprint(data_dir: Path) -> str:
@@ -54,6 +73,11 @@ def _settings_fingerprint(data_dir: Path) -> str:
             "resource_pack_enabled",
         )
     }
+    if not str(relevant["wire_format"] or "").strip():
+        # An unset wire format means the provider's default, and a finished run saves it
+        # spelled out. Both spellings must give one fingerprint, or a run would invalidate
+        # the checkpoint it just left for "retry remaining".
+        relevant["wire_format"] = "anthropic" if relevant["provider"] == "custom_anthropic" else "openai"
     relevant.update(
         {
             "source_overrides": normalize_source_overrides(
@@ -82,7 +106,24 @@ def _settings_fingerprint(data_dir: Path) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _scan_scope_fingerprint(data_dir: Path) -> str:
+def _accept_own_pack_writes(signature: list[dict], accepted: dict | None) -> list[dict]:
+    """Report an external pack as it was at scan time when its only change is this job's own write.
+
+    A job that rewrote a selected ZIP would otherwise make its own checkpoint look stale: the
+    scan plan hashed the ZIP before the write.
+    """
+    if not accepted:
+        return signature
+    result = []
+    for item in signature:
+        record = accepted.get(item.get("path")) if isinstance(accepted, dict) else None
+        if isinstance(record, dict) and record.get("after") == item.get("sha256") and record.get("before"):
+            item = {**item, "sha256": record["before"]}
+        result.append(item)
+    return result
+
+
+def _scan_scope_fingerprint(data_dir: Path, accepted_pack_writes: dict | None = None, *, signature: list[dict] | None = None) -> str:
     """What decides which texts a scan finds. Provider, model and prompt settings do not, so
     changing them does not throw a reviewed scan away."""
     saved = _saved(data_dir)
@@ -98,7 +139,8 @@ def _scan_scope_fingerprint(data_dir: Path) -> str:
         "scan_options": scan_options,
         "extractor": EXTRACTOR_VERSION,
     }
-    external_scope = pack_scope_signature(saved)
+    external_scope = signature if signature is not None else pack_scope_signature(saved)
+    external_scope = _accept_own_pack_writes(external_scope, accepted_pack_writes)
     if external_scope:
         relevant["external_resource_packs"] = external_scope
     encoded = json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -184,6 +226,19 @@ def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
         "price": price,
         "cost": cost,
     }
+
+
+def _public_failure(item: object) -> dict:
+    """A failed string as the interface sees it: the stable code and a generic reason.
+
+    What the provider actually said (which may quote request details) stays in the report file.
+    """
+    if not isinstance(item, dict):
+        return {"source": "", "code": "other", "reason": FAILURE_REASON_TEXT["other"]}
+    code = str(item.get("code") or "other")
+    if code not in FAILURE_REASON_TEXT:
+        code = "other"
+    return {"source": str(item.get("source") or ""), "code": code, "reason": FAILURE_REASON_TEXT[code]}
 
 
 def _format_location(location: dict) -> str:
@@ -411,7 +466,7 @@ def _candidate_page(
 
 
 def _resume_candidate(data_dir: Path, world: Path) -> dict:
-    from mwt.safety import world_fingerprint
+    from mwt.safety import world_fingerprint, world_state_fingerprint
 
     resolved_world = world.expanduser().resolve()
     if not resolved_world.is_dir():
@@ -420,10 +475,20 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
     if not jobs_dir.is_dir():
         return {}
     try:
-        current_scope = _scan_scope_fingerprint(data_dir)
+        pack_signature = pack_scope_signature(_saved(data_dir))
         current_translation = _settings_fingerprint(data_dir)
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
         return {}
+    scope_by_writes: dict[str, str] = {}
+
+    def current_scope_for(accepted: object) -> str:
+        key = json.dumps(accepted, sort_keys=True, default=str) if accepted else ""
+        if key not in scope_by_writes:
+            scope_by_writes[key] = _scan_scope_fingerprint(
+                data_dir, accepted if isinstance(accepted, dict) else None, signature=pack_signature
+            )
+        return scope_by_writes[key]
+
     preliminary: list[tuple[dict, dict, dict, dict]] = []
     for path in jobs_dir.glob("*.checkpoint.json"):
         try:
@@ -436,26 +501,32 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
                 checkpoint.get("version") != 2
                 or report.get("status") not in RESUMABLE_STATUSES
                 or Path(str(checkpoint.get("world_dir") or "")).expanduser().resolve() != resolved_world
-                or plan.get("scopeFingerprint") != current_scope
+                or plan.get("scopeFingerprint") != current_scope_for(resume.get("external_pack_writes"))
                 or resume.get("translation_settings_fingerprint") != current_translation
                 or plan.get("worldFingerprint") != resume.get("expected_world_fingerprint")
             ):
                 continue
             preliminary.append((checkpoint, resume, report, plan))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
             continue
     if not preliminary:
         return {}
 
-    try:
-        current_world = world_fingerprint(resolved_world)
-    except (OSError, ValueError, RuntimeError):
-        # Inspection reports the unreadable/unsafe path; never reuse its checkpoint.
-        return {}
+    current_worlds: dict[object, str] = {}
+
+    def current_world_for(checkpoint: dict) -> str:
+        # Checkpoints record which fingerprint they hold; older ones used the whole-file digest.
+        version = checkpoint.get("world_fingerprint_version")
+        if version not in current_worlds:
+            current_worlds[version] = (
+                world_state_fingerprint(resolved_world) if version == 2 else world_fingerprint(resolved_world)
+            )
+        return current_worlds[version]
+
     candidates: list[dict] = []
     for checkpoint, resume, report, plan in preliminary:
         try:
-            if checkpoint.get("world_fingerprint") != current_world:
+            if checkpoint.get("world_fingerprint") != current_world_for(checkpoint):
                 continue
             scan_plan_id = str(resume.get("scan_plan_id") or "")
             plan_candidates = [item for item in plan.get("candidates", []) if isinstance(item, dict)]
@@ -482,6 +553,7 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
                     "candidates": plan_candidates[:200],
                     "excludedCandidateIds": list(resume.get("excluded_candidate_ids") or []),
                     "candidateOverrides": candidate_overrides,
+                    "externalPackWrites": resume.get("external_pack_writes") if isinstance(resume.get("external_pack_writes"), dict) else {},
                     "savedAt": float(checkpoint.get("saved_at") or 0),
                     "backupSetId": str(report.get("backup_set_id") or ""),
                     "status": str(report.get("status") or ""),
@@ -492,9 +564,30 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
                     ),
                 }
             )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
             continue
     return max(candidates, key=lambda item: item["savedAt"], default={})
+
+
+def _discard_checkpoints(data_dir: Path, world: Path, scan_plan_id: str = "") -> int:
+    """Delete unfinished-job checkpoints of this world: the one way, besides finishing, to clear one."""
+    jobs_dir = data_dir / "jobs"
+    if not jobs_dir.is_dir():
+        return 0
+    resolved_world = world.expanduser().resolve()
+    removed = 0
+    for path in jobs_dir.glob("*.checkpoint.json"):
+        try:
+            checkpoint = json.loads(path.read_text(encoding="utf-8"))
+            if Path(str(checkpoint.get("world_dir") or "")).expanduser().resolve() != resolved_world:
+                continue
+            if scan_plan_id and str((checkpoint.get("resume") or {}).get("scan_plan_id") or "") != scan_plan_id:
+                continue
+            path.unlink()
+            removed += 1
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return removed
 
 
 def _saved(data_dir: Path) -> dict:
@@ -659,17 +752,111 @@ def _run_translator(
         **config,
         "scan": {**config["scan"], "overrides": persistent_source_overrides},
     }
-    remember_run_settings(persisted_config, data_dir, None)
-    # The run only knows whether this world has a pack. The user's choice must survive a world without one.
-    from mwt.userdata import remember_user_settings
+    try:
+        remember_run_settings(persisted_config, data_dir, None)
+        # The run only knows whether this world has a pack. The user's choice must survive a world without one.
+        from mwt.userdata import remember_user_settings
 
-    remember_user_settings({"resource_pack_enabled": bool(saved.get("resource_pack_enabled"))}, data_dir)
+        remember_user_settings({"resource_pack_enabled": bool(saved.get("resource_pack_enabled"))}, data_dir)
+    except Exception as exc:
+        # The run itself is done and its files are written. Report the real result, plus a warning.
+        report.setdefault("warnings", []).append({"code": "settings_not_saved", "message": type(exc).__name__})
+        print(f"preferences were not saved: {type(exc).__name__}", file=sys.stderr)
     return report
 
 
+# The real stdout, kept for protocol lines only once ``isolate_protocol_streams`` has run.
+_protocol_out = None
+
+
+def prepare_stdio() -> None:
+    """UTF-8 on every standard stream, whatever the Windows ANSI code page or PYTHONIOENCODING say.
+
+    stderr never raises on odd characters: diagnostics must not be lost to an encoding error.
+    """
+    for name, errors in (("stdin", "strict"), ("stdout", "strict"), ("stderr", "backslashreplace")):
+        reconfigure = getattr(getattr(sys, name, None), "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors=errors)
+        except (OSError, ValueError):
+            pass
+
+
+def isolate_protocol_streams() -> None:
+    """Keep protocol lines on a private copy of stdout; point stdout itself at stderr.
+
+    A stray ``print`` or a library writing to fd 1 then lands in the diagnostics stream instead
+    of corrupting the JSONL the shell is parsing.
+    """
+    global _protocol_out
+    if _protocol_out is not None:
+        return
+    prepare_stdio()
+    try:
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+    descriptor = os.dup(1)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.setmode(descriptor, os.O_BINARY)  # no newline translation of protocol lines
+    _protocol_out = os.fdopen(descriptor, "wb")
+    try:
+        os.dup2(2, 1)
+    except OSError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 1)  # no stderr either: drop stray output
+
+
+def _plain(value: object, flags: set[str]):
+    """A JSON-safe copy: non-finite numbers become 0, unpaired surrogates become '?'."""
+    if isinstance(value, bool) or value is None or isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        flags.add("non_finite_number")
+        return 0
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {_plain(str(key), flags): _plain(item, flags) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_plain(item, flags) for item in value]
+    return _plain(str(value), flags)
+
+
+def encode_message(message: dict) -> bytes:
+    """One JSONL line as UTF-8. It never raises for the content of the message."""
+    try:
+        return (json.dumps(message, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    except (ValueError, TypeError, UnicodeEncodeError):
+        flags: set[str] = set()
+        clean = _plain(message, flags)
+        if flags:
+            print(f"protocol message had values that were replaced: {sorted(flags)}", file=sys.stderr)
+            body = clean.get("payload") if isinstance(clean, dict) else None
+            if isinstance(body, dict):
+                body.setdefault("protocolWarnings", []).extend(sorted(flags))
+        return (json.dumps(clean, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+
+
 def emit(message: dict) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
+    data = encode_message(message)
+    if _protocol_out is not None:
+        _protocol_out.write(data)
+        _protocol_out.flush()
+        return
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:  # a text-only stand-in, as in tests
+        sys.stdout.write(data.decode("utf-8"))
+        sys.stdout.flush()
+        return
     sys.stdout.flush()
+    buffer.write(data)
+    buffer.flush()
 
 
 def hello() -> None:
@@ -728,24 +915,31 @@ def _settings_payload(data_dir: Path, provider: str = "", *, check_keyring: bool
     }
 
 
+def _or_default(read, default):
+    """A section of the start-up payload. Damaged or wrongly shaped saved files give the default."""
+    try:
+        return read()
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError, RuntimeError):
+        return default
+
+
 def _bootstrap_payload(data_dir: Path, requested_world: str = "", *, check_keyring: bool = True) -> dict:
-    from mwt.userdata import list_recent_worlds
+    from mwt.userdata import list_recent_worlds, load_app_prefs
 
     settings = _settings_payload(data_dir, check_keyring=check_keyring)
     selected = str(requested_world or settings["settings"].get("last_world_dir") or "")
     world = Path(selected).expanduser() if selected else None
-    inspection = _world_inspection(world, recursive_blockers=False) if world else None
+    inspection = _or_default(lambda: _world_inspection(world, recursive_blockers=False), None) if world else None
     valid_world = bool(world and inspection and inspection.get("validJavaWorld"))
-    from mwt.userdata import load_app_prefs
-
+    no_resume = {"available": False}
     return {
         "notices": payload(),
         **settings,
-        "prefs": load_app_prefs(data_dir),
-        "worlds": list_recent_worlds(data_dir),
+        "prefs": _or_default(lambda: load_app_prefs(data_dir), dict(APP_PREF_DEFAULTS)),
+        "worlds": _or_default(lambda: list_recent_worlds(data_dir), []),
         "worldInspection": inspection,
-        "backups": list_backup_sets(world, _backup_stores(world, data_dir)) if valid_world else [],
-        "resume": (_resume_candidate(data_dir, world) or {"available": False}) if valid_world else {"available": False},
+        "backups": _or_default(lambda: list_backup_sets(world, _backup_stores(world, data_dir)), []) if valid_world else [],
+        "resume": (_or_default(lambda: _resume_candidate(data_dir, world), {}) or no_resume) if valid_world else no_resume,
     }
 
 
@@ -1019,6 +1213,10 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             }
         )
         return
+    if kind == "resume.discard":
+        removed = _discard_checkpoints(data_dir, world, str(body.get("scanPlanId") or ""))
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": {"discarded": removed}})
+        return
     if kind == "models.list":
         import os
 
@@ -1266,7 +1464,9 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             }
         fingerprint = str(body.get("fingerprint") or "")
         scan_plan_id = str(body.get("scanPlanId") or "")
-        scope_fingerprint = _scan_scope_fingerprint(data_dir)
+        scope_fingerprint = _scan_scope_fingerprint(
+            data_dir, resumable.get("externalPackWrites") if kind == "translate.resume" else None
+        )
         expected_plan_id = _scan_plan_id(fingerprint, scope_fingerprint) if fingerprint else ""
         if not fingerprint or not scan_plan_id:
             emit(
@@ -1378,7 +1578,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "errors": report.get("errors", []),
                     "warnings": report.get("warnings", []),
                     "translation": report.get("translation") or {},
-                    "translationFailures": report.get("translation_failures", []),
+                    "translationFailures": [_public_failure(item) for item in report.get("translation_failures", [])],
+                    "translationFailureCodes": report.get("translation_failure_codes") or {},
                     "keptOriginalSamples": report.get("kept_original_samples", []),
                     "translationSamples": report.get("translation_samples", []),
                     "usage": report.get("usage") or {},
@@ -1410,7 +1611,21 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         allowed = [Path(path) for path in normalize_external_pack_paths(_saved(data_dir).get("external_resource_pack_paths", []))
                    if Path(path).resolve(strict=False) in required]
         selected = BackupSet.find(world, backup_id, stores, external_files=allowed)
-        recovery_id = selected.restore(recovery_store=stores[0])
+        from mwt.locking import MinecraftWorldInUse, WorldWriteLocked
+
+        try:
+            # Holds the write lock and the game's session locks for the whole restore.
+            recovery_id = selected.restore(recovery_store=stores[0])
+        except WorldWriteLocked:
+            emit({"v": 1, "id": request_id, "type": "response.error",
+                  "error": {"code": "WORLD_LOCKED", "recoverable": True,
+                            "message": "Another PomiTranslate operation is using this world. Nothing was restored."}})
+            return
+        except MinecraftWorldInUse:
+            emit({"v": 1, "id": request_id, "type": "response.error",
+                  "error": {"code": "WORLD_IN_USE", "recoverable": True,
+                            "message": "Minecraft or a server is using this world. Close it completely and try again. Nothing was restored."}})
+            return
         emit(
             {
                 "v": 1,
@@ -1435,44 +1650,66 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
     )
 
 
+def _read_requests():
+    """Request lines as text, or the decode error for a line that is not UTF-8."""
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is None:  # a text-only stand-in, as in tests
+        for line in sys.stdin:
+            yield line, None
+        return
+    for raw in stream:
+        try:
+            yield raw.decode("utf-8"), None
+        except UnicodeDecodeError as exc:
+            yield None, exc
+
+
+def _request_id(message: object) -> object:
+    """The id to echo back, when the message has a usable one."""
+    if isinstance(message, dict):
+        identifier = message.get("id", "")
+        if isinstance(identifier, (str, int)) and not isinstance(identifier, bool):
+            return identifier
+    return ""
+
+
+def _reply_error(request_id: object, code: str, message: str, **extra: object) -> None:
+    emit({"v": 1, "id": request_id, "type": "response.error",
+          "error": {"code": code, "message": message, "recoverable": True, **extra}})
+
+
 def serve(report_dir: Path, data_dir: Path, cancel_path: Path | None = None) -> None:
     hello()
-    for line in sys.stdin:
+    for line, decode_error in _read_requests():
+        if decode_error is not None:
+            _reply_error("", "INVALID_REQUEST", "Request was not valid UTF-8")
+            continue
         if not line.strip():
             continue
-        message: dict = {}
+        request_id: object = ""
         try:
             message = json.loads(line)
+            request_id = _request_id(message)
             if not isinstance(message, dict):
                 raise ValueError("Protocol message must be an object")
             if message.get("v") != 1:
                 raise ValueError("Unsupported protocol version")
             handle(message, report_dir, data_dir, cancel_path)
         except (ExternalPackUnavailable, ExternalTargetError):
-            emit({"v": 1, "id": message.get("id", ""), "type": "response.error",
-                  "error": {"code": "EXTERNAL_PACK_UNAVAILABLE", "message": "Selected external ZIP is unavailable or its parent directory changed. Select the original ZIP in Settings before scanning or restoring.", "recoverable": True}})
+            _reply_error(request_id, "EXTERNAL_PACK_UNAVAILABLE",
+                         "Selected external ZIP is unavailable or its parent directory changed. Select the original ZIP in Settings before scanning or restoring.")
         except (json.JSONDecodeError, ValueError) as exc:
-            emit(
-                {
-                    "v": 1,
-                    "id": message.get("id", ""),
-                    "type": "response.error",
-                    "error": {"code": "INVALID_REQUEST", "message": str(exc), "recoverable": True},
-                }
-            )
-        except Exception:
-            emit(
-                {
-                    "v": 1,
-                    "id": message.get("id", ""),
-                    "type": "response.error",
-                    "error": {
-                        "code": "OPERATION_FAILED",
-                        "message": "The operation failed. The world was not marked as completed.",
-                        "recoverable": True,
-                    },
-                }
-            )
+            _reply_error(request_id, "INVALID_REQUEST", str(exc))
+        except (BrokenPipeError, ConnectionError):
+            return  # the shell is gone; nobody is left to answer
+        except Exception as exc:
+            traceback.print_exc(file=sys.stderr)  # diagnostics go to stderr, never into the protocol
+            try:
+                _reply_error(request_id, "OPERATION_FAILED",
+                             "The operation failed. The world was not marked as completed.",
+                             detail=type(exc).__name__)
+            except (OSError, ValueError):
+                return
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1490,6 +1727,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     from mwt.userdata import user_data_dir
 
+    prepare_stdio()
     report_dir = Path(args.report_dir) if args.report_dir else Path.cwd() / ".pomi-reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else user_data_dir()
@@ -1501,6 +1739,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.jsonl:
         cancel_path = Path(args.cancel_file) if args.cancel_file else None
+        isolate_protocol_streams()
         serve(report_dir, data_dir, cancel_path)
         return
     if args.scan:
@@ -1528,7 +1767,12 @@ def main(argv: list[str] | None = None) -> None:
         listed = list_backup_sets(world, stores)
         if not listed:
             raise SystemExit("There is no backup to restore")
-        BackupSet.find(world, listed[0]["backupSetId"], stores).restore(recovery_store=stores[0])
+        from mwt.locking import MinecraftWorldInUse, WorldWriteLocked
+
+        try:
+            BackupSet.find(world, listed[0]["backupSetId"], stores).restore(recovery_store=stores[0])
+        except (WorldWriteLocked, MinecraftWorldInUse) as exc:
+            raise SystemExit(f"Nothing was restored: {exc}") from exc
         print(json.dumps({"status": "restored", "localhostServer": False}))
         return
     hello()

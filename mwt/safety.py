@@ -5,14 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from mwt.durable import atomic_write_text, copy_durable, fsync_dir, mkdir_durable
+from mwt.durable import replace as durable_replace
+
 SKIP_DIR_NAMES = {".pomi-backups", ".pomi-translate", "__pycache__", ".venv"}
 DATA_SUFFIXES = {".mca", ".mcc", ".mcr", ".linear", ".dat"}
+MCC_NAME = r"c\.-?\d+\.-?\d+\.mcc"
+# Files a backup may record as "absent now": an .mcc a run creates, or a region file / pack a
+# restore recreates. Restoring such an entry deletes the file again.
+ABSENT_TARGET_NAMES = (MCC_NAME, r"r\.-?\d+\.-?\d+\.mca", r"resources\.zip")
 
 
 class BackupError(RuntimeError):
@@ -66,6 +72,50 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+class DigestCache:
+    """File digests remembered for one run, keyed by (path, size, mtime_ns).
+
+    A checkpoint after every region file would otherwise re-read the whole world each time.
+    A file this run rewrites must be passed to ``forget`` so a same-size, same-tick write
+    cannot be served from a stale entry.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[int, int, str]] = {}
+
+    def digest(self, path: Path) -> tuple[int, str]:
+        before = path.stat()
+        key = str(path)
+        hit = self._entries.get(key)
+        if hit is not None and hit[0] == before.st_size and hit[1] == before.st_mtime_ns:
+            return before.st_size, hit[2]
+        digest = file_sha256(path)
+        after = path.stat()
+        if (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns):
+            self._entries[key] = (before.st_size, before.st_mtime_ns, digest)
+        return before.st_size, digest
+
+    def forget(self, path: Path) -> None:
+        self._entries.pop(str(path), None)
+
+
+def world_state_fingerprint(world_dir: Path, cache: DigestCache | None = None) -> str:
+    """Digest of the same files ``world_fingerprint`` covers, built from per-file digests.
+
+    Unlike ``world_fingerprint`` it can reuse ``cache`` between calls, so a checkpoint only
+    re-reads the files that changed since the last one. Its values differ from
+    ``world_fingerprint``; checkpoints record which of the two they hold.
+    """
+    digests = cache if cache is not None else DigestCache()
+    outer = hashlib.sha256(b"pomi-world-state-v2\0")
+    root = world_dir.resolve()
+    for path in iter_data_files(root):
+        size, digest = digests.digest(path)
+        outer.update(path.relative_to(root).as_posix().encode("utf-8"))
+        outer.update(f"\0{size}\0{digest}\n".encode("ascii"))
+    return outer.hexdigest()
+
+
 def legacy_backup_store(world_dir: Path) -> Path:
     """Where releases before the app-data store kept backups: inside the world folder."""
     return world_dir.resolve() / ".pomi-backups"
@@ -103,14 +153,19 @@ class BackupSet:
         if backup_id == "latest":
             pointer = self.store / "latest.json"
             if pointer.is_file():
-                backup_id = str(json.loads(pointer.read_text(encoding="utf-8"))["backupSetId"])
+                try:
+                    backup_id = str(json.loads(pointer.read_text(encoding="utf-8"))["backupSetId"])
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    raise BackupError("The latest-backup pointer is damaged") from exc
         if not re.fullmatch(r"[A-Za-z0-9_-]+", backup_id):
             raise BackupError("Invalid backup set ID")
         self.backup_id = backup_id
         self.root = self.store / backup_id
         self.manifest_path = self.root / "manifest.json"
         self.entries: list[dict[str, str]] = []
+        self._index: dict[str, dict[str, str]] = {}
         self._written: set[str] = set()
+        self._dirty = False
 
     @classmethod
     def new(cls, world_dir: Path, *, kind: str = "translation", store: Path | None = None, external_files: list[Path] | None = None) -> "BackupSet":
@@ -136,6 +191,7 @@ class BackupSet:
         if payload.get("verified") is not True:
             raise BackupError("Backup set for resume is not verified")
         backup.entries = backup._validated_manifest_entries(payload)
+        backup._index = {entry["path"]: entry for entry in backup.entries}
         for entry in backup.entries:
             if "externalTarget" in entry:
                 backup._target(entry)
@@ -143,19 +199,23 @@ class BackupSet:
         backup.verify()
         return backup
 
-    def publish_latest(self) -> None:
-        self.verify()
+    def publish_latest(self, *, verify: bool = True) -> None:
+        """Point ``latest.json`` at this set. ``verify=False`` skips the full re-hash when the
+        caller verifies once at a better moment (every entry is already checked when added)."""
+        self.commit()
+        if verify:
+            self.verify()
         pointer = self.store / "latest.json"
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        temporary = pointer.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps({"backupSetId": self.backup_id}), encoding="utf-8")
-        os.replace(temporary, pointer)
+        mkdir_durable(pointer.parent)
+        atomic_write_text(pointer, json.dumps({"backupSetId": self.backup_id}))
 
     def external_targets(self) -> list[Path]:
         payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         return [Path(entry["externalTarget"]) for entry in self._validated_manifest_entries(payload) if "externalTarget" in entry]
 
-    def add(self, path: Path) -> None:
+    def add(self, path: Path, *, commit: bool = True) -> None:
+        """Copy one file into the set and check the copy. ``commit=False`` defers the manifest
+        write, so a caller adding several files pays for one write (see ``commit``)."""
         if path.is_symlink():
             raise BackupError("Symbolic links cannot be backed up as writable targets")
         path = path.resolve()
@@ -169,22 +229,35 @@ class BackupSet:
         else:
             relative = path.relative_to(self.world_dir).as_posix()
             target = {}
-        for entry in self.entries:
-            if entry["path"] == relative:
-                if entry.get("externalTarget") != target.get("externalTarget"):
-                    raise BackupError("Backup target collides with an existing entry")
-                return
+        existing = self._index.get(relative)
+        if existing is not None:
+            if existing.get("externalTarget") != target.get("externalTarget"):
+                raise BackupError("Backup target collides with an existing entry")
+            return
         destination = self.root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
+        mkdir_durable(destination.parent)
         original = file_sha256(path)
+        copy_durable(path, destination)  # flushed before any world file is touched
         copied = file_sha256(destination)
         if original != copied:
             raise BackupError(f"Backup hash mismatch for {relative}")
-        self.entries.append({"path": relative, "sha256": original, "size": str(path.stat().st_size), **target})
-        self._write_manifest()
+        self._append({"path": relative, "sha256": original, "size": str(destination.stat().st_size), **target})
+        if commit:
+            self.commit()
+
+    def _append(self, entry: dict[str, str]) -> None:
+        self.entries.append(entry)
+        self._index[entry["path"]] = entry
+        self._dirty = True
+
+    def commit(self) -> None:
+        """Write the manifest if entries were added since the last write."""
+        if self._dirty:
+            self._write_manifest()
+            self._dirty = False
 
     def verify(self) -> None:
+        self.commit()
         if not self.entries:
             raise BackupError("No files were backed up")
         payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -205,22 +278,31 @@ class BackupSet:
             if file_sha256(source) != entry["sha256"]:
                 raise BackupError(f"Backup verification failed for {entry['path']}")
 
-    def record_new_external_chunk(self, path: Path) -> None:
+    def record_new_external_chunk(self, path: Path, *, commit: bool = True) -> None:
         """Record absence before creation so restore can recover, then remove, this file."""
+        self.record_absent(path, commit=commit)
+
+    def record_absent(self, path: Path, *, commit: bool = True) -> None:
+        """Remember that ``path`` does not exist now, so undoing the write removes it again.
+
+        Used for an .mcc the run is about to create, and for a file a restore is about to bring
+        back although it is missing: the recovery set can then put the world back exactly.
+        """
         path = Path(os.path.abspath(path))
         if not path.resolve().is_relative_to(self.world_dir):
-            raise BackupError("New external chunks must be inside the selected world")
+            raise BackupError("Absent targets must be inside the selected world")
         relative = path.relative_to(self.world_dir).as_posix()
-        if any(entry["path"] == relative for entry in self.entries):
+        if relative in self._index:
             return
         entry = {"path": relative, "sha256": hashlib.sha256(b"").hexdigest(),
                  "size": "0", "restoreAction": "remove_created"}
         candidate = self._validated_manifest_entries({"files": [*self.entries, entry]})[-1]
         target = self._target(candidate)
         if target.exists():
-            raise BackupError("A new external chunk target already exists")
-        self.entries.append(candidate)
-        self._write_manifest()
+            raise BackupError("A target recorded as absent already exists")
+        self._append(candidate)
+        if commit:
+            self.commit()
 
     def mark_written(self, paths: list[Path]) -> None:
         """Remember files this run has already replaced so later verifies do not expect the pre-write bytes."""
@@ -228,8 +310,21 @@ class BackupSet:
             resolved = path.resolve()
             self._written.add(resolved.relative_to(self.world_dir).as_posix() if resolved.is_relative_to(self.world_dir) else self._external_archive_path(resolved))
 
-    def restore(self, recovery_store: Path | None = None) -> str:
-        """Put the backed-up files back. The files they replace are kept as a recovery set first."""
+    def restore(self, recovery_store: Path | None = None, *, hold_guards: bool = True) -> str:
+        """Put the backed-up files back. The files they replace are kept as a recovery set first.
+
+        The world write lock and the game's session locks are held for the whole restore, and a
+        busy world raises ``WorldWriteLocked`` / ``MinecraftWorldInUse`` before anything is
+        written. Pass ``hold_guards=False`` only when the caller already holds both.
+        """
+        if not hold_guards:
+            return self._restore(recovery_store)
+        from mwt.locking import hold_world
+
+        with hold_world(self.world_dir, "restore"):
+            return self._restore(recovery_store)
+
+    def _restore(self, recovery_store: Path | None) -> str:
         payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         entries = self._validated_manifest_entries(payload)
         if not payload.get("verified") or not entries:
@@ -248,7 +343,9 @@ class BackupSet:
         for entry in entries:
             current = self._target(entry)
             if current.is_file():
-                recovery.add(current)
+                recovery.add(current, commit=False)
+            elif entry.get("restoreAction") != "remove_created" and "externalTarget" not in entry:
+                recovery.record_absent(current, commit=False)  # undoing this restore removes it again
         if recovery.entries:
             recovery.publish_latest()
         ordered = sorted(entries, key=lambda entry: 2 if entry.get("restoreAction") == "remove_created"
@@ -259,15 +356,17 @@ class BackupSet:
                 # The recovery set above includes the current bytes, even if Minecraft
                 # edited them since translation. Restore returns to the pre-write absence.
                 destination.unlink(missing_ok=True)
+                fsync_dir(destination.parent)
                 continue
             source = self.root / entry["path"]
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_durable(destination.parent)
             temporary = destination.with_name(f".{destination.name}.pomi-restore-{uuid.uuid4().hex}.tmp")
             try:
-                shutil.copy2(source, temporary)
-                os.replace(temporary, destination)
+                copy_durable(source, temporary)
+                durable_replace(temporary, destination)
             finally:
                 temporary.unlink(missing_ok=True)
+            fsync_dir(destination.parent)
             if file_sha256(destination) != entry["sha256"]:
                 raise BackupError(f"Restore hash mismatch for {entry['path']}")
         return recovery.backup_id if recovery.entries else ""
@@ -332,7 +431,7 @@ class BackupSet:
             action = raw.get("restoreAction")
             if action is not None and (
                 action != "remove_created" or external_target is not None
-                or not re.fullmatch(r"c\.-?\d+\.-?\d+\.mcc", relative.name)
+                or not any(re.fullmatch(pattern, relative.name) for pattern in ABSENT_TARGET_NAMES)
                 or digest != hashlib.sha256(b"").hexdigest() or size != "0"
             ):
                 raise BackupError("Backup restore action is invalid")
@@ -356,16 +455,16 @@ class BackupSet:
                 entry.update(externalTarget=external_target, externalParentId=external_parent)
             entries.append(entry)
         for entry in entries:
-            if entry.get("restoreAction") == "remove_created":
+            if entry.get("restoreAction") == "remove_created" and re.fullmatch(MCC_NAME, PurePosixPath(entry["path"]).name):
                 path = PurePosixPath(entry["path"])
                 _, x, z, _ = path.name.split(".")
                 region = str(path.with_name(f"r.{int(x) // 32}.{int(z) // 32}.mca"))
-                if not any(item["path"] == region and "restoreAction" not in item for item in entries):
+                if not any(item["path"] == region for item in entries):
                     raise BackupError("New external chunk has no backed-up region")
         return entries
 
     def _write_manifest(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
+        mkdir_durable(self.root)
         document = {
             "schemaVersion": 3 if any("restoreAction" in entry for entry in self.entries) else 2,
             "backupSetId": self.backup_id,
@@ -373,9 +472,7 @@ class BackupSet:
             "verified": True,
             "files": self.entries,
         }
-        temporary = self.manifest_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(document, indent=2), encoding="utf-8")
-        os.replace(temporary, self.manifest_path)
+        atomic_write_text(self.manifest_path, json.dumps(document, indent=2))
 
 
 def list_backup_sets(world_dir: Path, stores: list[Path] | None = None) -> list[dict]:
@@ -390,20 +487,22 @@ def list_backup_sets(world_dir: Path, stores: list[Path] | None = None) -> list[
             try:
                 data = json.loads(manifest.read_text(encoding="utf-8"))
                 backup_id = manifest.parent.name
-                if not re.fullmatch(r"[A-Za-z0-9_-]+", backup_id) or backup_id in seen:
+                if not isinstance(data, dict) or not re.fullmatch(r"[A-Za-z0-9_-]+", backup_id) or backup_id in seen:
                     continue
                 seen.add(backup_id)
                 files = data.get("files", [])
+                if not isinstance(files, list):
+                    continue
                 result.append({
                     "backupSetId": backup_id,
                     "createdAt": data.get("createdAt") or datetime.fromtimestamp(manifest.stat().st_mtime, timezone.utc).isoformat(),
                     "fileCount": len(files),
                     "verified": data.get("verified") is True,
                     "kind": "recovery" if backup_id.endswith("-recovery") else "translation",
-                    "sizeBytes": sum(int(item.get("size", 0)) for item in files if str(item.get("size", "")).isdigit()),
+                    "sizeBytes": sum(int(item.get("size", 0)) for item in files if isinstance(item, dict) and str(item.get("size", "")).isdigit()),
                     "inWorldFolder": store.resolve() == legacy_backup_store(world_dir),
                     "externalTargets": [item["externalTarget"] for item in files if isinstance(item, dict) and isinstance(item.get("externalTarget"), str)],
                 })
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError, AttributeError):
                 continue
     return sorted(result, key=lambda item: item["createdAt"], reverse=True)
