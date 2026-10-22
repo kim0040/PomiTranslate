@@ -1925,7 +1925,7 @@ def _shell_gone() -> None:
         return
     _SHELL_GONE.set()
     try:
-        sys.stderr.write("stdin closed while a request was running; cancelling" + chr(10))
+        sys.stderr.write("[pomi] stdin closed while a request was running; cancelling\n")
         sys.stderr.flush()
     except (OSError, ValueError):
         pass
