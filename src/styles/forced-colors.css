@@ -1,0 +1,36 @@
+/*
+ * Windows High Contrast / forced colors. The browser swaps every colour for the system palette, so
+ * anything that meant something only through a background or a tint needs a border, a system colour
+ * or a shape instead. Kept in one file so the rest of the styles stay free of vendor-specific cases.
+ */
+@media (forced-colors: active) {
+  :focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+
+  a { color: LinkText; }
+
+  .btn { border: 1px solid ButtonText; }
+  .btn-primary, .btn-danger-solid { background: Highlight; color: HighlightText; border-color: Highlight; forced-color-adjust: none; }
+  .btn:disabled, .btn[aria-disabled='true'] { color: GrayText; border-color: GrayText; }
+
+  .card, .callout, .pill, .toast, .dialog, .input, .select, .textarea, .segmented { border: 1px solid CanvasText; }
+  .dialog::backdrop { background: transparent; }
+  .callout-icon { forced-color-adjust: auto; }
+
+  /* State carried by a tint becomes a mark: the selected row and pressed toggles use the selection colours. */
+  tr[aria-selected='true'] td { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+  .segmented button[aria-pressed='true'], .chip[aria-pressed='true'] { background: Highlight; color: HighlightText; border: 1px solid Highlight; forced-color-adjust: none; }
+  .segmented button[aria-pressed='false'], .chip[aria-pressed='false'] { border: 1px solid ButtonText; }
+  .pill-success::before, .pill-warning::before, .pill-danger::before { content: '\25CF\00a0'; }
+  tr.excluded .src { text-decoration: line-through; }
+
+  /* Progress: a track outline and a filled bar in the highlight colour; unknown progress stays hatched. */
+  [role='progressbar'] { border: 1px solid CanvasText; background: Canvas; }
+  [role='progressbar'] > div { background: Highlight; forced-color-adjust: none; }
+  @media (prefers-reduced-motion: reduce) {
+    [role='progressbar'] > div:not([style]) { background: repeating-linear-gradient(135deg, Highlight 0 8px, Canvas 8px 16px); }
+  }
+
+  /* The error text inside a dialog must stand out without its red tint. */
+  .dialog-error { border: 2px solid CanvasText; }
+  .token-warning { border: 1px solid CanvasText; }
+}

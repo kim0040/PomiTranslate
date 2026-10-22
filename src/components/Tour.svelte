@@ -23,7 +23,7 @@
 </script>
 
 <Dialog title={t('tour.title')} onClose={() => finish()}>
-  <div class="tour" aria-live="polite">
+  <div class="tour">
     <div class="art" aria-hidden="true">
       {#if step.icon}<span class="ico"><Icon name={step.icon} size={30} /></span>
       {:else}<img src="/images/pomi.png" alt="" width="80" height="80" />{/if}

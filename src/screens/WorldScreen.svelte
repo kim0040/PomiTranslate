@@ -4,7 +4,9 @@
   import { baseName, formatDate, middleEllipsis } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
+  import { resultPresentation } from '../lib/workflow';
   import SetupNotice from '../components/SetupNotice.svelte';
+  import InterruptedWork from '../components/InterruptedWork.svelte';
 
   const dimensions = $derived.by(() => {
     const dirs = app.inspection?.regionDirs ?? [];
@@ -31,6 +33,23 @@
     app.goStep('scan');
     void app.startScan();
   }
+  // Where the last visit left off: the scan on screen or saved, how many sentences it found, and the
+  // last outcome. Nothing is shown for a world that was never scanned: it starts at the scan button.
+  const latestTranslation = $derived(
+    [...app.backups].filter((backup) => backup.kind === 'translation').sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0]
+  );
+  const landing = $derived.by(() => {
+    const parts: string[] = [];
+    if (app.scan) {
+      const when = app.scanAt ? formatDate(new Date(app.scanAt).toISOString(), app.locale) : '';
+      parts.push(when
+        ? t('world.landing.scan', { date: when, count: app.candidateCount })
+        : t('world.landing.scanUndated', { count: app.candidateCount }));
+    }
+    if (app.result) parts.push(t('world.landing.result', { result: t(`result.${resultPresentation(app.result.status).status}` as MessageKey) }));
+    else if (latestTranslation) parts.push(t('world.landing.backup', { date: formatDate(latestTranslation.createdAt, app.locale) }));
+    return parts;
+  });
   const kind = $derived((app.inspection?.kind ?? 'unknown') as 'java_world' | 'server_root' | 'unknown');
 </script>
 
@@ -39,6 +58,8 @@
     <h1>{t('world.title')}</h1>
     <p class="lead">{t('world.lead')}</p>
   </header>
+
+  <InterruptedWork />
 
   {#if app.worldDir && app.inspection?.validJavaWorld}
     <section class="card selected" aria-labelledby="selected-title">
@@ -58,6 +79,10 @@
         <li><span class="pill">{t('world.backupsCount', { count: app.backups.length })}</span></li>
         {#if dataVersion}<li><span class="pill num">{t('world.gameData', { version: dataVersion })}</span></li>{/if}
       </ul>
+
+      {#if landing.length}
+        <p class="landing">{landing.join(' · ')}</p>
+      {/if}
 
       {#if blockers.length}
         <Callout tone="danger" title={t('scan.blocked')} role="alert">
@@ -188,6 +213,7 @@
   .path { font-size: var(--text-sm); color: var(--text-secondary); margin-top: 2px; }
   .facts { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
   .plain { margin: 0; padding-inline-start: 18px; }
+  .landing { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
   .cta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .small { font-size: var(--text-sm); }
   .found { display: grid; gap: var(--space-2); }

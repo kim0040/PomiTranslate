@@ -19,6 +19,12 @@
 
   const win = $derived(visibleWindow({ scrollTop, viewportHeight: height, rowHeight: ROW, total: source.total }));
   const indexes = $derived(Array.from({ length: Math.max(0, win.end - win.start) }, (_, i) => win.start + i));
+  // Exactly one row is in the tab order. The row the user was on, unless it has scrolled out of the
+  // rendered window or its page is not loaded; then the first loaded row, so Tab always lands in the grid.
+  const tabbable = $derived.by(() => {
+    if (indexes.includes(active) && source.rowAt(active)) return active;
+    return indexes.find((index) => !!source.rowAt(index)) ?? -1;
+  });
 
   // Ask for the pages under the window. The source ignores pages it already has.
   $effect(() => {
@@ -128,8 +134,11 @@
             data-index={index}
             aria-rowindex={index + 2}
             aria-selected={candidate.id === selectedId}
-            aria-label={t('review.rowLabel', { source: candidate.source, kind: kindLabel(candidate.kind), places: t('common.places', { count: candidate.occurrences }) })}
-            tabindex={index === active ? 0 : -1}
+            aria-label={t('review.rowLabel', {
+              source: candidate.source, kind: kindLabel(candidate.kind), places: t('common.places', { count: candidate.occurrences }),
+              state: t(`review.state.${state}.label` as MessageKey), where: placeText(candidate)
+            })}
+            tabindex={index === tabbable ? 0 : -1}
             style:height="{ROW}px"
             onclick={() => { active = index; onSelect(candidate, true); }}
             onkeydown={(event) => handleKey(event, index, candidate)}
