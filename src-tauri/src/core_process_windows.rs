@@ -12,6 +12,11 @@
 //!
 //! The pipes are anonymous pipes read and written through blocking calls on tokio's blocking pool
 //! (`tokio::fs::File`): tokio's own `Command` would give async pipes but not the thread handle.
+//!
+//! `CreateProcessW` is given an exact file, so a bare program name (`python` in development mode) is
+//! first resolved to an absolute path the way a shell would, through `PATH` and `PATHEXT` (M2). A
+//! created process that cannot be placed under supervision is terminated *and reaped*; a failed
+//! `TerminateProcess` is retried and reported, never ignored (M4).
 use std::{
     ffi::{c_void, OsStr, OsString},
     io, mem,
@@ -19,9 +24,10 @@ use std::{
         ffi::OsStrExt,
         io::{FromRawHandle, RawHandle},
     },
-    path::Path,
+    path::{Path, PathBuf},
     ptr,
     sync::Arc,
+    time::Duration,
 };
 
 use windows_sys::Win32::{
@@ -48,6 +54,75 @@ use windows_sys::Win32::{
 use zeroize::Zeroizing;
 
 use super::{ExitInfo, RawSpawn, SpawnSpec, TreeKiller};
+
+/// How often a failed `TerminateProcess` on a suspended child is tried, and how long the process
+/// object may take to signal after a successful one.
+const TERMINATE_ATTEMPTS: u32 = 5;
+const REAP_WAIT_MS: u32 = 5_000;
+
+/// A step that tests make fail (see [`fault`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Step {
+    Assign,
+    Resume,
+    Terminate,
+}
+
+#[cfg(test)]
+pub(super) mod fault {
+    use super::Step;
+    use std::cell::Cell;
+
+    thread_local! {
+        static NEXT: Cell<Option<Step>> = const { Cell::new(None) };
+        static TERMINATE_FAILURES: Cell<u32> = const { Cell::new(0) };
+        static LAST_PID: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// The next spawn on this thread fails at `step` (`Terminate` makes the first `times`
+    /// `TerminateProcess` calls of a failed spawn fail).
+    pub fn fail(step: Step, times: u32) {
+        if step == Step::Terminate {
+            TERMINATE_FAILURES.with(|cell| cell.set(times));
+        } else {
+            NEXT.with(|cell| cell.set(Some(step)));
+        }
+    }
+
+    pub(super) fn injected(step: Step) -> bool {
+        if step == Step::Terminate {
+            return TERMINATE_FAILURES.with(|cell| {
+                let left = cell.get();
+                cell.set(left.saturating_sub(1));
+                left > 0
+            });
+        }
+        NEXT.with(|cell| {
+            if cell.get() == Some(step) {
+                cell.set(None);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    pub(super) fn record_pid(pid: u32) {
+        LAST_PID.with(|cell| cell.set(pid));
+    }
+
+    /// The pid of the last child created on this thread, even when its spawn failed afterwards.
+    pub fn last_pid() -> u32 {
+        LAST_PID.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+use fault::injected;
+#[cfg(not(test))]
+fn injected(_: Step) -> bool {
+    false
+}
 
 /// `ProcThreadAttributeValue(ProcThreadAttributeHandleList, FALSE, TRUE, FALSE)`.
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
@@ -137,6 +212,11 @@ impl Job {
     }
 
     fn assign(&self, process: HANDLE) -> io::Result<()> {
+        if injected(Step::Assign) {
+            return Err(io::Error::other(
+                "injected AssignProcessToJobObject failure",
+            ));
+        }
         // SAFETY: both handles are valid and owned by the caller.
         if unsafe { AssignProcessToJobObject(self.0.raw(), process) } == 0 {
             return Err(last_error("AssignProcessToJobObject"));
@@ -178,13 +258,73 @@ impl Suspended {
     }
 }
 
+fn terminate(process: &Owned) -> io::Result<()> {
+    if injected(Step::Terminate) {
+        return Err(io::Error::other("injected TerminateProcess failure"));
+    }
+    // SAFETY: the process handle is valid and owned.
+    if unsafe { TerminateProcess(process.raw(), 1) } == 0 {
+        return Err(last_error("TerminateProcess"));
+    }
+    Ok(())
+}
+
+fn resume(thread: &Owned) -> io::Result<()> {
+    if injected(Step::Resume) {
+        return Err(io::Error::other("injected ResumeThread failure"));
+    }
+    // SAFETY: the primary thread handle returned by CreateProcessW, still suspended.
+    if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
+        return Err(last_error("ResumeThread"));
+    }
+    Ok(())
+}
+
+impl Suspended {
+    /// Stop a child that never ran and wait until the system says it is gone. Each result is
+    /// checked: a failed termination is retried, and a child that cannot be stopped is reported
+    /// (it stays suspended, so it executes nothing, but nobody pretends it is gone).
+    fn terminate_and_reap(&self) {
+        let mut stopped = false;
+        for attempt in 1..=TERMINATE_ATTEMPTS {
+            match terminate(&self.process) {
+                Ok(()) => {
+                    stopped = true;
+                    break;
+                }
+                Err(error) => {
+                    crate::diagnostics::global().log(
+                        "ERROR",
+                        "core",
+                        &format!("could not terminate the unsupervised core (attempt {attempt}): {error}"),
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+        if !stopped {
+            crate::diagnostics::global().log(
+                "ERROR",
+                "core",
+                "an unsupervised translation core could not be terminated; it was never resumed",
+            );
+            return;
+        }
+        // SAFETY: the process handle is valid and owned.
+        if unsafe { WaitForSingleObject(self.process.raw(), REAP_WAIT_MS) } != WAIT_OBJECT_0 {
+            crate::diagnostics::global().log(
+                "ERROR",
+                "core",
+                "a terminated unsupervised core was not reported gone in time",
+            );
+        }
+    }
+}
+
 impl Drop for Suspended {
     fn drop(&mut self) {
         if self.armed {
-            // SAFETY: the process handle is valid and owned.
-            unsafe {
-                TerminateProcess(self.process.raw(), 1);
-            }
+            self.terminate_and_reap();
         }
     }
 }
@@ -378,9 +518,99 @@ fn file_from(handle: Owned) -> tokio::fs::File {
     })
 }
 
+/// The file `CreateProcessW` is to start for `program`. A name with a directory part is a path
+/// (an extension is added when it has none); a bare name is searched in `PATH` - the child's own,
+/// when `env` overrides it - trying `.exe` and `.com` (and the extensions `PATHEXT` lists that
+/// `CreateProcessW` can start) when the name has no extension. A name that cannot be found is an
+/// error, not a guess.
+pub(super) fn resolve_program(program: &Path, env: &[(OsString, OsString)]) -> io::Result<PathBuf> {
+    let path_var = env
+        .iter()
+        .rev()
+        .find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("PATH"));
+    resolve_in(
+        program,
+        path_var.as_deref(),
+        std::env::var_os("PATHEXT").as_deref(),
+    )
+}
+
+fn executable_extensions(pathext: Option<&OsStr>) -> Vec<String> {
+    let mut extensions: Vec<String> = pathext
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(';')
+                .map(|ext| ext.trim().trim_start_matches('.').to_ascii_lowercase())
+                // Only what CreateProcessW can start by itself; scripts need an interpreter.
+                .filter(|ext| matches!(ext.as_str(), "exe" | "com"))
+                .collect()
+        })
+        .unwrap_or_default();
+    for fallback in ["exe", "com"] {
+        if !extensions.iter().any(|ext| ext == fallback) {
+            extensions.push(fallback.to_owned());
+        }
+    }
+    extensions
+}
+
+pub(super) fn resolve_in(
+    program: &Path,
+    path_var: Option<&OsStr>,
+    pathext: Option<&OsStr>,
+) -> io::Result<PathBuf> {
+    let not_found = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("program not found: {}", program.display()),
+        )
+    };
+    let is_file = |candidate: &Path| {
+        // A reparse point (an app execution alias) is a launchable file too.
+        std::fs::symlink_metadata(candidate).is_ok_and(|meta| !meta.is_dir())
+    };
+    let extensions = executable_extensions(pathext);
+    let with_extensions = |base: &Path| -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        if base.extension().is_some() {
+            candidates.push(base.to_path_buf());
+        }
+        for ext in &extensions {
+            let mut name = base.as_os_str().to_owned();
+            name.push(".");
+            name.push(ext);
+            candidates.push(PathBuf::from(name));
+        }
+        candidates
+    };
+    let bare = program.components().count() == 1 && !program.is_absolute();
+    if !bare {
+        return with_extensions(program)
+            .into_iter()
+            .find(|candidate| is_file(candidate))
+            .ok_or_else(not_found);
+    }
+    let directories = path_var.map(std::env::split_paths).into_iter().flatten();
+    for directory in directories {
+        if directory.as_os_str().is_empty() {
+            continue;
+        }
+        for candidate in with_extensions(&directory.join(program)) {
+            if is_file(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(not_found())
+}
+
 pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
-    let application = wide_path(&spec.program)?;
-    let mut command = command_line(&spec.program, &spec.args)?;
+    let program = resolve_program(&spec.program, &spec.env)?;
+    let application = wide_path(&program)?;
+    let mut command = command_line(&program, &spec.args)?;
     let environment = environment_block(&spec.env)?;
     let directory = spec.cwd.as_deref().map(wide_path).transpose()?;
 
@@ -425,6 +655,8 @@ pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
     if created == 0 {
         return Err(last_error("CreateProcessW"));
     }
+    #[cfg(test)]
+    fault::record_pid(information.dwProcessId);
     let suspended = Suspended {
         process: Owned(information.hProcess),
         thread: Owned(information.hThread),
@@ -434,13 +666,11 @@ pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
     drop((stdin_read, stdout_write, stderr_write, inherited));
 
     job.assign(suspended.process.raw())?;
-    // SAFETY: the primary thread handle returned by CreateProcessW, still suspended.
-    if unsafe { ResumeThread(suspended.thread.raw()) } == u32::MAX {
-        return Err(last_error("ResumeThread"));
-    }
+    resume(&suspended.thread)?;
     let pid = information.dwProcessId;
     let (process, thread) = suspended.into_running();
     drop(thread);
+    let process = Arc::new(process);
 
     Ok(RawSpawn {
         pid,
@@ -451,24 +681,28 @@ pub(super) fn spawn(spec: &SpawnSpec) -> io::Result<RawSpawn> {
         stdout: Box::new(file_from(stdout_read)),
         stderr: Box::new(file_from(stderr_read)),
         killer: Arc::new(job),
-        wait: Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                // SAFETY: the process handle stays valid until `process` drops with this closure.
-                if unsafe { WaitForSingleObject(process.raw(), INFINITE) } != WAIT_OBJECT_0 {
-                    return Err(last_error("WaitForSingleObject"));
-                }
-                let mut code = 0u32;
-                // SAFETY: as above, with a valid out-pointer.
-                if unsafe { GetExitCodeProcess(process.raw(), &mut code) } == 0 {
-                    return Err(last_error("GetExitCodeProcess"));
-                }
-                Ok(ExitInfo {
-                    code: Some(code as i32),
-                    signal: None,
+        // Each call is one observation; the process handle stays valid for as long as any of them.
+        wait: Box::new(move || {
+            let process = Arc::clone(&process);
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    // SAFETY: the process handle stays valid while this closure holds the Arc.
+                    if unsafe { WaitForSingleObject(process.raw(), INFINITE) } != WAIT_OBJECT_0 {
+                        return Err(last_error("WaitForSingleObject"));
+                    }
+                    let mut code = 0u32;
+                    // SAFETY: as above, with a valid out-pointer.
+                    if unsafe { GetExitCodeProcess(process.raw(), &mut code) } == 0 {
+                        return Err(last_error("GetExitCodeProcess"));
+                    }
+                    Ok(ExitInfo {
+                        code: Some(code as i32),
+                        signal: None,
+                    })
                 })
+                .await
+                .map_err(io::Error::other)?
             })
-            .await
-            .map_err(io::Error::other)?
         }),
     })
 }
