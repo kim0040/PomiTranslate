@@ -1862,7 +1862,12 @@ def _glossary_handler(name: str):
     def operation(payload: dict, data_dir: Path) -> dict:
         from mwt import glossary
 
-        return getattr(glossary, name)(payload, data_dir)
+        try:
+            return getattr(glossary, name)(payload, data_dir)
+        except (UnicodeError, OverflowError, RecursionError) as exc:
+            # The glossary validates its input field by field; this is the net for anything it missed, so a
+            # request always gets an answer the interface can show instead of none.
+            raise glossary.GlossaryError("GLOSSARY_INVALID", f"payload: contains a value that cannot be used ({type(exc).__name__})") from exc
 
     from mwt.glossary import GlossaryError
 

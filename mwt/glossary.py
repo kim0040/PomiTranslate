@@ -2,8 +2,10 @@
 
 Two durable JSON files hold the entries: ``<data_dir>/glossary/global.json`` for every world and
 ``<data_dir>/glossary/worlds/<worldKey>.json`` for one world (``worldKey`` is ``journal.world_key``).
-A world entry overrides a global entry with the same source. Nothing here touches a world or a
-backup, and no path is built from request text other than through ``world_key``.
+A world entry overrides a global entry with the same folded source (``fold_key``, whatever either entry's
+``caseSensitive``). Nothing here touches a world or a backup, and no path is built from request text other
+than through ``world_key``. ``set`` and ``import`` read, compare and write one document under a lock file
+beside it, so two processes cannot both accept the same ``baseRevision``.
 
 Requests (query lane, no world lock) are answered by ``get_glossary``, ``set_glossary``,
 ``import_glossary`` and ``export_glossary``. Refusals raise ``GlossaryError`` with a code the UI can
@@ -20,38 +22,56 @@ import csv
 import hashlib
 import io
 import json
+import math
+import os
 import re
 import secrets
 import threading
 import time
 import unicodedata
+from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from mwt.durable import atomic_write_text, mkdir_durable
+from mwt.locking import _CONTENDED, _NO_LOCKING, _try_lock, _unlock
+from mwt.tokens import _OTHER  # {named} placeholders and § codes: the project's own format-code scanner
 
 GLOSSARY_VERSION = 1
 MAX_ENTRIES = 2000
 MAX_SOURCE_CHARS = 200
 MAX_TARGET_CHARS = 200
 MAX_NOTE_CHARS = 300
-MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
+# What the writer can produce for the allowed schema, so a saved document is never refused when it is read
+# back: every character takes at most 4 bytes in UTF-8 (an escaped quote or newline takes 2), and the keys,
+# punctuation and flags around the three texts of an entry add ``_ENTRY_OVERHEAD_BYTES``.
+_ENTRY_OVERHEAD_BYTES = 128
+MAX_DOCUMENT_BYTES = MAX_ENTRIES * (4 * (MAX_SOURCE_CHARS + MAX_TARGET_CHARS + MAX_NOTE_CHARS) + _ENTRY_OVERHEAD_BYTES) + 4096
+MAX_REVISION = 2**53 - 1  # what a JSON number in the interface can carry exactly
 MAX_IMPORT_CHARS = 2 * 1024 * 1024
 MAX_REPORTED_SKIPS = 100
 MAX_TERMS_PER_BATCH = 80
 DAMAGED_KEEP_SECONDS = 30 * 24 * 3600
+LOCK_WAIT_SECONDS = 5.0  # how long set/import wait for another writer before GLOSSARY_BUSY
+_LOCK_POLL_SECONDS = 0.02
 
 MODES = ("translate", "keep")
 SCOPES = ("global", "world")
 FORMATS = ("csv", "tsv")
-ERROR_CODES = ("GLOSSARY_CONFLICT", "GLOSSARY_INVALID", "GLOSSARY_WRITE_FAILED")
+ERROR_CODES = ("GLOSSARY_BUSY", "GLOSSARY_CONFLICT", "GLOSSARY_INVALID", "GLOSSARY_WRITE_FAILED")
 MISMATCH_WARNING = "glossary_mismatch"
+TRUNCATED_WARNING = "glossary_truncated"  # a matching entry that did not fit into the batch's term block
 
 _ENTRY_ID = re.compile(r"[0-9a-f]{20}")
 _HEADER = ("source", "target", "mode", "note", "caseSensitive")
 _TRUE = frozenset({"true", "1", "yes", "y", "t", "o"})
 _FALSE = frozenset({"false", "0", "no", "n", "f", ""})
-_WRITE_LOCK = threading.Lock()
+# Cells a spreadsheet would evaluate as a formula; export puts one apostrophe in front (see ``_guard_cell``).
+_FORMULA_START = "=+-@\t\r"
+# One writer per process at a time: POSIX record locks belong to the process, so two threads of it must
+# never both hold the lock file.
+_PROCESS_LOCK = threading.Lock()
 
 
 class GlossaryError(RuntimeError):
@@ -69,8 +89,10 @@ def _invalid(path: str, problem: str) -> GlossaryError:
 
 # ---------------------------------------------------------------- entries
 
-def dedupe_key(source: str, case_sensitive: bool) -> str:
-    return source if case_sensitive else source.casefold()
+def fold_key(text: str) -> str:
+    """The one folded form of a source: duplicate checks, term selection, matching and the rule that a world
+    entry replaces a global one all compare sources through this, never through their own folding."""
+    return text.casefold()
 
 
 def _has_control(text: str, *, allow_breaks: bool = False) -> bool:
@@ -82,11 +104,19 @@ def _has_control(text: str, *, allow_breaks: bool = False) -> bool:
     return False
 
 
+def _check_encodable(text: str, path: str) -> None:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:  # a lone surrogate: valid in a JSON string, impossible to save
+        raise _invalid(path, "contains a character that cannot be saved (invalid Unicode)") from exc
+
+
 def _text_field(value: object, path: str, limit: int, *, required: bool = False, breaks: bool = False) -> str:
     if value is None and not required:
         return ""
     if not isinstance(value, str):
         raise _invalid(path, "must be text")
+    _check_encodable(value, path)
     text = value.strip()
     if required and not text:
         raise _invalid(path, "is required")
@@ -106,7 +136,11 @@ def _flag_field(value: object, path: str) -> bool:
 
 
 def normalize_entry(raw: object, path: str, *, require_id: bool = False) -> dict:
-    """One validated entry in its stored shape. A missing ``id`` is generated unless ``require_id``."""
+    """One validated entry in its stored shape. A missing ``id`` is generated unless ``require_id``.
+
+    A translate entry needs a target: an empty one would say "translate this term as nothing", which is not
+    a rule a translation can follow. To leave a term as written use the ``keep`` mode.
+    """
     if not isinstance(raw, dict):
         raise _invalid(path, "must be an object")
     source = _text_field(raw.get("source"), f"{path}.source", MAX_SOURCE_CHARS, required=True)
@@ -115,7 +149,7 @@ def normalize_entry(raw: object, path: str, *, require_id: bool = False) -> dict
         raise _invalid(f"{path}.mode", "must be translate or keep")
     target = _text_field(raw.get("target"), f"{path}.target", MAX_TARGET_CHARS)
     if mode == "translate" and not target:
-        raise _invalid(f"{path}.target", "is required when the mode is translate")
+        raise _invalid(f"{path}.target", "is required when the mode is translate (use the keep mode to leave a term as written)")
     identifier = raw.get("id")
     if identifier is None and not require_id:
         identifier = secrets.token_hex(10)
@@ -131,23 +165,57 @@ def normalize_entry(raw: object, path: str, *, require_id: bool = False) -> dict
     }
 
 
-def normalize_entries(value: object, path: str = "entries", *, require_id: bool = False) -> list[dict]:
+class _Names:
+    """The sources taken in one document, under the folding rule of ``fold_key``.
+
+    Two entries clash when their folded sources are equal, except that two case-sensitive entries may differ
+    only by case ("Mira" and "mira"). An entry that ignores case claims every spelling, so it clashes with any
+    entry of the same folded source, whichever of the two came first.
+    """
+
+    def __init__(self) -> None:
+        self._taken: dict[str, list[tuple[str, bool, Any]]] = {}
+
+    def clashes(self, source: str, case_sensitive: bool) -> list[Any]:
+        return [
+            owner
+            for other, other_sensitive, owner in self._taken.get(fold_key(source), ())
+            if not (case_sensitive and other_sensitive and other != source)
+        ]
+
+    def add(self, source: str, case_sensitive: bool, owner: Any) -> None:
+        self._taken.setdefault(fold_key(source), []).append((source, case_sensitive, owner))
+
+    def remove(self, source: str, owner: Any) -> None:
+        key = fold_key(source)
+        kept = [item for item in self._taken.get(key, ()) if item[2] != owner]
+        if kept:
+            self._taken[key] = kept
+        else:
+            self._taken.pop(key, None)
+
+
+def normalize_entries(
+    value: object, path: str = "entries", *, require_id: bool = False, check_names: bool = True,
+) -> list[dict]:
+    """Validated entries. ``check_names=False`` is for a file we wrote ourselves (see ``read_document``)."""
     if not isinstance(value, list):
         raise _invalid(path, "must be a list")
     if len(value) > MAX_ENTRIES:
         raise _invalid(path, f"has more than {MAX_ENTRIES} entries")
     entries: list[dict] = []
     ids: set[str] = set()
-    keys: dict[str, int] = {}
+    names = _Names()
     for index, raw in enumerate(value):
         entry = normalize_entry(raw, f"{path}[{index}]", require_id=require_id)
         if entry["id"] in ids:
             raise _invalid(f"{path}[{index}].id", "is used by another entry")
-        key = dedupe_key(entry["source"], entry["caseSensitive"])
-        if key in keys:
-            raise _invalid(f"{path}[{index}].source", f"is already used by entry {keys[key]}")
+        if check_names:
+            clash = names.clashes(entry["source"], entry["caseSensitive"])
+            if clash:
+                raise _invalid(f"{path}[{index}].source", f"is already used by entry {clash[0]}")
+            names.add(entry["source"], entry["caseSensitive"], index)
         ids.add(entry["id"])
-        keys[key] = index
         entries.append(entry)
     return entries
 
@@ -169,6 +237,9 @@ def _scope(payload: object) -> tuple[str, str]:
     if scope == "world":
         if not isinstance(world, str) or not world.strip():
             raise _invalid("worldDir", "is required for the world scope")
+        _check_encodable(world, "worldDir")
+        if "\0" in world:
+            raise _invalid("worldDir", "is not a usable folder path")
         return scope, world
     return scope, ""
 
@@ -178,13 +249,17 @@ def _document_path(data_dir: Path, scope: str, world_dir: str | Path | None) -> 
         return _glossary_dir(data_dir) / "global.json"
     from mwt.journal import world_key
 
-    return _glossary_dir(data_dir) / "worlds" / f"{world_key(Path(str(world_dir)).expanduser())}.json"
+    try:
+        key = world_key(Path(str(world_dir)).expanduser())
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise _invalid("worldDir", "is not a usable folder path") from exc
+    return _glossary_dir(data_dir) / "worlds" / f"{key}.json"
 
 
 def _keep_damaged_copy(path: Path) -> None:
     """Move an unreadable file aside, best effort, so it is neither lost nor re-read forever."""
     stamp = int(time.time())
-    for suffix in ("", "-1", "-2", "-3"):
+    for suffix in ("", *(f"-{number}" for number in range(1, 100))):
         target = path.with_name(f"{path.stem}.damaged-{stamp}{suffix}.json")
         if target.exists():
             continue
@@ -210,7 +285,9 @@ def read_document(path: Path) -> dict:
     """The stored document, or an empty one (revision 0) when there is none or it is unusable.
 
     A file that cannot be read as a document is kept aside as ``<name>.damaged-<ts>.json``; a translation
-    never fails because of it.
+    never fails because of it. The size limit covers everything ``_write_document`` can produce, so a
+    document that was saved is never treated as damaged. Duplicate sources are not re-checked here: only this
+    module writes the file, and a hand-edited duplicate must not hide the rest of the glossary.
     """
     try:
         if path.stat().st_size > MAX_DOCUMENT_BYTES:
@@ -229,22 +306,28 @@ def read_document(path: Path) -> dict:
         if not isinstance(raw, dict) or raw.get("version") != GLOSSARY_VERSION:
             raise ValueError("version")
         revision, updated = raw.get("revision"), raw.get("updatedAt")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        if isinstance(revision, bool) or not isinstance(revision, int) or not 0 <= revision <= MAX_REVISION:
             raise ValueError("revision")
         if isinstance(updated, bool) or not isinstance(updated, (int, float)):
             raise ValueError("updatedAt")
-        entries = normalize_entries(raw.get("entries"), require_id=True)
-    except (ValueError, GlossaryError):
+        updated = float(updated)  # a 350-digit integer overflows here, inside the recovery block
+        if not math.isfinite(updated):
+            raise ValueError("updatedAt")
+        entries = normalize_entries(raw.get("entries"), require_id=True, check_names=False)
+    except (ValueError, OverflowError, RecursionError, GlossaryError):
         _keep_damaged_copy(path)
         return _empty_document()
-    return {"version": GLOSSARY_VERSION, "revision": revision, "updatedAt": float(updated), "entries": entries}
+    return {"version": GLOSSARY_VERSION, "revision": revision, "updatedAt": updated, "entries": entries}
 
 
 def _write_document(path: Path, document: dict) -> None:
     try:
         text = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
-    except UnicodeEncodeError as exc:
+        size = len(text.encode("utf-8"))
+    except (UnicodeEncodeError, ValueError) as exc:
         raise _invalid("entries", "contain characters that cannot be saved") from exc
+    if size > MAX_DOCUMENT_BYTES:  # cannot happen for validated entries; never publish what the reader refuses
+        raise _invalid("entries", f"are too large to save ({size} bytes)")
     try:
         mkdir_durable(path.parent)
         atomic_write_text(path, text)
@@ -252,9 +335,62 @@ def _write_document(path: Path, document: dict) -> None:
         raise GlossaryError("GLOSSARY_WRITE_FAILED", f"The glossary could not be saved: {exc.strerror or exc}") from exc
 
 
+def _busy() -> GlossaryError:
+    return GlossaryError(
+        "GLOSSARY_BUSY",
+        "Another PomiTranslate window or process is saving this glossary right now. Try again in a moment.",
+    )
+
+
+@contextmanager
+def document_lock(path: Path) -> Iterator[None]:
+    """Exclusive access to one glossary document for read, compare and write, across processes.
+
+    The lock is an operating-system lock on ``<document>.lock`` beside it (never the document itself, which
+    is replaced on every save), so a crashed process leaves nothing behind. Waits up to ``LOCK_WAIT_SECONDS``,
+    then raises ``GLOSSARY_BUSY``. A filesystem without locking support falls back to the in-process lock.
+    """
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    if not _PROCESS_LOCK.acquire(timeout=LOCK_WAIT_SECONDS):
+        raise _busy()
+    try:
+        try:
+            mkdir_durable(path.parent)
+            descriptor = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+        except OSError as exc:
+            raise GlossaryError("GLOSSARY_WRITE_FAILED", f"The glossary could not be saved: {exc.strerror or exc}") from exc
+        try:
+            locked = True
+            while True:
+                try:
+                    _try_lock(descriptor)
+                    break
+                except OSError as exc:
+                    if exc.errno in _NO_LOCKING:
+                        locked = False
+                        break
+                    if exc.errno not in _CONTENDED:
+                        raise GlossaryError("GLOSSARY_WRITE_FAILED", f"The glossary could not be locked: {exc.strerror or exc}") from exc
+                    if time.monotonic() >= deadline:
+                        raise _busy() from exc
+                    time.sleep(_LOCK_POLL_SECONDS)
+            try:
+                yield
+            finally:
+                if locked:
+                    try:
+                        _unlock(descriptor)
+                    except OSError:
+                        pass
+        finally:
+            os.close(descriptor)
+    finally:
+        _PROCESS_LOCK.release()
+
+
 def _base_revision(payload: dict) -> int:
     value = payload.get("baseRevision")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_REVISION:
         raise _invalid("baseRevision", "must be the revision the entries were read at")
     return value
 
@@ -301,7 +437,7 @@ def set_glossary(payload: dict, data_dir: Path) -> dict:
     base = _base_revision(payload)
     entries = normalize_entries(payload.get("entries"))
     path = _document_path(data_dir, scope, world)
-    with _WRITE_LOCK:
+    with document_lock(path):
         document = _commit(path, read_document(path), base, entries)
     return _view(scope, document)
 
@@ -315,10 +451,26 @@ def _flag_cell(cell: str) -> bool | None:
     return None
 
 
+def _guard_cell(text: str) -> str:
+    """The cell as export writes it: a text a spreadsheet would run as a formula gets one apostrophe in front.
+
+    "Leads with a formula" is judged after any apostrophes the text already starts with, so a text that
+    already starts with an apostrophe and then a formula character is written with a second one.
+    ``_unguard_cell`` undoes exactly this, which makes export followed by import return every text unchanged.
+    """
+    body = text.lstrip("'")
+    return "'" + text if body and body[0] in _FORMULA_START else text
+
+
+def _unguard_cell(text: str) -> str:
+    body = text.lstrip("'")
+    return text[1:] if text.startswith("'") and body and body[0] in _FORMULA_START else text
+
+
 def _row_entry(cells: list[str]) -> tuple[dict | None, str]:
     """(entry without id, "") for a usable row, else (None, reason)."""
     def cell(index: int) -> str:
-        return cells[index].strip() if index < len(cells) else ""
+        return _unguard_cell(cells[index].strip()) if index < len(cells) else ""
 
     source, target, mode, note, flag = cell(0), cell(1), cell(2).casefold(), cell(3), cell(4)
     if not source:
@@ -381,16 +533,23 @@ def import_glossary(payload: dict, data_dir: Path) -> dict:
     text = payload.get("text")
     if not isinstance(text, str):
         raise _invalid("text", "must be text")
+    _check_encodable(text, "text")
     if len(text) > MAX_IMPORT_CHARS:
         raise _invalid("text", f"is longer than {MAX_IMPORT_CHARS} characters")
     rows = parse_table(text, fmt)
     path = _document_path(data_dir, scope, world)
-    with _WRITE_LOCK:
+    with document_lock(path):
         current = read_document(path)
         _check_revision(current, base)
-        existing = {dedupe_key(item["source"], item["caseSensitive"]): item for item in current["entries"]}
-        result: dict[str, dict] = {} if mode == "replace" else {key: dict(item) for key, item in existing.items()}
-        seen: set[str] = set()
+        before = {item["id"]: item for item in current["entries"]}
+        prior = _Names()  # the entries on disk: a replace still keeps the id of a row that matches one
+        for item in current["entries"]:
+            prior.add(item["source"], item["caseSensitive"], item["id"])
+        result: dict[str, dict] = {} if mode == "replace" else {key: dict(item) for key, item in before.items()}
+        names = _Names()  # the entries the result will have
+        for item in result.values():
+            names.add(item["source"], item["caseSensitive"], item["id"])
+        from_file: set[str] = set()
         added = updated = unchanged = 0
         skipped: list[dict] = []
         skipped_count = 0
@@ -406,27 +565,38 @@ def import_glossary(payload: dict, data_dir: Path) -> dict:
             if fields is None:
                 skip(number, reason, cells[0].strip() if cells else "")
                 continue
-            key = dedupe_key(fields["source"], fields["caseSensitive"])
-            if key in seen:
+            clash = names.clashes(fields["source"], fields["caseSensitive"])
+            if any(owner in from_file for owner in clash):
                 skip(number, "duplicate_in_file", fields["source"])
                 continue
-            previous = existing.get(key)
-            if previous is None and len(result) >= MAX_ENTRIES:
+            if mode == "merge":
+                matches = clash
+            else:
+                matches = [owner for owner in prior.clashes(fields["source"], fields["caseSensitive"]) if owner not in result]
+            if not matches and len(result) >= MAX_ENTRIES:
                 skip(number, "limit", fields["source"])
                 continue
-            seen.add(key)
-            if previous is None:
-                result[key] = {"id": secrets.token_hex(10), **fields}
+            for extra in clash[1:]:  # an entry that ignores case also stands for the other spellings: they merge into it
+                names.remove(result[extra]["source"], extra)
+                del result[extra]
+            if not matches:
+                identifier = secrets.token_hex(10)
                 added += 1
-            elif all(previous[name] == value for name, value in fields.items()):
-                result[key] = dict(previous)
-                unchanged += 1
             else:
-                result[key] = {"id": previous["id"], **fields}
-                updated += 1
+                identifier = matches[0]
+                previous = before[identifier]
+                if len(clash) <= 1 and all(previous[name] == value for name, value in fields.items()):
+                    unchanged += 1
+                else:
+                    updated += 1
+                if identifier in result:
+                    names.remove(result[identifier]["source"], identifier)
+            result[identifier] = {"id": identifier, **fields}
+            names.add(fields["source"], fields["caseSensitive"], identifier)
+            from_file.add(identifier)
         if mode == "replace" and not result:
             raise _invalid("text", "has no usable rows, so the glossary was not replaced")
-        removed = len(set(existing) - set(result)) if mode == "replace" else 0
+        removed = len(set(before) - set(result))
         document = _commit(path, current, base, list(result.values()))
     return _view(
         scope, document, added=added, updated=updated, unchanged=unchanged, removed=removed,
@@ -435,13 +605,18 @@ def import_glossary(payload: dict, data_dir: Path) -> dict:
 
 
 def export_text(entries: list[dict], fmt: str) -> str:
-    """The entries as a table with a header row, a UTF-8 BOM first so a spreadsheet reads Korean/Japanese right."""
+    """The entries as a table with a header row, a UTF-8 BOM first so a spreadsheet reads Korean/Japanese right.
+
+    A source, target or note a spreadsheet would run as a formula (it starts with ``=``, ``+``, ``-`` or ``@``,
+    or with a tab or carriage return) is written with one apostrophe in front, so opening the file never
+    executes imported text. Import removes that apostrophe again.
+    """
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, delimiter="\t" if fmt == "tsv" else ",", lineterminator="\n")
     writer.writerow(_HEADER)
     for entry in entries:
         writer.writerow([
-            entry["source"], entry["target"], entry["mode"], entry["note"],
+            _guard_cell(entry["source"]), _guard_cell(entry["target"]), entry["mode"], _guard_cell(entry["note"]),
             "true" if entry["caseSensitive"] else "false",
         ])
     return "﻿" + buffer.getvalue()
@@ -460,10 +635,17 @@ def export_glossary(payload: dict, data_dir: Path) -> dict:
 # ---------------------------------------------------------------- use in a translation
 
 def merge_entries(global_entries: list[dict], world_entries: list[dict]) -> list[dict]:
-    """World entries first-class: a world entry replaces a global one with the same source."""
-    taken = {dedupe_key(item["source"], item["caseSensitive"]) for item in world_entries}
-    kept = [item for item in global_entries if dedupe_key(item["source"], item["caseSensitive"]) not in taken]
-    return [*kept, *world_entries]
+    """The rules of one world: a world entry replaces every global entry with the same folded source.
+
+    Entry ids are only unique within their own file, so the merged ids carry their scope
+    (``global:<id>`` / ``world:<id>``); the warnings a translation records name entries by these ids.
+    """
+    taken = {fold_key(item["source"]) for item in world_entries}
+    kept = [item for item in global_entries if fold_key(item["source"]) not in taken]
+    return [
+        *({**item, "id": f"global:{item['id']}"} for item in kept),
+        *({**item, "id": f"world:{item['id']}"} for item in world_entries),
+    ]
 
 
 def load_merged(data_dir: Path, world_dir: str | Path | None) -> list[dict]:
@@ -482,28 +664,95 @@ def load_merged(data_dir: Path, world_dir: str | Path | None) -> list[dict]:
     return merge_entries(entries, world_entries)
 
 
-def _latin_edge(char: str) -> bool:
-    """A letter or digit that has word boundaries in Latin-script text (so not Hangul, kana or Han)."""
+@lru_cache(maxsize=4096)
+def _spaced_word_char(char: str) -> bool:
+    """A letter or digit of a script whose words are separated by spaces: Latin, Greek and Cyrillic letters and
+    the ASCII digits. Hangul, kana and Han (which have no such boundaries) are not."""
     if char.isascii():
         return char.isalnum()
-    return "À" <= char <= "ɏ" and char not in "×÷"
+    if not char.isalpha():
+        return False
+    return unicodedata.name(char, "").startswith(("LATIN", "GREEK", "CYRILLIC"))
 
 
-_WORD_CHARS = "0-9A-Za-z_À-ÖØ-öø-ɏ"
+def _mask_codes(text: str) -> str:
+    """``text`` with every Minecraft format code (``§x``, the project tokenizer's own pattern) overwritten by NUL
+    characters of the same length, so a term next to a code is next to a boundary, and offsets stay put."""
+    if "§" not in text:
+        return text
+    return _OTHER.sub(lambda match: "\0" * len(match.group(0)) if match.group(0).startswith("§") else match.group(0), text)
+
+
+def _fold_with_map(text: str) -> tuple[str, list[int] | None]:
+    """``fold_key(text)`` and, where folding changes the length (``ß`` -> ``ss``), the raw index of each folded
+    character. None means one folded character per raw character."""
+    folded = fold_key(text)
+    if len(folded) == len(text):  # folding never drops a character, so equal length means one-to-one
+        return folded, None
+    mapping: list[int] = []
+    for index, char in enumerate(text):
+        mapping.extend([index] * len(fold_key(char)))
+    return folded, mapping
+
+
+class _Text:
+    """One text being matched: as written, with its format codes masked, and the folded form of each."""
+
+    __slots__ = ("raw", "masked", "_folded")
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+        self.masked = _mask_codes(raw)
+        self._folded: dict[bool, tuple[str, list[int] | None]] = {}
+
+    def folded(self, in_raw: bool) -> tuple[str, list[int] | None]:
+        if in_raw not in self._folded:
+            self._folded[in_raw] = _fold_with_map(self.raw if in_raw else self.masked)
+        return self._folded[in_raw]
 
 
 class _Term:
-    __slots__ = ("entry", "needle", "pattern", "length")
+    """One entry, ready to be searched for.
+
+    A source is searched in the text with its format codes masked, unless the source itself contains a ``§``.
+    Whole-word boundaries apply only at a source edge that is a letter or digit of a space-separated script;
+    the neighbouring character must then not be one either. Other edges match as substrings.
+    """
+
+    __slots__ = ("entry", "needle", "case_sensitive", "in_raw", "left", "right")
 
     def __init__(self, entry: dict) -> None:
         source = entry["source"]
         self.entry = entry
-        self.length = len(source)
-        self.needle = source if entry["caseSensitive"] else source.casefold()
-        left = f"(?<![{_WORD_CHARS}])" if _latin_edge(source[0]) else ""
-        right = f"(?![{_WORD_CHARS}])" if _latin_edge(source[-1]) else ""
-        flags = 0 if entry["caseSensitive"] else re.IGNORECASE
-        self.pattern = re.compile(f"{left}{re.escape(source)}{right}", flags)
+        self.case_sensitive = entry["caseSensitive"]
+        self.needle = source if self.case_sensitive else fold_key(source)
+        self.in_raw = "§" in source
+        self.left = _spaced_word_char(source[0])
+        self.right = _spaced_word_char(source[-1])
+
+    def spans(self, text: _Text) -> list[tuple[int, int]]:
+        """(start, end) of each occurrence, as offsets into the text as written."""
+        base = text.raw if self.in_raw else text.masked
+        if self.case_sensitive:
+            haystack, mapping = base, None
+        else:
+            haystack, mapping = text.folded(self.in_raw)
+        found: list[tuple[int, int]] = []
+        size = len(self.needle)
+        position = haystack.find(self.needle)
+        while position != -1:
+            start, end = position, position + size
+            if mapping is not None:
+                # A match must begin and end between two raw characters, not inside an expanded one.
+                inside = (start > 0 and mapping[start - 1] == mapping[start]) or (end < len(mapping) and mapping[end] == mapping[end - 1])
+                start, end = mapping[start], mapping[end - 1] + 1
+            else:
+                inside = False
+            if not inside and not (self.left and start > 0 and _spaced_word_char(base[start - 1])) \
+                    and not (self.right and end < len(base) and _spaced_word_char(base[end])):
+                found.append((start, end))
+            position = haystack.find(self.needle, position + 1)
+        return found
 
 
 class Glossary:
@@ -515,10 +764,13 @@ class Glossary:
             if isinstance(item, dict) and isinstance(item.get("source"), str) and item["source"]
             and item.get("mode") in MODES and isinstance(item.get("target", ""), str)
         ]
-        prepared = [{"id": str(item.get("id") or hashlib.sha1(item["source"].encode("utf-8")).hexdigest()[:20]), "source": item["source"], "target": item.get("target", ""),
+        prepared = [{"id": str(item.get("id") or hashlib.sha1(item["source"].encode("utf-8", "replace")).hexdigest()[:20]), "source": item["source"], "target": item.get("target", ""),
                      "mode": item["mode"], "caseSensitive": item.get("caseSensitive") is True} for item in valid]
         self.entries = prepared
-        self._terms = [_Term(item) for item in sorted(prepared, key=lambda item: -len(item["source"]))]
+        ordered = sorted(prepared, key=lambda item: (-len(item["source"]), fold_key(item["source"]), item["source"]))
+        self._terms = [_Term(item) for item in ordered]
+        self._by_entry = {id(term.entry): term for term in self._terms}
+        self._by_name = {(term.entry["id"], term.entry["source"]): term for term in self._terms}
 
     def __bool__(self) -> bool:
         return bool(self._terms)
@@ -532,27 +784,35 @@ class Glossary:
         if not self.entries:
             return ""
         canonical = sorted(
-            [dedupe_key(item["source"], item["caseSensitive"]), item["source"],
+            [fold_key(item["source"]), item["source"],
              item["target"] if item["mode"] == "translate" else "", item["mode"], item["caseSensitive"]]
             for item in self.entries
         )
-        encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "replace")
         return hashlib.sha256(encoded).hexdigest()[:16]
 
-    def select(self, texts: list[str], limit: int = MAX_TERMS_PER_BATCH) -> list[dict]:
-        """Entries whose source occurs in at least one of ``texts``: longest source first, at most ``limit``."""
+    def matching(self, texts: list[str]) -> list[dict]:
+        """Every entry whose source occurs in at least one of ``texts``, longest source first."""
         if not self._terms or not texts:
             return []
-        blob = "\0".join(texts)  # NUL never occurs in a source, so a term cannot straddle two texts
-        folded = blob.casefold()
+        views = [_Text(text) for text in texts if isinstance(text, str)]
+        # NUL never occurs in a source, so a term cannot straddle two texts; the blobs are a cheap first filter
+        # (folded the same way the real match folds), the per-text search below decides.
+        blobs = {
+            (in_raw, sensitive): ("\0".join(view.raw if in_raw else view.masked for view in views))
+            for in_raw in (False, True) for sensitive in (False, True)
+        }
+        for key in [key for key in blobs if not key[1]]:
+            blobs[key] = fold_key(blobs[key])
         chosen: list[dict] = []
         for term in self._terms:
-            haystack = blob if term.entry["caseSensitive"] else folded
-            if term.needle in haystack and term.pattern.search(blob):
+            if term.needle in blobs[(term.in_raw, term.case_sensitive)] and any(term.spans(view) for view in views):
                 chosen.append(term.entry)
-                if len(chosen) >= limit:
-                    break
         return chosen
+
+    def select(self, texts: list[str], limit: int = MAX_TERMS_PER_BATCH) -> list[dict]:
+        """The entries one batch needs: ``matching(texts)``, longest source first, at most ``limit``."""
+        return self.matching(texts)[:limit]
 
     @staticmethod
     def prompt_block(selected: list[dict]) -> str:
@@ -573,27 +833,30 @@ class Glossary:
         lines.append("응답 형식(JSON 키는 그대로, 값만 번역)은 용어집과 관계없이 그대로 지키세요.")
         return "\n".join(lines)
 
+    def _term_for(self, item: dict) -> _Term | None:
+        return self._by_entry.get(id(item)) or self._by_name.get((item.get("id"), item.get("source")))
+
     def misses(self, source_text: str, translated: str, selected: list[dict]) -> list[dict]:
         """The entries of ``selected`` that apply to ``source_text`` but are not honoured in ``translated``.
 
         An occurrence inside a longer entry's occurrence ("Mira" in "Elder Mira") is that entry's business.
         """
-        by_id = {term.entry["id"]: term for term in self._terms}
+        view = _Text(source_text)
         spans: list[tuple[int, int, dict, str]] = []
         for item in selected:
-            term = by_id.get(item["id"])
+            term = self._term_for(item)
             if term is None:
                 continue
-            for match in term.pattern.finditer(source_text):
-                spans.append((match.start(), match.end(), item, match.group(0)))
-        folded_translation = translated.casefold()
+            for start, end in term.spans(view):
+                spans.append((start, end, term.entry, source_text[start:end]))
+        folded_translation = fold_key(translated)
         missed: list[dict] = []
         for start, end, item, surface in spans:
-            if item in missed:
+            if any(item is other for other in missed):
                 continue
             if any(
-                len(other["source"]) > len(item["source"]) and other_start <= start and end <= other_end
-                for other_start, other_end, other, _ in spans
+                other_end - other_start > end - start and other_start <= start and end <= other_end
+                for other_start, other_end, _other, _surface in spans
             ):
                 continue
             if item["mode"] == "keep":
@@ -601,7 +864,7 @@ class Glossary:
             elif item["caseSensitive"]:
                 honoured = item["target"] in translated
             else:
-                honoured = item["target"].casefold() in folded_translation
+                honoured = fold_key(item["target"]) in folded_translation
             if not honoured:
                 missed.append(item)
         return missed
