@@ -1368,26 +1368,32 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
         if body.get("credentialOwner") == "rust":
             from mwt.desktop_provider import resolve_desktop_provider
             config["api"].update(resolve_desktop_provider(body, saved))
+        # The model a person already chose stays in every list, marked when it cannot translate text. It is
+        # passed apart from the request's model, which stays blank so that the list does not validate it.
+        keep = str(body.get("model") or (saved.get("model") if saved.get("provider") == provider else "") or "")
         if body.get("model") == "":
             config["api"]["model"] = ""  # Catalog lookup must not validate the saved model.
         try:
             cached = False
             if public_catalog:
                 from mwt.userdata import load_model_catalog, remember_model_catalog
-                # The public catalog sends no key and checks no model; the saved model is passed only so the
-                # list filter keeps it (marked) even when it is not a text model.
-                kept = str(body.get("model") or (saved.get("model") if saved.get("provider") == "openrouter" else "") or "")
-                config["api"].update({"api_key": "", "base_url": "https://openrouter.ai/api/v1", "wire_format": "openai", "model": kept})
+                # The public catalog sends no key and checks no model.
+                config["api"].update({"api_key": "", "base_url": "https://openrouter.ai/api/v1", "wire_format": "openai"})
+                client = LLMProviderClient(config)
+                client.keep_model = keep
                 try:
-                    models = LLMProviderClient(config).list_public_models()
-                    remember_model_catalog(provider, models, root=data_dir)
+                    published = client.fetch_public_models()
+                    remember_model_catalog(provider, published, root=data_dir)
                 except Exception:
-                    models = load_model_catalog(provider, root=data_dir)
-                    if not models:
+                    published = load_model_catalog(provider, root=data_dir)
+                    if not published:
                         raise
                     cached = True
+                models = client.filter_models(published)
             else:
-                models = LLMProviderClient(config).try_refresh_text_models()
+                client = LLMProviderClient(config)
+                client.keep_model = keep
+                models = client.try_refresh_text_models()
         except Exception as exc:
             emit(
                 {

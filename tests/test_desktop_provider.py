@@ -105,6 +105,98 @@ def test_public_catalog() -> None:
         assert next(item for item in models if item["id"] == "google/gemini-robotics-fixture").get("unsuitable_reason")
     print("PASS desktop_provider.public_catalog_no_credentials_no_settings_write_cache_and_retry")
 
+def _models_list(data: Path, body: dict, *, network, saved: dict | None = None) -> dict:
+    """The reply of a models.list request whose provider answers ``network`` (a value, or an exception)."""
+    from llm_backends import LLMProviderClient
+    from mwt.userdata import remember_user_settings
+
+    if saved is not None:
+        remember_user_settings(saved, data)
+    patched = {"side_effect": network} if isinstance(network, BaseException) else {"return_value": network}
+    with patch.object(LLMProviderClient, "_request_json", **patched), patch.object(entry, "emit") as emit:
+        entry.handle({"v": 1, "id": "list", "type": "models.list", "payload": body}, data / "reports", data)
+    return emit.call_args.args[0]
+
+
+def _marks(reply: dict) -> dict:
+    assert reply["type"] == "response.ok", reply
+    return {item["id"]: item.get("unsuitable_reason") for item in reply["payload"]["models"]}
+
+
+def test_saved_model_on_every_list_path() -> None:
+    """The saved model comes back marked on authenticated lists too, though the request's model is blank (P-3, UX F3)."""
+    with tempfile.TemporaryDirectory() as directory:
+        data = Path(directory) / "data"
+        openai = {"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o-mini-tts"}, {"id": "gpt-image-1"}]}
+        body = {"provider": "openai", "model": "", "wireFormat": "openai", "apiKey": "synthetic"}
+        reply = _models_list(data, body, network=openai, saved={"provider": "openai", "model": "gpt-4o-mini-tts"})
+        assert _marks(reply) == {"gpt-4o-mini": None, "gpt-4o-mini-tts": "id:tts"}, reply
+        # Another provider's saved model is not carried over.
+        reply = _models_list(data, {**body, "provider": "anthropic", "model": ""}, network={"data": [{"id": "claude-sonnet-4-5"}]})
+        assert _marks(reply) == {"claude-sonnet-4-5": None}
+        # Gemini: unsuitable by name, and one without generateContent.
+        gemini = {"models": [
+            {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-robotics-er-1.5-preview", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-no-generate", "supportedGenerationMethods": ["countTokens"]},
+        ]}
+        gbody = {"provider": "gemini", "model": "", "credentialOwner": "rust", "apiKey": "synthetic"}
+        reply = _models_list(data, gbody, network=gemini, saved={"provider": "gemini", "model": "gemini-robotics-er-1.5-preview"})
+        assert _marks(reply) == {"gemini-2.5-flash": None, "gemini-robotics-er-1.5-preview": "id:robotics"}, reply
+        reply = _models_list(data, gbody, network=gemini, saved={"provider": "gemini", "model": "gemini-no-generate"})
+        assert _marks(reply) == {"gemini-2.5-flash": None, "gemini-no-generate": "method:generateContent"}, reply
+        # A model the provider does not list at all is not invented.
+        reply = _models_list(data, gbody, network=gemini, saved={"provider": "gemini", "model": "gone"})
+        assert _marks(reply) == {"gemini-2.5-flash": None}, reply
+        # The authenticated cache answers a failed request, filtered for the saved model of that moment.
+        reply = _models_list(data, gbody, network=RuntimeError("offline"), saved={"provider": "gemini", "model": "gemini-no-generate"})
+        assert _marks(reply) == {"gemini-2.5-flash": None, "gemini-no-generate": "method:generateContent"}, reply
+    print("PASS desktop_provider.saved_model_on_authenticated_lists")
+
+
+def test_public_catalog_keeps_and_refilters() -> None:
+    """A model the text-only public query cannot return is retained when it is, and cached lists are filtered when read (P-3, P-4)."""
+    with tempfile.TemporaryDirectory() as directory:
+        data = Path(directory) / "data"
+        body = {"provider": "openrouter", "publicCatalog": True, "credentialOwner": "rust", "model": ""}
+        image = {"data": [
+            {"id": "text-model", "architecture": {"output_modalities": ["text"]}},
+            {"id": "openai/gpt-image-1", "architecture": {"output_modalities": ["image"]}},
+            {"id": "openai/gpt-audio", "architecture": {"output_modalities": ["text", "audio"]}},
+        ]}
+        reply = _models_list(data, body, network=image, saved={"provider": "openrouter", "model": "openai/gpt-image-1"})
+        assert _marks(reply) == {"text-model": None, "openai/gpt-image-1": "output:image", "openai/gpt-audio": None}, reply
+        # Offline, the selection changed to a model the first answer dropped (it was only dropped from the view).
+        reply = _models_list(data, body, network=RuntimeError("offline"), saved={"provider": "openrouter", "model": "text-model"})
+        assert reply["payload"]["cached"] is True
+        assert _marks(reply) == {"text-model": None, "openai/gpt-audio": None}, "the mark of the earlier selection is gone"
+        reply = _models_list(data, body, network=RuntimeError("offline"), saved={"provider": "openrouter", "model": "openai/gpt-image-1"})
+        assert _marks(reply)["openai/gpt-image-1"] == "output:image"
+    with tempfile.TemporaryDirectory() as directory:
+        # A cache written before the filter existed offers embeddings and unsuitable models; reading filters it.
+        from mwt.userdata import remember_model_catalog
+
+        data = Path(directory) / "data"
+        remember_model_catalog("openrouter", [
+            {"id": "text-model", "text": True},
+            {"id": "google/gemini-robotics-er-1.5-preview", "text": True},
+            {"id": "openai/text-embedding-3-small", "text": False},
+        ], data)
+        body = {"provider": "openrouter", "publicCatalog": True, "credentialOwner": "rust", "model": ""}
+        reply = _models_list(data, body, network=RuntimeError("offline"), saved={"provider": "openrouter", "model": "x"})
+        assert _marks(reply) == {"text-model": None}, reply
+        reply = _models_list(data, body, network=RuntimeError("offline"), saved={"provider": "openrouter", "model": "google/gemini-robotics-er-1.5-preview"})
+        assert _marks(reply) == {"text-model": None, "google/gemini-robotics-er-1.5-preview": "id:robotics"}, reply
+        # A fresh list saved while A was selected does not decide what B's offline list shows.
+        raw = {"data": [{"id": "text-model"}, {"id": "google/gemini-robotics-A"}, {"id": "google/gemini-robotics-B"}]}
+        _models_list(data, body, network=raw, saved={"provider": "openrouter", "model": "google/gemini-robotics-A"})
+        reply = _models_list(data, body, network=RuntimeError("offline"), saved={"provider": "openrouter", "model": "google/gemini-robotics-B"})
+        assert _marks(reply) == {"text-model": None, "google/gemini-robotics-B": "id:robotics"}, reply
+    print("PASS desktop_provider.public_catalog_keep_and_refilter")
+
+
 if __name__ == "__main__":
     main_test()
     test_public_catalog()
+    test_saved_model_on_every_list_path()
+    test_public_catalog_keeps_and_refilters()

@@ -27,6 +27,7 @@ from llm_backends import (
     ModelCatalogError,
     PROVIDER_SPECS,
     ProviderError,
+    RequestStopped,
     default_base_url,
     enhance_style_prompt,
     infer_provider,
@@ -750,7 +751,10 @@ class BatchTranslator:
         self.quality_warnings: dict[str, list[dict[str, Any]]] = {
             text: list(items) for text, items in (initial_warnings or {}).items()
         }
+        # The client looks at this before every request and while it waits for another batch, so a cancelled
+        # or given-up job sends nothing more.
         self.client = LLMProviderClient(config)
+        self.client.stop_guard = self._should_stop
         self.rpm_limit = int(config["api"].get("rpm_limit", 0))
         self.tpm_limit = int(config["api"].get("tpm_limit", 0))
         self.last_request_time = 0.0
@@ -812,6 +816,17 @@ class BatchTranslator:
             raise self._abort  # another worker already gave up: stop this one too
         if self.cancel_check is not None and self.cancel_check():
             raise TranslationCancelled("Translation was cancelled by the user.")
+
+    def _should_stop(self) -> bool:
+        return self._abort is not None or bool(self.cancel_check is not None and self.cancel_check())
+
+    def _stopped(self) -> BaseException:
+        """What the client's refusal to send means here: the abort another worker published, else a cancellation."""
+        try:
+            self.ensure_not_cancelled()
+        except BaseException as exc:  # noqa: BLE001 - the same exception the "not started" checks raise
+            return exc
+        return TranslationCancelled("Translation was cancelled by the user.")
 
     def system_prompt(self, texts: list[str] | None = None, hints: tuple[str, ...] = ()) -> str:
         """The instructions for a batch. ``texts`` adds the glossary terms they contain; ``hints`` are extra
@@ -1055,6 +1070,8 @@ class BatchTranslator:
             self._charge_extra_requests(budget, requests_before)
         except (TranslationCancelled, ProviderUnavailable):
             raise
+        except RequestStopped:
+            raise self._stopped() from None
         except Exception as exc:
             self._charge_extra_requests(budget, requests_before)
             if failure_kind(exc) is not None:
@@ -1206,6 +1223,8 @@ class BatchTranslator:
                 return self._review_answers(texts, answered, budget)
             except (TranslationCancelled, ProviderUnavailable):
                 raise
+            except RequestStopped:
+                raise self._stopped() from None
             except Exception as exc:
                 self._charge_extra_requests(budget, requests_before)
                 # Raw provider text goes to the report file (through the failed-strings table), never to progress events.

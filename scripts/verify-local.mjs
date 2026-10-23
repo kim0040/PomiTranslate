@@ -51,6 +51,7 @@ const PYTHON_TESTS = [
   ['JSONL channel is UTF-8, protocol-only and crash-proof', 'tests/test_jsonl_channel.py'],
   ['Provider redirects, own-key routing, redaction, request budgets', 'tests/test_provider_hardening.py'],
   ['Gemini thinking floor is kept across jobs and concurrent batches', 'tests/test_gemini_floor.py'],
+  ['Batches waiting for the thinking-level learner follow cancellation and its outcome', 'tests/test_provider_coordination.py'],
   ['Model lists offer only models that can translate text', 'tests/test_model_filter.py'],
   ['Formatter and Minecraft placeholder preservation', 'tests/test_text_tokens.py'],
   ['Legacy web UI token, Host, Origin and JSON checks', 'tests/test_webui_security.py'],

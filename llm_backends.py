@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mwt import gemini_floor
 from mwt.model_filter import filter_translation_models
@@ -336,6 +336,13 @@ def _named_parameter(body: str) -> str | None:
         if re.search(rf"(?<![a-z_]){name}(?![a-z_])", lowered):
             return name
     return None
+
+
+class RequestStopped(RuntimeError):
+    """The job that owns this client was cancelled or gave up, so no further request is sent.
+
+    The caller that passed the stop guard turns this into its own cancellation (see ``stop_guard``).
+    """
 
 
 class ProviderError(RuntimeError):
@@ -813,7 +820,9 @@ GEMINI_MIN_OUTPUT_TOKENS = 32768
 class LLMProviderClient(metaclass=_ClientMeta):
     _counter_lock = threading.Lock()
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], stop_guard: Callable[[], bool] | None = None) -> None:
+        """``stop_guard`` returns true once the job is cancelled or has given up; it is looked at before every
+        POST and while a batch waits for another to find the Gemini thinking level. Without one nothing stops."""
         api_config = config["api"]
         self.provider = api_config["provider"]
         self.openrouter_reasoning = normalize_reasoning(api_config.get("openrouter_reasoning", "default"))
@@ -836,6 +845,14 @@ class LLMProviderClient(metaclass=_ClientMeta):
         # Request fields this model refused; they stay out of every later request of this client.
         self._dropped: set[str] = set()
         self._cap_field_override: str | None = None
+        self.stop_guard = stop_guard
+        # The model a person already chose. Lists keep it (marked when unsuitable) whatever ``model`` is:
+        # a list request leaves ``model`` blank so that the saved one is not validated against the list.
+        self.keep_model = ""
+
+    def _check_stop(self) -> None:
+        if self.stop_guard is not None and self.stop_guard():
+            raise RequestStopped("The job was stopped before this request was sent.")
 
     def _family_for(self) -> str:
         if self.provider in {"custom", "custom_openai", "custom_anthropic"}:
@@ -849,23 +866,32 @@ class LLMProviderClient(metaclass=_ClientMeta):
         if require_model and not self.model:
             raise RuntimeError(f"{provider_spec(self.provider)['label']} model is missing.")
 
-    def list_models(self) -> list[dict[str, Any]]:
+    def fetch_models(self) -> list[dict[str, Any]]:
+        """The provider's whole list, normalized and not filtered: what a catalog cache stores."""
         self.ensure_ready(require_model=False)
         if self.family == "openai_compatible":
-            models = self._list_models_openai_compatible()
-        elif self.family == "gemini":
-            models = self._list_models_gemini()
-        elif self.family == "anthropic":
-            models = self._list_models_anthropic()
-        else:
-            raise RuntimeError(f"Unsupported provider family: {self.family}")
-        return filter_translation_models(self.provider, models, self.model)
+            return self._list_models_openai_compatible()
+        if self.family == "gemini":
+            return self._list_models_gemini()
+        if self.family == "anthropic":
+            return self._list_models_anthropic()
+        raise RuntimeError(f"Unsupported provider family: {self.family}")
 
-    def list_public_models(self) -> list[dict[str, Any]]:
-        """Read OpenRouter's pinned catalog without authenticating or generating text."""
+    def fetch_public_models(self) -> list[dict[str, Any]]:
+        """OpenRouter's pinned catalog, read without authenticating or generating text; not filtered."""
         if self.provider != "openrouter" or self.base_url != default_base_url("openrouter"):
             raise ValueError("Public catalog is only available at the OpenRouter endpoint")
-        return filter_translation_models(self.provider, self._list_models_openai_compatible(public=True), self.model)
+        return self._list_models_openai_compatible(public=True)
+
+    def filter_models(self, models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The models offered for translating. The chosen one stays, marked when it cannot translate text."""
+        return filter_translation_models(self.provider, models, self.keep_model or self.model)
+
+    def list_models(self) -> list[dict[str, Any]]:
+        return self.filter_models(self.fetch_models())
+
+    def list_public_models(self) -> list[dict[str, Any]]:
+        return self.filter_models(self.fetch_public_models())
 
     def try_refresh_text_models(self) -> list[dict[str, Any]]:
         """Fetch text models once and pin the configured id to a published model."""
@@ -873,32 +899,30 @@ class LLMProviderClient(metaclass=_ClientMeta):
             raise self._catalog_error
         if self._catalog_checked:
             return self._catalog
-        fetched: list[dict[str, Any]] | None = None
+        raw: list[dict[str, Any]] | None
         try:
-            fetched = [item for item in self.list_models() if item.get("text")]
+            raw = self.fetch_models()
         except Exception:
-            fetched = None
-        if fetched:
-            self._catalog = fetched
+            raw = None
+        if raw:
+            self._catalog = self.filter_models(raw)
             if self.data_dir:
                 from pathlib import Path
 
                 from mwt.userdata import remember_model_catalog
 
-                remember_model_catalog(self.provider, fetched, root=Path(self.data_dir))
+                remember_model_catalog(self.provider, raw, root=Path(self.data_dir))
         elif self.data_dir:
             from pathlib import Path
 
             from mwt.userdata import load_model_catalog
 
-            self._catalog = filter_translation_models(
-                self.provider,
-                [item for item in load_model_catalog(self.provider, root=Path(self.data_dir)) if item.get("text", True)],
-                self.model,
-            )
+            self._catalog = self.filter_models(load_model_catalog(self.provider, root=Path(self.data_dir)))
         self._catalog_checked = True
         if self.model and self._catalog:
             match = next((item for item in self._catalog if item.get("id") == self.model), None)
+            if match is not None and match.get("text") is False:
+                match = None  # the provider says it writes no text; it is listed only so the screen can mark it
             if match is None:
                 self._catalog_error = ModelCatalogError(
                     f"{self.model} is not in the text models published by {self.provider}"
@@ -1074,6 +1098,8 @@ class LLMProviderClient(metaclass=_ClientMeta):
         headers: dict[str, str],
         payload: dict[str, Any] | None = None,
     ) -> Any:
+        if method == "POST":
+            self._check_stop()  # the last look before a paid request, whichever step of a retry or adaptation it is
         body = None
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1295,8 +1321,7 @@ class LLMProviderClient(metaclass=_ClientMeta):
                 display_name=str(item.get("name") or model_id),
                 description=description,
             )
-            if record["text"]:
-                models.append(record)
+            models.append(record)
         return models
 
     def _complete_gemini(
@@ -1328,25 +1353,26 @@ class LLMProviderClient(metaclass=_ClientMeta):
 
         def raise_to_floor(config: dict[str, Any] | None) -> dict[str, Any] | None:
             current = (config or {}).get("thinkingLevel")
-            known = gemini_floor.floor(floor_key, root) if current else None
+            known = gemini_floor.floor(floor_key, root, self._check_stop) if current else None
             if current and known and GEMINI_LEVELS.index(known) > GEMINI_LEVELS.index(current):
                 return {"thinkingLevel": known}
             return config
 
         thinking = raise_to_floor(thinking)
         level = (thinking or {}).get("thinkingLevel")
-        # One batch finds the lowest level the model takes while the others wait for it, so a job
-        # sends at most one refused request per model however many batches run at once.
-        lock = gemini_floor.probe_lock(floor_key) if level and gemini_floor.needs_probe(floor_key, level) else None
-        held = lock is not None and lock.acquire(timeout=self.timeout + 5)
-        stepped = False
+        # One batch (the learner) finds the lowest level the model takes while the others wait for it, so a
+        # job sends at most one refused request per model however many batches run at once.
+        slot = None
+        failure: BaseException | None = None
         try:
-            if held:
-                thinking = raise_to_floor(thinking)
+            if level and gemini_floor.needs_probe(floor_key, level):
+                slot = self._wait_for_learner(floor_key)
+                thinking = raise_to_floor(thinking)  # what the learner found may have raised the floor
                 level = (thinking or {}).get("thinkingLevel")
                 if not gemini_floor.needs_probe(floor_key, level):
-                    lock.release()
-                    held = False
+                    gemini_floor.release(slot)
+                    slot = None
+            stepped = False
             while True:
                 if thinking is not None:
                     payload["generationConfig"]["thinkingConfig"] = thinking
@@ -1380,9 +1406,13 @@ class LLMProviderClient(metaclass=_ClientMeta):
                 if stepped:
                     # Only a level the model took is remembered, never one it was merely asked to try.
                     gemini_floor.learned(floor_key, self.base_url, level, root)
+        except ProviderError as exc:
+            if slot is not None and exc.fatal:
+                failure = exc  # the waiters would only meet the same refusal; they raise it without sending
+            raise
         finally:
-            if held:
-                lock.release()
+            if slot is not None:
+                gemini_floor.release(slot, failure)  # also for BaseException: a waiter is never stranded
         candidates = response.get("candidates") or []
         if not candidates:
             reason = (response.get("promptFeedback") or {}).get("blockReason")
@@ -1401,6 +1431,33 @@ class LLMProviderClient(metaclass=_ClientMeta):
             raise RuntimeError(f"Gemini returned no text (finish reason {finish}).")
         return text
 
+    def _wait_for_learner(self, floor_key: gemini_floor.Key) -> gemini_floor.Slot:
+        """Wait until this batch may find the thinking level, watching the job meanwhile.
+
+        The whole learning sequence (one request per level) has one deadline. When it runs out the batch
+        fails with a retryable timeout; it does not send a probe of its own beside the learner's.
+        """
+        deadline = len(GEMINI_LEVELS) * max(1, self.timeout) + gemini_floor.LEARNING_MARGIN_SECONDS
+        try:
+            return gemini_floor.acquire(floor_key, deadline, self._check_stop)
+        except gemini_floor.LearnerFailed as exc:
+            origin = exc.error
+            if isinstance(origin, ProviderError):
+                raise ProviderError(
+                    str(origin),
+                    status=origin.status,
+                    error_code=origin.error_code,
+                    kind=origin.kind,
+                    detail=origin.detail,
+                ) from None
+            raise RuntimeError(str(origin)) from None
+        except gemini_floor.LearningTimeout:
+            raise ProviderError(
+                f"{self._label()} did not finish finding the lowest thinking level this model takes in time.",
+                error_code="PROVIDER_TIMEOUT",
+                kind="timeout",
+            ) from None
+
     def _gemini_headers(self) -> dict[str, str]:
         # A header keeps the key out of URLs, which proxies and request logs record.
         return {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
@@ -1415,8 +1472,6 @@ class LLMProviderClient(metaclass=_ClientMeta):
         models: list[dict[str, Any]] = []
         for item in data:
             methods = item.get("supportedGenerationMethods") or []
-            if "generateContent" not in methods:
-                continue
             model_id = str(item.get("baseModelId") or item.get("name", "")).strip()
             if model_id.startswith("models/"):
                 model_id = model_id.split("/", 1)[1]
@@ -1431,12 +1486,13 @@ class LLMProviderClient(metaclass=_ClientMeta):
                 display_name=str(item.get("displayName") or model_id),
                 description=" | ".join(part for part in description_parts if part),
             )
+            # The filter leaves out what cannot be called with generateContent (embedding, Live API, ...).
+            record["generation_methods"] = [str(method) for method in methods] if isinstance(methods, list) else []
             thinking = gemini_reasoning(model_id, item.get("thinking"))
             if thinking is not None:
                 record["reasoning"] = thinking
                 record["supported_parameters"] = [*record["supported_parameters"], "reasoning"]
-            if record["text"]:
-                models.append(record)
+            models.append(record)
         return models
 
     def _anthropic_headers(self) -> dict[str, str]:
@@ -1494,8 +1550,7 @@ class LLMProviderClient(metaclass=_ClientMeta):
                 display_name=str(item.get("display_name") or model_id),
                 description=str(item.get("description") or item.get("created_at") or ""),
             )
-            if record["text"]:
-                models.append(record)
+            models.append(record)
         return models
 
 

@@ -35,6 +35,11 @@ class FakeGemini:
     def __init__(self, required: dict[str, str], delay: float = 0.0) -> None:
         self.required = required
         self.delay = delay
+        self.hold: threading.Event | None = None  # the first request waits until this is set
+        self.first_status: int | None = None  # the first request is answered with this error status
+        self.on_first: object = None  # called with no arguments when the first request has arrived
+        self.arrived = threading.Event()
+        self.requests: list[tuple[str, str]] = []  # (model, level) of every POST, in arrival order
         self.lock = threading.Lock()
         self.refused: list[tuple[str, str]] = []  # (model, level)
         self.accepted: list[tuple[str, str]] = []
@@ -65,6 +70,18 @@ class FakeGemini:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
                 model = self.path.split("/models/", 1)[1].split(":", 1)[0]
                 level = body.get("generationConfig", {}).get("thinkingConfig", {}).get("thinkingLevel", "")
+                with owner.lock:
+                    owner.requests.append((model, level))
+                    first = len(owner.requests) == 1
+                if first:
+                    owner.arrived.set()
+                    if callable(owner.on_first):
+                        owner.on_first()
+                    if owner.hold is not None:
+                        owner.hold.wait(20)
+                    if owner.first_status:
+                        self._send({"error": {"code": owner.first_status, "message": "synthetic failure"}}, owner.first_status)
+                        return
                 if owner.delay:
                     time.sleep(owner.delay)
                 needed = owner.required.get(model)
@@ -307,6 +324,97 @@ def test_unwritable_file_does_not_fail_the_job(tmp: Path) -> None:
     print("PASS gemini_floor.write_failure")
 
 
+def test_non_finite_timestamps_are_ignored(tmp: Path) -> None:
+    """P-7: NaN never expires and 10**400 does not convert; both entries are unusable, not fatal."""
+    origin = FakeGemini({MODEL: "low"})
+    try:
+        for label, stamp in (("nan", float("nan")), ("huge", 10**400), ("inf", float("inf"))):
+            gemini_floor.reset_memory()
+            data = tmp / f"nonfinite-{label}"
+            path = floor_file(data)
+            path.parent.mkdir(parents=True)
+            entry = {"provider": "gemini", "endpoint": gemini_floor_endpoint(origin.base), "model": MODEL, "level": "high", "learned_at": stamp}
+            path.write_text(json.dumps({"schema": 1, "floors": [entry]}), encoding="utf-8")  # NaN is written as a bare token
+            assert load_gemini_level_floors(data) == {}, label
+            key = gemini_floor.key_for("gemini", origin.base, MODEL)
+            assert gemini_floor.floor(key, data) is None, label
+            before = len(origin.refused)
+            assert translate(make_client(origin.base, data)) == {"0": "Hola"}
+            assert len(origin.refused) == before + 1 and origin.levels()[-1] == "low", label
+    finally:
+        origin.close()
+    print("PASS gemini_floor.non_finite_timestamps")
+
+
+def test_in_memory_floor_expires(tmp: Path) -> None:
+    """P-8: a floor held by a long-lived process ends with its 30 days like one read from the file."""
+    gemini_floor.reset_memory()
+    origin = FakeGemini({MODEL: "low"})
+    data = tmp / "memory-expiry"
+    try:
+        translate(make_client(origin.base, data))
+        key = gemini_floor.key_for("gemini", origin.base, MODEL)
+        assert gemini_floor.floor(key, data) == "low"
+        origin.required[MODEL] = "minimal"  # the provider relaxed its minimum
+        later = time.time() + GEMINI_FLOOR_TTL_SECONDS + 60
+        with patch.object(gemini_floor.time, "time", return_value=later):
+            assert gemini_floor.floor(key, data) is None, "no reset_memory(), no restart"
+            translate(make_client(origin.base, data))
+        assert origin.levels()[-1] == "minimal", origin.levels()
+        # An entry read from the file keeps the time it was learned, not the time it was read.
+        gemini_floor.reset_memory()
+        old = tmp / "memory-expiry-old"
+        now = time.time()
+        remember_gemini_level_floor("gemini", origin.base, MODEL, "high", root=old, now=now - 29 * 24 * 3600)
+        assert gemini_floor.floor(key, old) == "high"
+        with patch.object(gemini_floor.time, "time", return_value=now + 2 * 24 * 3600):
+            assert gemini_floor.floor(key, old) is None
+    finally:
+        origin.close()
+    print("PASS gemini_floor.memory_expiry")
+
+
+def test_root_loading_is_complete_before_anyone_reads(tmp: Path) -> None:
+    """P-9: a batch that finds the file being read waits for the merge; a failed read is not remembered as done."""
+    gemini_floor.reset_memory()
+    key = gemini_floor.key_for("gemini", "http://example.invalid/v1", MODEL)
+    started, release = threading.Event(), threading.Event()
+    answers: dict[str, object] = {}
+
+    def slow(root):  # noqa: ANN001
+        started.set()
+        assert release.wait(5)
+        return {key: ("high", time.time())}
+
+    with patch("mwt.userdata.load_gemini_level_floor_entries", side_effect=slow):
+        first = threading.Thread(target=lambda: answers.__setitem__("first", gemini_floor.floor(key, tmp / "load-race")), daemon=True)
+        first.start()
+        assert started.wait(5)
+        second = threading.Thread(target=lambda: answers.__setitem__("second", gemini_floor.floor(key, tmp / "load-race")), daemon=True)
+        second.start()
+        second.join(0.3)
+        assert second.is_alive(), "the second batch must wait for the merge instead of reading an empty table"
+        release.set()
+        first.join(5)
+        second.join(5)
+    assert answers == {"first": "high", "second": "high"}, answers
+    # A read that failed leaves the folder unloaded; the next call reads it again.
+    gemini_floor.reset_memory()
+    calls: list[int] = []
+
+    def flaky(root):  # noqa: ANN001
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("synthetic read error")
+        return {key: ("medium", time.time())}
+
+    with patch("mwt.userdata.load_gemini_level_floor_entries", side_effect=flaky):
+        assert gemini_floor.floor(key, tmp / "load-fail") is None
+        assert gemini_floor.floor(key, tmp / "load-fail") == "medium"
+    assert len(calls) == 2
+    print("PASS gemini_floor.root_loading")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -317,6 +425,9 @@ def main() -> None:
         test_expired_entry_is_ignored(tmp)
         test_corrupt_file_is_ignored(tmp)
         test_unwritable_file_does_not_fail_the_job(tmp)
+        test_non_finite_timestamps_are_ignored(tmp)
+        test_in_memory_floor_expires(tmp)
+        test_root_loading_is_complete_before_anyone_reads(tmp)
     print("PASS gemini_floor")
 
 
