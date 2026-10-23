@@ -17,6 +17,12 @@ Not scanned: data packs, `data/*.dat` (command storage, scoreboard), `level.dat`
 A scan counts every chunk by its own DataVersion, compression and status (`processed`, `skipped_unsupported`,
 `unreadable`, `not_inspected`) and reports the counts, the version range, and whether the versions are mixed,
 missing or newer. The level.dat version is shown separately: it says what saved the world last, not what saved each chunk.
+`processed` means the scan read the chunk and searched it for text, even when its region file cannot be rewritten;
+`skipped_unsupported` is a chunk it could not read (an unknown compression). A file that cannot be written is counted
+separately per dimension and kind (`writeBlockedFiles`) and stays unchanged; its text is not offered for translation.
+When a file has more distinct DataVersion/compression combinations than the report itemises, the rest is counted as
+overflow and the distribution says it is truncated; the mixed, missing and newer flags and the ranges stay exact.
+A scan continued from a checkpoint written before coverage existed is marked `partial`, and stays so after later checkpoints.
 The newest DataVersion a fixture here was written at is 4556. Chunks above it are read and written only after the user
 confirms once per scan that the world came from a newer game version than this app was tested with; a backup is always made.
 A version number alone never blocks a write. Structures the reader does not verify stay as they are.

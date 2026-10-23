@@ -86,9 +86,10 @@ def test_mixed_versions_and_unknown_compression(tmp: Path) -> None:
     assert coverage["level_data_version"] == 4189
     assert coverage["level_data_versions"] == [{"world": "mixed", "data_version": 4189}]
     assert coverage["newest_covered"] == NEWEST_COVERED_DATA_VERSION
-    # processed: r.0.0 chunks 0-2, entities, nether = 5. skipped: the unknown chunk and the readable one beside it.
+    # processed: r.0.0 chunks 0-2, the readable chunk of r.1.0 (its file cannot be written, but it was searched),
+    # entities and nether = 6. skipped: only the chunk with the unknown compression.
     assert coverage["counts"] == {
-        "processed": 5, "skipped_unsupported": 2, "unreadable": 1, "not_inspected": 0, "total": 8,
+        "processed": 6, "skipped_unsupported": 1, "unreadable": 1, "not_inspected": 0, "total": 8,
     }
     versions = coverage["chunk_versions"]
     assert versions["min"] == 4189 and versions["max"] == 4556
@@ -98,11 +99,19 @@ def test_mixed_versions_and_unknown_compression(tmp: Path) -> None:
     groups = {(item["dimension"], item["kind"]): item for item in coverage["groups"]}
     assert set(groups) == {("overworld", "region"), ("overworld", "entities"), ("the_nether", "region")}
     overworld = groups[("overworld", "region")]
-    assert overworld["counts"] == {"processed": 3, "skipped_unsupported": 2, "unreadable": 1, "not_inspected": 0}
+    assert overworld["counts"] == {"processed": 4, "skipped_unsupported": 1, "unreadable": 1, "not_inspected": 0}
+    # The write blocker is a per-group file count of its own, not a chunk status.
+    assert overworld["write_blocked_files"] == 1
+    assert groups[("overworld", "entities")]["write_blocked_files"] == 0
+    assert groups[("the_nether", "region")]["write_blocked_files"] == 0
+    public_groups = {(item["dimension"], item["kind"]): item for item in public_summary(coverage)["groups"]}
+    assert public_groups[("overworld", "region")]["writeBlockedFiles"] == 1
+    assert public_groups[("overworld", "entities")]["writeBlockedFiles"] == 0
     assert overworld["min"] == 4189 and overworld["max"] == 4556
     entries = overworld["entries"]
     assert totals(entries, compression=127, status="skipped_unsupported", state="unobserved") == 1
-    assert totals(entries, compression=2, status="skipped_unsupported", state="known", data_version=4189) == 1
+    assert totals(entries, compression=2, status="processed", state="known", data_version=4189) == 2
+    assert totals(entries, status="skipped_unsupported") == 1
     assert totals(entries, compression=1, status="processed", data_version=4556) == 1
     assert totals(entries, compression=3, status="processed", state="missing") == 1
     assert totals(entries, compression=2, status="unreadable") == 1
@@ -127,8 +136,8 @@ def test_newer_chunks_are_flagged_and_oversize_distribution_is_bounded(tmp: Path
     record = ChunkCoverage().file("region/r.0.0.mca", "overworld", "region")
     for index in range(1000):
         record.add("processed", compression=2, state="known", data_version=5000 + index)
-    assert len(record.counts) <= 65
-    assert sum(record.counts.values()) == 1000
+    assert len(record.counts) <= 64
+    assert sum(record.counts.values()) + sum(record.overflow.values()) == 1000
     assert (record.low, record.high) == (5000, 5999)
 
 
@@ -197,6 +206,165 @@ def test_rescanning_a_file_replaces_its_counts_and_checkpoint_round_trips(tmp: P
     empty = ChunkCoverage()
     assert not empty.restore(broken) and not empty.files
     assert not empty.restore(None) and not empty.restore({"files": []})
+
+
+def write_overflow_region(path: Path, records: dict[int, tuple[str, int | None]]) -> None:
+    """A region file with readable chunks (``("chunk", version)``) and unknown-compression records (``("raw", id)``)."""
+    region = RegionFile.empty()
+    for index, (kind, value) in records.items():
+        if kind == "chunk":
+            region.put_nbt(index, chunk(value), compression=2)
+        else:
+            region.put_raw_record(index, (14).to_bytes(4, "big") + bytes([value]) + b"mystery-bytes")
+    data, _ = region.build(allow_unsupported=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def test_overflow_keeps_flags_and_ranges_exact(tmp: Path) -> None:
+    # A file that meets more distinct keys than it keeps: the surplus is overflow, and the facts stay exact.
+    record = ChunkCoverage().file("region/r.0.0.mca", "overworld", "region")
+    for index in range(64):
+        record.add("processed", compression=2, state="known", data_version=4000 + index)
+    record.add("processed", compression=2, state="missing")
+    record.add("processed", compression=2, state="known", data_version=5000)
+    assert len(record.counts) == 64 and record.overflow == {"processed": 2}
+    assert record.saw_missing and (record.low, record.high) == (4000, 5000)
+
+    # Real region 1: 4000 first, 63 unknown compressions fill the keys, then 5000 is read.
+    world = tmp / "mixed-world"
+    write_level(world)
+    records: dict[int, tuple[str, int | None]] = {0: ("chunk", 4000), 64: ("chunk", 5000)}
+    records.update({index: ("raw", 4 + index) for index in range(1, 64)})  # compression ids 5..67
+    write_overflow_region(world / "region" / "r.0.0.mca", records)
+    coverage = scan_report(world, tmp / "mixed-scan")["coverage"]
+    assert coverage["flags"] == {"mixed": True, "newer": True, "missing": False}
+    versions = coverage["chunk_versions"]
+    assert (versions["min"], versions["max"]) == (4000, 5000)
+    assert versions["truncated"] is True and versions["overflow"] == 1
+    assert [(item["data_version"], item["count"]) for item in versions["distribution"]] == [(4000, 1)]
+    group = coverage["groups"][0]
+    assert (group["min"], group["max"]) == (4000, 5000)
+    assert group["overflow"] == 1 and group["write_blocked_files"] == 1
+    # What the scan read is processed; only the unknown compressions were skipped. Nothing becomes "unobserved".
+    assert coverage["counts"] == {
+        "processed": 2, "skipped_unsupported": 63, "unreadable": 0, "not_inspected": 0, "total": 65,
+    }
+    assert totals(group["entries"], state="overflow", status="processed") == 1
+    assert totals(group["entries"], state="unobserved", status="processed") == 0
+
+    # Real region 2: 64 known versions fill the keys, the chunk without a DataVersion comes last.
+    world = tmp / "missing-world"
+    write_level(world)
+    write_region(
+        world / "region" / "r.0.0.mca",
+        {**{index: (2, chunk(4000 + index), False) for index in range(64)}, 64: (2, chunk(None), False)},
+    )
+    coverage = scan_report(world, tmp / "missing-scan")["coverage"]
+    assert coverage["flags"] == {"mixed": True, "newer": False, "missing": True}
+    versions = coverage["chunk_versions"]
+    assert versions["truncated"] is True and versions["overflow"] == 1
+    assert sum(item["count"] for item in versions["distribution"]) == 64
+    assert coverage["counts"]["processed"] == 65 and coverage["counts"]["total"] == 65
+    assert (versions["min"], versions["max"]) == (4000, 4063)
+    public = public_summary(coverage)
+    assert public["chunkVersions"]["truncated"] is True and public["chunkVersions"]["overflow"] == 1
+    assert public["groups"][0]["overflow"] == 1
+    assert any(item["state"] == "overflow" for item in public["groups"][0]["entries"])
+
+    # A complete file never says it is truncated.
+    plain = ChunkCoverage()
+    plain.file("region/r.0.0.mca", "overworld", "region").add("processed", compression=2, state="known", data_version=4189)
+    shown = plain.summary()
+    assert "truncated" not in shown["chunk_versions"] and "overflow" not in shown["groups"][0]
+    assert "truncated" not in public_summary(shown)["chunkVersions"]
+
+    # The checkpoint keeps the overflow, the exact flags and the write blocker, and reads back the same summary.
+    translator = WorldTranslator(config_for(world, tmp / "rt.json", "http://127.0.0.1:9", dry_run=True))
+    translator.run()
+    exported = json.loads(json.dumps(translator.coverage.export()))
+    restored = ChunkCoverage()
+    assert restored.restore(exported)
+    assert restored.summary() == translator.coverage.summary()
+    assert restored.summary()["flags"]["missing"] is True
+    # Every stored key still uses a state an earlier reader accepts; the overflow lives in its own field.
+    for item in exported["files"].values():
+        assert all(entry[0] in ("known", "missing", "unobserved") for entry in item["counts"])
+    # A checkpoint written before these fields existed is still read, and what it held keeps its meaning.
+    old = json.loads(json.dumps(exported))
+    for item in old["files"].values():
+        for name in ("overflow_by_status", "saw_missing", "write_blocked"):
+            item.pop(name, None)
+    legacy = ChunkCoverage()
+    assert legacy.restore(old)
+    assert legacy.summary()["flags"]["missing"] is False  # that chunk had overflowed: an old file cannot say
+    small = ChunkCoverage()
+    small.file("region/r.0.0.mca", "overworld", "region").add("processed", compression=2, state="missing")
+    old_small = json.loads(json.dumps(small.export()))
+    for item in old_small["files"].values():
+        for name in ("overflow_by_status", "saw_missing", "write_blocked"):
+            item.pop(name, None)
+    legacy = ChunkCoverage()
+    assert legacy.restore(old_small) and legacy.summary()["flags"]["missing"] is True
+    broken = json.loads(json.dumps(exported))
+    next(iter(broken["files"].values()))["overflow_by_status"] = {"nonsense": 1}
+    assert not ChunkCoverage().restore(broken)
+
+
+def test_readable_chunks_of_a_locked_file_are_processed(tmp: Path) -> None:
+    world = tmp / "locked-world"
+    write_level(world)
+    path = world / "region" / "r.0.0.mca"
+    write_region(path, {0: (2, chunk(4189, "Actually searched"), False)})
+    region = RegionFile.read(path)
+    region.put_raw_record(1, (14).to_bytes(4, "big") + bytes([127]) + b"mystery-bytes")
+    data, _ = region.build(allow_unsupported=True)
+    path.write_bytes(data)
+    before = path.read_bytes()
+    report = scan_report(world, tmp / "locked-scan")
+    coverage = report["coverage"]
+    # The readable chunk was read and searched; only the unknown compression was not.
+    assert coverage["counts"]["processed"] == 1 and coverage["counts"]["skipped_unsupported"] == 1
+    group = coverage["groups"][0]
+    assert group["write_blocked_files"] == 1
+    assert totals(group["entries"], compression=127, status="skipped_unsupported") == 1
+    assert totals(group["entries"], compression=2, status="processed") == 1
+    # The write blocker itself is unchanged: the file is not a candidate and nothing is written.
+    changed = [item for item in report["changed_files"] if item.get("skipped") == "unsupported_compression"]
+    assert len(changed) == 1 and changed[0]["unique_texts"] == 1
+    assert any(item.get("code") == "file_unwritable" for item in report["warnings"])
+    assert report["candidate_text_count"] == 0
+    assert path.read_bytes() == before
+    assert public_summary(coverage)["groups"][0]["writeBlockedFiles"] == 1
+
+
+def test_partial_marker_survives_repeated_resumes_of_an_old_checkpoint(tmp: Path) -> None:
+    world = mixed_world(tmp)
+    report = tmp / "resume.json"
+    config = config_for(world, report, "http://127.0.0.1:9", dry_run=True)
+    config["runtime"].update(checkpoint_enabled=True, resume_from_checkpoint=True)
+    checkpoint = Path(config["runtime"]["checkpoint_path"])
+    first = WorldTranslator(config)
+    first.collect_region_file(world / "region" / "r.0.0.mca")
+    first.completed_region_files.add(str(world / "region" / "r.0.0.mca"))
+    payload = first.checkpoint_payload()
+    payload.pop("chunk_coverage")  # a checkpoint from before chunk coverage existed
+    checkpoint.write_text(json.dumps(payload), encoding="utf-8")
+
+    for _round in range(2):  # resume, checkpoint again, resume again
+        resumed = WorldTranslator(config)
+        assert resumed.checkpoint_loaded and resumed.coverage.partial
+        assert resumed.coverage_summary()["partial"] is True
+        resumed.save_checkpoint()
+        stored = json.loads(checkpoint.read_text(encoding="utf-8"))
+        assert stored["chunk_coverage"]["partial"] is True
+        assert public_summary(resumed.coverage_summary())["partial"] is True
+
+    # A coverage that never was partial does not become partial, and a checkpoint without the marker reads as before.
+    clean = ChunkCoverage()
+    assert "partial" not in clean.export()
+    restored = ChunkCoverage()
+    assert restored.restore({"version": 1, "files": {}}) and not restored.partial
 
 
 def test_damaged_level_dat_does_not_stop_the_scan(tmp: Path) -> None:
@@ -367,6 +535,9 @@ def main() -> None:
             test_unsupported_containers_are_counted_by_file(root / "e")
             test_external_chunk_counts_its_own_compression(root / "f")
             test_rescanning_a_file_replaces_its_counts_and_checkpoint_round_trips(root / "g")
+            test_overflow_keeps_flags_and_ranges_exact(root / "l")
+            test_readable_chunks_of_a_locked_file_are_processed(root / "m")
+            test_partial_marker_survives_repeated_resumes_of_an_old_checkpoint(root / "n")
             test_damaged_level_dat_does_not_stop_the_scan(root / "k")
             test_helpers()
             test_translate_start_needs_confirmation_for_newer_chunks(root / "h", base_url)

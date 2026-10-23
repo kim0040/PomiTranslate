@@ -125,7 +125,7 @@
 
     {#if done && !blockers.length}
       {#if scan.candidateCount === 0}
-        <Callout tone="warning" title={t('scan.none')}>{partial ? t('scan.noneHelpPartial', { details: leftOut }) : t('scan.noneHelp')}</Callout>
+        <Callout tone="warning" title={t('scan.none')}>{partial ? (leftOut ? t('scan.noneHelpPartial', { details: leftOut }) : t('scan.noneHelpResumed')) : t('scan.noneHelp')}</Callout>
       {:else}
         <StatGrid
           label={t('scan.found', { count: formatNumber(scan.candidateCount, app.locale) })}

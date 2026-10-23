@@ -316,6 +316,11 @@ export class AppState {
       this.includedCount > 0 && !this.busy && this.runBlockers.length === 0 && !this.newerPending;
   }
 
+  /** The interrupted job whose continuation waits for the newer-version confirmation, shown in the recovery panel itself. */
+  continuation = $state<InterruptedJob | null>(null);
+  /** The last start was refused with NEWER_VERSION_UNCONFIRMED, so the confirmation is asked again where it was asked. */
+  private newerRefused = false;
+
   /** The scan met chunks newer than the newest tested version and the person has not confirmed yet. */
   get newerPending(): boolean {
     return needsNewerConfirmation(this.scan?.chunkCoverage) && !this.newerAccepted;
@@ -959,6 +964,7 @@ export class AppState {
     this.reviewVersion += 1;
     this.scan = null;
     this.newerAccepted = false;
+    this.continuation = null;
     this.scanAt = 0;
     this.candidates.reset('');
     this.excluded.clear();
@@ -1319,6 +1325,7 @@ export class AppState {
     await this.storeReview();
     this.busy = 'translate';
     this.cancelling = false;
+    this.newerRefused = false;
     this.banner = null;
     this.result = null;
     this.resultAt = 0;
@@ -1357,8 +1364,12 @@ export class AppState {
     } catch (cause) {
       this.fail(cause);
       // The core asks again: the confirmation did not reach it, so it must be given again.
-      if (cause instanceof BackendError && cause.code === 'NEWER_VERSION_UNCONFIRMED') this.newerAccepted = false;
-      this.step = this.scan ? 'run' : 'scan';
+      if (cause instanceof BackendError && cause.code === 'NEWER_VERSION_UNCONFIRMED') {
+        this.newerAccepted = false;
+        this.newerRefused = true;
+      }
+      // A continuation of an interrupted job asks again in its own panel instead of leaving it.
+      this.step = !this.scan ? 'scan' : this.newerRefused && options.fromInterrupted ? 'world' : 'run';
       // An unfinished job of this world must be settled first: take the person to where that happens.
       if (cause instanceof BackendError && cause.code === 'RECOVERY_REQUIRED') await this.openInterrupted();
       if (!options.resume && this.resume) {
@@ -1481,6 +1492,7 @@ export class AppState {
    */
   async recover(job: InterruptedJob, mode: 'rollback' | 'keep', options: { acceptConflicts?: boolean } = {}): Promise<RecoveryResult | null> {
     if (this.isBusy) return null;
+    if (this.continuation?.jobId === job.jobId) this.cancelContinuation();
     this.busy = 'recovery';
     this.recoveryJobId = job.jobId;
     this.banner = null;
@@ -1533,6 +1545,8 @@ export class AppState {
   /** "Continue the remaining work" of a partial job: the same checkpoint, resumed. */
   async continueInterrupted(job: InterruptedJob): Promise<void> {
     if (this.isBusy || !samePath(job.worldPath, this.worldDir)) return;
+    // A confirmation already given for this same saved scan (on the run step) still counts after it is loaded again.
+    const confirmedPlan = this.newerAccepted ? this.scan?.scanPlanId : '';
     try {
       this.applyResume(await callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir }));
     } catch (cause) {
@@ -1543,8 +1557,33 @@ export class AppState {
       this.notify(t('interrupted.continueUnavailable'), 'error');
       return;
     }
+    if (confirmedPlan && confirmedPlan === this.scan.scanPlanId) this.newerAccepted = true;
+    if (needsNewerConfirmation(this.scan.chunkCoverage) && !this.newerAccepted) {
+      // Ask here, in the recovery panel, with the saved job still selected; nothing is sent until it is ticked.
+      this.continuation = job;
+      return;
+    }
+    await this.runContinuation();
+  }
+
+  /** The newer-version box of the recovery panel is ticked: send the continuation with that confirmation. */
+  async confirmContinuation(): Promise<void> {
+    if (!this.continuation || this.isBusy || !this.newerAccepted || !this.scan || !this.resume) return;
+    await this.runContinuation();
+  }
+
+  /** Leave the confirmation without continuing; the job stays open and the box is unticked. */
+  cancelContinuation(): void {
+    this.continuation = null;
+    this.newerAccepted = false;
+  }
+
+  private async runContinuation(): Promise<void> {
     this.step = 'run';
     await this.startTranslate({ resume: true, fromInterrupted: true });
+    // Refused for the confirmation: stay on it (it is asked again) instead of leaving for the world screen.
+    if (this.newerRefused) return;
+    this.continuation = null;
     // A finished continuation settles the job; its list entry is refreshed from the core.
     await this.openInterrupted();
     if (!this.interruptedHere.length) this.step = 'result';

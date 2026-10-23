@@ -3,7 +3,7 @@
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
   import type { ChunkCoverage, ChunkCoverageEntry, ChunkStatus } from '../lib/api';
-  import { compressionName, dimension, fileNotes, leftOutChunks, leftOutFiles, needsNewerConfirmation, versionSummary, type FileNote } from '../lib/chunk-coverage';
+  import { compressionName, dimension, distributionOverflow, fileNotes, leftOutChunks, leftOutFiles, needsNewerConfirmation, versionSummary, type FileNote } from '../lib/chunk-coverage';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
 
@@ -38,7 +38,8 @@
   const kindText = (kind: string) => (kind === 'region' || kind === 'entities' ? t(`chunks.kind.${kind}` as MessageKey) : kind);
   const versionLabel = (item: { state: string; dataVersion: number | null }) =>
     item.state === 'known' && item.dataVersion !== null ? String(item.dataVersion)
-      : item.state === 'missing' ? t('chunks.version.missing') : t('chunks.version.unobserved');
+      : item.state === 'missing' ? t('chunks.version.missing') : item.state === 'overflow' ? t('chunks.version.overflow') : t('chunks.version.unobserved');
+  const overflow = $derived(distributionOverflow(coverage));
   const isNewer = (item: ChunkCoverageEntry | { dataVersion: number | null }) =>
     item.dataVersion !== null && item.dataVersion > coverage.newestCovered;
 </script>
@@ -97,6 +98,7 @@
               </tbody>
             </table>
           </div>
+          {#if overflow > 0}<p class="muted truncated" data-testid="chunk-distribution-truncated">{t('chunks.distribution.truncated', { count: number(overflow) })}</p>{/if}
         {/if}
         {#each coverage.groups.filter((group) => group.entries.length) as group (group.dimension + group.kind)}
           <h3>{dimensionText(group.dimension)} · {kindText(group.kind)}</h3>
@@ -146,6 +148,7 @@
   .more > summary::-webkit-details-marker { display: none; }
   .more > summary :global(.icon) { color: var(--text-secondary); transition: rotate var(--dur-base) var(--ease); }
   .more[open] > summary :global(.icon) { rotate: 180deg; }
+  .truncated { margin: var(--space-2) 0 0; font-size: var(--text-sm); }
   .more h3 { font-size: var(--text-sm); margin: var(--space-4) 0 var(--space-2); }
   .scroll { max-height: 16rem; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
   table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }

@@ -6,6 +6,7 @@
   import Callout from './Callout.svelte';
   import Dialog from './Dialog.svelte';
   import Icon from './Icon.svelte';
+  import NewerVersionNotice from './NewerVersionNotice.svelte';
   import ProgressBar from './ProgressBar.svelte';
 
   // Work an earlier run left half done. It stays on the world screen until the person decides:
@@ -42,6 +43,16 @@
     const heading = document.getElementById(`job-${id}`);
     heading?.scrollIntoView({ block: 'center' });
     heading?.focus();
+  });
+
+  // Continuing a job whose world is newer than the tested versions asks for the confirmation here, in the panel
+  // that was clicked, and keeps this job selected until the person goes on or backs out.
+  $effect(() => {
+    const id = app.continuation?.jobId;
+    if (!id) return;
+    const box = document.getElementById(`newer-${id}`);
+    box?.scrollIntoView({ block: 'center' });
+    box?.querySelector<HTMLInputElement>('input[type="checkbox"]')?.focus();
   });
 
   async function accept(): Promise<void> {
@@ -86,6 +97,17 @@
           <div class="running">
             <ProgressBar label={t('interrupted.working')} value={progress.total ? progress.done : null} max={progress.total || 100} />
             <p class="muted num" role="status">{t('interrupted.working')}{progress.total ? ` ${formatNumber(progress.done, app.locale)} / ${formatNumber(progress.total, app.locale)}` : ''}</p>
+          </div>
+        {:else if app.continuation?.jobId === job.jobId}
+          <div class="newer" id={`newer-${job.jobId}`} data-testid="interrupted-newer">
+            <p class="muted">{t('interrupted.newerLead')}</p>
+            <NewerVersionNotice confirm />
+            <div class="newer-actions">
+              <button type="button" class="btn btn-primary" disabled={!app.newerAccepted || app.isBusy} onclick={() => app.confirmContinuation()}>
+                <Icon name="refresh" size={16} /> {t('interrupted.continue')}
+              </button>
+              <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.cancelContinuation()}>{t('common.cancel')}</button>
+            </div>
           </div>
         {:else}
           <div class="choices">
@@ -183,6 +205,9 @@
   .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-4); }
   .choice { display: grid; gap: var(--space-2); align-content: start; justify-items: start; }
   .choice p { margin: 0; font-size: var(--text-sm); }
+  .newer { display: grid; gap: var(--space-3); }
+  .newer p { margin: 0; font-size: var(--text-sm); }
+  .newer-actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
   .running { display: grid; gap: var(--space-2); }
   .conflicts { margin: var(--space-1) 0 0; padding-inline-start: 18px; overflow-wrap: anywhere; }
   .plain { margin: 0; padding-inline-start: 18px; }
