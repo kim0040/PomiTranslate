@@ -1138,17 +1138,20 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_deletes_every_known_providers_entry_and_never_lists_the_store() {
+    fn a_reset_asks_the_os_store_only_about_providers_the_vault_says_used_the_keychain() {
         let dir = tempfile::tempdir().unwrap();
         let (credentials, fake) = credentials::with_fake_keychain();
         credentials
             .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
             .unwrap();
-        // An entry the vault knows nothing about is still the app's own namespace.
+        credentials
+            .save(dir.path(), "gemini", credentials::Mode::Local, KEY, None)
+            .unwrap();
+        // No row says the keychain was ever used for gemini: an entry of that name is not touched.
         fake.entries
             .lock()
             .unwrap()
-            .insert("gemini".into(), "left-over-fixture".into());
+            .insert("gemini".into(), "not-ours-fixture".into());
         // Entries under other names are not the app's and stay.
         fake.entries
             .lock()
@@ -1159,17 +1162,52 @@ mod tests {
         assert!(outcome.keys_deleted, "{outcome:?}");
         assert!(outcome.errors.is_empty(), "{outcome:?}");
         let entries = fake.entries.lock().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert!(entries.contains_key("someone-else"));
-        // Only the app's own names were asked for: one delete per known provider, nothing else.
-        let mut log = fake.log.lock().unwrap().clone();
-        let mut expected: Vec<String> = credentials::PROVIDERS
-            .iter()
-            .map(|provider| format!("delete:{provider}"))
-            .collect();
-        expected.sort();
-        log.sort();
-        assert_eq!(log, expected);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains_key("someone-else") && entries.contains_key("gemini"));
+        // One delete, for the one provider the vault recorded; nothing read, nothing listed.
+        assert_eq!(*fake.log.lock().unwrap(), ["delete:openai"]);
+    }
+
+    #[test]
+    fn a_reset_of_someone_who_never_used_the_keychain_reports_deleted_and_never_reaches_the_os() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        credentials
+            .save(dir.path(), "openai", credentials::Mode::Local, KEY, None)
+            .unwrap();
+        // A platform without a credential store, or a locked one, must not matter to them.
+        fake.fail_delete.store(true, Ordering::SeqCst);
+        let outcome = reset_native(&credentials, dir.path(), true);
+        assert!(outcome.keys_deleted, "{outcome:?}");
+        assert!(!outcome.keys_partially_deleted, "{outcome:?}");
+        assert!(outcome.errors.is_empty(), "{outcome:?}");
+        assert!(fake.log.lock().unwrap().is_empty());
+        assert!(!dir.path().join("credentials").exists());
+    }
+
+    #[test]
+    fn a_reset_with_a_missing_vault_tries_every_provider_and_no_store_is_nothing_to_delete() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let (credentials, fake) = credentials::with_fake_keychain();
+        fake.unavailable.store(true, Ordering::SeqCst);
+        let outcome = reset_native(&credentials, dir.path(), true);
+        assert!(
+            outcome.keys_deleted && outcome.errors.is_empty(),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            fake.log.lock().unwrap().len(),
+            credentials::PROVIDERS.len(),
+            "every provider was tried"
+        );
+        // A refused delete is still reported.
+        fake.unavailable.store(false, Ordering::SeqCst);
+        fake.fail_delete.store(true, Ordering::SeqCst);
+        let refused = reset_native(&credentials, dir.path(), true);
+        assert!(!refused.keys_deleted, "{refused:?}");
+        assert_eq!(refused.errors, [code::KEYCHAIN_UNCONFIRMED]);
     }
 
     #[test]

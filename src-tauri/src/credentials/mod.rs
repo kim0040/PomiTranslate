@@ -609,6 +609,30 @@ fn account_flags(conn: &Connection, provider: &str) -> Result<(bool, Option<Stri
         .unwrap_or((false, None)))
 }
 
+/// Whether the OS store has to be asked about a provider's key before it is deleted. The vault's
+/// row is the only evidence: the person is in Keychain mode now, or the row records (the plain
+/// `known_keychain` metadata) that a key was ever stored there. Anything else is someone who never
+/// chose the keychain, and the app must not reach it for them (no automatic keychain access).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryPlan {
+    /// The vault says the keychain was never used for this provider: no OS call.
+    Skip,
+    /// The vault says the keychain holds, or held, this key: a delete the store does not confirm is
+    /// `KEYCHAIN_UNCONFIRMED`, a platform without any store included.
+    Required,
+    /// The vault cannot say (missing, unreadable) and the person asked for the keys to go: try, and a
+    /// platform with no credential store at all counts as nothing to delete.
+    BestEffort,
+}
+
+fn entry_plan(conn: &Connection, provider: &str) -> EntryPlan {
+    match (mode_of(conn, provider), account_flags(conn, provider)) {
+        (Ok(mode), Ok((known, _))) if mode == Mode::Keychain || known => EntryPlan::Required,
+        (Ok(_), Ok(_)) => EntryPlan::Skip,
+        _ => EntryPlan::BestEffort,
+    }
+}
+
 fn aad(provider: &str, id: &[u8]) -> Vec<u8> {
     serde_json::to_vec(&("PomiTranslate", SCHEMA, 1, provider, id))
         .expect("fixed credential metadata")
@@ -864,8 +888,11 @@ impl Credentials {
             }
         }
         // The app's own keychain entry (`PomiTranslate/<provider>`) is removed when the key moves to
-        // another store (CR-5); one that is already missing counts as removed.
-        let leaving_keychain = previous == Mode::Keychain && mode != Mode::Keychain;
+        // another store (CR-5); one that is already missing counts as removed. The OS store is only
+        // reached when the vault's row says Keychain mode now or that a key was ever stored there
+        // (`known_keychain`): someone who never used the keychain makes no OS call.
+        let leaving_keychain =
+            mode != Mode::Keychain && (previous == Mode::Keychain || was_known_keychain);
         let known = if mode == Mode::Keychain && secret.is_some() {
             true
         } else if leaving_keychain {
@@ -919,6 +946,15 @@ impl Credentials {
                     None => self.keychain.delete(provider),
                 },
             );
+            if result.as_ref().is_err_and(|error| error.uncertain) {
+                // The save was rolled back but the OS entry may hold the new value. Note that the
+                // keychain was used, so the delete the error asks for reaches it (best effort: the
+                // uncertain answer is the one reported either way).
+                let _ = conn.execute(
+                    "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,?2,1,NULL) ON CONFLICT(provider) DO UPDATE SET known_keychain=1",
+                    params![provider, previous.label()],
+                );
+            }
             result?;
         } else {
             tx.commit().map_err(|error| {
@@ -961,8 +997,11 @@ impl Credentials {
     /// opened (bad permissions, damaged data) it cannot be edited row by row, so it is set aside
     /// whole, exactly as "reset credential storage" does.
     ///
-    /// The OS entry is `PomiTranslate/<provider>`: the app's own namespace, so it is deleted
-    /// whatever the vault says, and one that is already missing counts as deleted. When the OS store
+    /// The OS entry is `PomiTranslate/<provider>`: the app's own namespace, and one that is already
+    /// missing counts as deleted. It is only asked about when the vault's row says Keychain mode now
+    /// or that a key was ever stored there (`known_keychain`); with no such record (or no vault) the
+    /// OS store is not contacted. A vault that cannot be read cannot say, so the delete is tried and
+    /// a platform without any credential store counts as nothing to delete. When the OS store
     /// refuses the delete the answer is `KEYCHAIN_UNCONFIRMED` and nothing else is uncertain: the
     /// entry (and the vault's note that it exists) is left as it was, the app's own copies (encrypted
     /// row, session) are removed anyway, and deleting again tries the OS entry again.
@@ -973,9 +1012,9 @@ impl Credentials {
         let (mut conn, _held) = match vault.connection(false) {
             Ok(Some(open)) => open,
             Ok(None) => {
-                let entry = self.delete_entry(provider);
+                // No vault: nothing ever recorded a keychain key.
                 sessions.remove(provider);
-                return entry;
+                return Ok(());
             }
             Err(error)
                 if matches!(
@@ -983,14 +1022,14 @@ impl Credentials {
                     code::VAULT_PERMISSIONS | code::VAULT_SCHEMA | code::VAULT_CORRUPT
                 ) =>
             {
-                // The vault is set aside either way; the OS entry does not depend on it.
-                let entry = self.delete_entry(provider);
+                // The vault cannot say, and it is set aside either way.
+                let entry = self.delete_entry(provider, EntryPlan::BestEffort);
                 self.reset_locked(&mut sessions, root)?;
                 return entry;
             }
             Err(error) => return Err(error),
         };
-        let entry = self.delete_entry(provider);
+        let entry = self.delete_entry(provider, entry_plan(&conn, provider));
         let tx = conn
             .transaction()
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot begin credential transaction"))?;
@@ -1011,13 +1050,24 @@ impl Credentials {
     }
 
     /// Delete this app's OS entry for `provider` (`PomiTranslate/<provider>`; a missing entry is a
-    /// success). A refusal is the one thing reported, as `KEYCHAIN_UNCONFIRMED`; the OS reason goes to
-    /// the log.
-    fn delete_entry(&self, provider: &str) -> Result<(), IpcError> {
-        self.keychain.delete(provider).map_err(|error| {
-            crate::diagnostics::global().log_error("credentials:keychain", &error);
-            unconfirmed()
-        })
+    /// success) as far as `plan` allows. A refusal is the one thing reported, as
+    /// `KEYCHAIN_UNCONFIRMED`; the OS reason goes to the log.
+    fn delete_entry(&self, provider: &str, plan: EntryPlan) -> Result<(), IpcError> {
+        if plan == EntryPlan::Skip {
+            return Ok(());
+        }
+        match self.keychain.delete(provider) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if plan == EntryPlan::BestEffort && error.code == code::KEYCHAIN_UNAVAILABLE =>
+            {
+                Ok(())
+            }
+            Err(error) => {
+                crate::diagnostics::global().log_error("credentials:keychain", &error);
+                Err(unconfirmed())
+            }
+        }
     }
 
     /// Set the vault and its key directory aside (`*.broken-<ms>`, links are never followed) and make
@@ -1053,18 +1103,28 @@ impl Credentials {
         Ok(())
     }
 
-    /// App reset with "delete keys": delete `PomiTranslate/<provider>` for every provider the app
-    /// knows (a missing entry counts as deleted; the OS store is never listed), then the vault, the
-    /// key directory and every set-aside copy. A step that fails does not stop the others: the answer
-    /// says what is gone and which entries could not be deleted. Nothing is remembered about a failed
-    /// delete; deleting again tries every entry again.
+    /// App reset with "delete keys": delete `PomiTranslate/<provider>` for the providers the vault's
+    /// rows say used the keychain (Keychain mode now, or `known_keychain`; a missing entry counts as
+    /// deleted; the OS store is never listed), then the vault, the key directory and every set-aside
+    /// copy. When the vault is missing or cannot be read it cannot say, so every known provider is
+    /// tried and a platform without any credential store counts as nothing to delete. A step that
+    /// fails does not stop the others: the answer says what is gone and which entries could not be
+    /// deleted. Nothing is remembered about a failed delete; deleting again tries again.
     pub fn purge(&self, root: &Path) -> Result<Purged, IpcError> {
         let mut sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
         let mut outcome = Purged::default();
 
-        for provider in PROVIDERS.iter().copied() {
-            match self.delete_entry(provider) {
+        // The connection is dropped before the files go: an open database cannot be removed everywhere.
+        let plans: Vec<EntryPlan> = match vault.connection(false) {
+            Ok(Some((conn, _held))) => PROVIDERS
+                .iter()
+                .map(|provider| entry_plan(&conn, provider))
+                .collect(),
+            _ => vec![EntryPlan::BestEffort; PROVIDERS.len()],
+        };
+        for (provider, plan) in PROVIDERS.iter().copied().zip(plans) {
+            match self.delete_entry(provider, plan) {
                 Ok(()) => outcome.keychain_deleted.push(provider),
                 Err(_) => outcome.keychain_failed.push(provider),
             }
@@ -1116,7 +1176,8 @@ impl Credentials {
 /// What a purge removed and what it could not delete.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Purged {
-    /// Providers whose OS entry is confirmed gone (deleted, or not there).
+    /// Providers whose OS entry is confirmed gone (deleted, not there, or never used: the vault's
+    /// rows had no record of the keychain, so the OS store was not asked).
     pub keychain_deleted: Vec<&'static str>,
     /// Providers whose OS entry could not be deleted (`KEYCHAIN_UNCONFIRMED`); deleting again retries.
     pub keychain_failed: Vec<&'static str>,
