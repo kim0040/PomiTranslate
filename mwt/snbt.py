@@ -63,15 +63,17 @@ class SnbtDocument:
             if not isinstance(current, str) or current == span.original:
                 continue
             out.append(self.source[cursor : span.start])
-            out.append(quote(current, span.quote or '"'))
+            out.append(quote(current, span.quote or '"', keep=bool(span.quote)))
             cursor = span.end
         out.append(self.source[cursor:])
         return "".join(out)
 
 
-def quote(text: str, preferred: str = '"') -> str:
+def quote(text: str, preferred: str = '"', keep: bool = False) -> str:
+    """``text`` as an SNBT string. ``keep`` holds the preferred quote even when the text contains it
+    (escaped); otherwise the other quote is chosen if that avoids an escape."""
     mark = preferred if preferred in ("'", '"') else '"'
-    if mark in text and ("'" if mark == '"' else '"') not in text:
+    if not keep and mark in text and ("'" if mark == '"' else '"') not in text:
         mark = "'" if mark == '"' else '"'
     escaped = text.replace("\\", "\\\\").replace(mark, "\\" + mark)
     escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")

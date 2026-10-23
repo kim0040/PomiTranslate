@@ -11,6 +11,7 @@ None of this was checked in the game.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import struct
@@ -26,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from mc_world_translator import DEFAULT_CONFIG, WorldTranslator, merge_nested  # noqa: E402
+from mwt.extract import Scope  # noqa: E402
 from mwt.region import RegionFile  # noqa: E402
 from mwt.safety import BackupSet  # noqa: E402
 from test_extraction import (  # noqa: E402
@@ -555,6 +557,493 @@ def test_world_scan_write_reopen_restore() -> None:
     record("comp02.world_scan_write_reopen_restore")
 
 
+# --- review fixes: byte preservation (M1), legacy hover payloads (M2), object components (M3) ----------
+
+
+def walked(wt: WorldTranslator, node: object) -> list[str]:
+    found: list[str] = []
+    wt._walk_json(copy.deepcopy(node), lambda container, key, source: found.append(source))
+    return found
+
+
+def nbt_texts(wt: WorldTranslator, *children: bytes) -> list[str]:
+    _, refs = scan_chunk(wt, root(*children))
+    return wt.extract_unique_texts(refs)
+
+
+# The review's input: a noncompact embedded component with a Unicode escape in a token that stays.
+EMBEDDED = '{ "text" : "Hover blade", "font" : "example:font", "color" : "\\u0072ed" }'
+
+
+def embedded_hover(inner: str) -> dict:
+    return {
+        "text": "Outer text",
+        "hoverEvent": {
+            "action": "show_item",
+            "contents": {"id": "minecraft:stone", "components": {"minecraft:custom_name": inner}},
+        },
+    }
+
+
+def test_embedded_json_keeps_unchanged_bytes() -> None:
+    wt = translator()
+    node = embedded_hover(EMBEDDED)
+    wt.patch_json_component(node, {"Hover blade": "Translated blade"})
+    assert node["hoverEvent"]["contents"]["components"]["minecraft:custom_name"] == EMBEDDED.replace(
+        "Hover blade", "Translated blade"
+    ), "only the translated token changes: spaces, key order and the \\u0072 escape stay"
+
+    # Lore lines, a bare string literal with outside whitespace, escapes in tokens that stay, and a
+    # lone surrogate escape that must remain an escape.
+    lore = ['[ "Line \\/ one" , {"text":"Line two","extra":["\\ud83d tail"]} ]', ' "Bare literal" ']
+    node = {
+        "text": "Outer text",
+        "hover_event": {"action": "show_item", "id": "minecraft:stone", "components": {"minecraft:lore": list(lore)}},
+    }
+    wt.patch_json_component(node, {"Line / one": "ONE", "Line two": "TWO", "Bare literal": "BARE"})
+    got = node["hover_event"]["components"]["minecraft:lore"]
+    assert got == [
+        '[ "ONE" , {"text":"TWO","extra":["\\ud83d tail"]} ]',
+        ' "BARE" ',
+    ], got
+
+    # The same component as the outer string of a sign line is patched in place too.
+    sign = '{ "text" : "Hello there" , "color" : "\\u0067old" }'
+    tag = wt.parse_nbt_bytes(root(w_string("Text1", sign)))["Text1"]
+    refs: list = []
+    wt._collect_component(tag, refs, "t", Scope(), "sign", "line:1")
+    assert wt.apply_translations(refs, {"Hello there": "Hi"}) == 1
+    assert tag.value == '{ "text" : "Hi" , "color" : "\\u0067old" }', tag.value
+    record("comp02.fix_embedded_json_bytes")
+
+
+def test_embedded_json_unmappable_edit_falls_back_to_compact() -> None:
+    wt = translator()
+    spaced = '{ "text" : "A line", "extra" : [ "More" ] }'
+
+    def swap_for_object(root_value: object) -> None:
+        root_value["text"] = {"translate": "block.minecraft.stone"}  # type: ignore[index]
+
+    assert getattr(wt, "json_span_fallbacks", 0) == 0
+    got = wt._patch_json_string(spaced, swap_for_object)
+    assert got == '{"text":{"translate":"block.minecraft.stone"},"extra":["More"]}', got
+    assert wt.json_span_fallbacks == 1, "a fallback is counted"
+
+    # Two spellings of one key cannot be mapped to one span either.
+    duplicate = '{"text":"First","text":"Second"}'
+    got = wt._patch_json_string(duplicate, lambda root_value: root_value.__setitem__("text", "Third"))
+    assert got == '{"text":"Third"}', got
+    assert wt.json_span_fallbacks == 2
+
+    # Nothing to change: the text comes back as it was, spaces and all.
+    assert wt._patch_json_string(spaced, lambda root_value: None) == spaced
+    assert wt.json_span_fallbacks == 2
+    record("comp02.fix_embedded_json_fallback")
+
+
+def test_snbt_keeps_the_quote_of_the_replaced_string() -> None:
+    from mwt import snbt
+
+    wt = translator()
+    for quote_char in ('"', "'"):
+        literal = snbt.quote(EMBEDDED, quote_char, keep=True)
+        assert literal[0] == quote_char
+        command = (
+            "tellraw @a {text:'Outer',hover_event:{action:show_item,id:'minecraft:stone',"
+            "components:{'minecraft:custom_name':%s}}}"
+        ) % literal
+        expected_inner = EMBEDDED.replace("Hover blade", "Translated blade")
+        expected = command.replace(literal, snbt.quote(expected_inner, quote_char, keep=True))
+        got = wt.patch_command_component(command, {"Hover blade": "Translated blade"})
+        assert got == expected, got
+        assert got[got.index("custom_name") + len("custom_name':")] == quote_char, "the quote character stays"
+        parsed = snbt.parse(got.split("tellraw @a ", 1)[1]).value
+        assert parsed["hover_event"]["components"]["minecraft:custom_name"] == expected_inner
+
+    # A translation that contains the quote character is escaped for it, not moved to the other quote.
+    document = snbt.parse('{text:"Hello"}')
+    document.value["text"] = 'Say "hi"'
+    assert document.render() == '{text:"Say \\"hi\\""}', document.render()
+    document = snbt.parse("{text:'Hello'}")
+    document.value["text"] = "It's"
+    assert document.render() == "{text:'It\\'s'}", document.render()
+    document = snbt.parse("{text:Hello}")
+    document.value["text"] = 'Say "hi"'
+    assert document.render() == "{text:'Say \"hi\"'}", "an unquoted word had no quote to keep"
+    record("comp02.fix_snbt_quote_kept")
+
+
+# What the parent extractor (57c784b^1) collected from these inputs, recorded when it was checked.
+LEGACY_JSON = {
+    "value_entity": (
+        {"text": "Outer text", "hoverEvent": {"action": "show_entity", "value": {"name": {"text": "Legacy entity label"}}}},
+        ["Outer text", "Legacy entity label"],
+    ),
+    "value_component": (
+        {"text": "Outer text", "hoverEvent": {"action": "show_entity", "value": {"text": "Legacy tooltip"}}},
+        ["Outer text", "Legacy tooltip"],
+    ),
+    "value_item_component": (
+        {"text": "Outer text", "hover_event": {"action": "show_item", "value": [{"text": "Item value"}, "Plain item value"]}},
+        ["Outer text", "Item value", "Plain item value"],
+    ),
+    "contents_string_command": (
+        {"text": "Outer text", "hoverEvent": {"action": "show_item", "contents": 'tellraw @a {"text":"Old nested command"}'}},
+        ["Outer text", "Old nested command"],
+    ),
+    "name_string_command": (
+        {"text": "Outer text", "hoverEvent": {"action": "show_entity", "name": 'tellraw @a {"text":"Name command"}'}},
+        ["Outer text", "Name command"],
+    ),
+    "contents_list": (
+        {"text": "Outer text", "hoverEvent": {"action": "show_entity", "contents": [{"text": "Listed one"}]}},
+        ["Outer text", "Listed one"],
+    ),
+    "show_text_unchanged": (
+        {"text": "Outer text", "hoverEvent": {"action": "show_text", "contents": {"text": "Tip"}, "value": "Plain tip"}},
+        ["Outer text", "Plain tip", "Tip"],
+    ),
+    # A raw SNBT item or entity wrapper is not text that is sent for translation, before or now.
+    "raw_item_wrapper": (
+        {
+            "text": "Outer text",
+            "hoverEvent": {"action": "show_item", "value": "{id:\"minecraft:stone\",tag:{display:{Name:'{\"text\":\"Raw wrapper name\"}'}}}"},
+        },
+        ["Outer text"],
+    ),
+    "raw_entity_wrapper": (
+        {
+            "text": "Outer text",
+            "hoverEvent": {"action": "show_entity", "contents": "{type:\"minecraft:pig\",name:'{\"text\":\"Raw pig\"}'}"},
+        },
+        ["Outer text"],
+    ),
+}
+
+
+def test_legacy_hover_payloads_are_still_collected() -> None:
+    wt = translator()
+    for name, (node, expected) in LEGACY_JSON.items():
+        got = walked(wt, node)
+        assert sorted(got) == sorted(expected), (name, got)
+
+    # Inline and compound show_item/show_entity fields stay narrowed to names and lore.
+    narrowed = {
+        "text": "Outer text",
+        "hover_event": {
+            "action": "show_entity",
+            "id": "minecraft:pig",
+            "name": {"text": "Pig name"},
+            "custom_data": {"text": "Not a label"},
+        },
+    }
+    assert walked(wt, narrowed) == ["Outer text", "Pig name"]
+    narrowed = {
+        "text": "Outer text",
+        "hoverEvent": {
+            "action": "show_item",
+            "contents": {"id": "minecraft:stone", "components": {"minecraft:custom_data": {"text": "Not a label"}}},
+        },
+    }
+    assert walked(wt, narrowed) == ["Outer text"]
+
+    # The legacy value is written back where it was, together with the targeted fields.
+    node = copy.deepcopy(LEGACY_JSON["value_entity"][0])
+    node["hoverEvent"]["name"] = {"text": "Inline name"}
+    wt.patch_json_component(node, {t: prefixed(t) for t in ("Outer text", "Legacy entity label", "Inline name")})
+    assert node["text"] == "[T] Outer text"
+    assert node["hoverEvent"]["value"]["name"]["text"] == "[T] Legacy entity label"
+    assert node["hoverEvent"]["name"]["text"] == "[T] Inline name"
+
+    # Embedded commands in hover strings are patched as before.
+    wrote = wt.patch_command_component(
+        'tellraw @a {"text":"Outer text","hoverEvent":{"action":"show_entity","value":{"text":"Legacy tooltip"}}}',
+        {"Outer text": prefixed("Outer text"), "Legacy tooltip": prefixed("Legacy tooltip")},
+    )
+    assert wrote == (
+        'tellraw @a {"text":"[T] Outer text","hoverEvent":{"action":"show_entity","value":{"text":"[T] Legacy tooltip"}}}'
+    ), wrote
+    record("comp02.fix_legacy_hover_json")
+
+
+def test_legacy_hover_payloads_in_nbt_are_still_collected() -> None:
+    wt = translator()
+    # JSON inside an NBT string (a pre-1.21.5 sign line), and the same component as plain NBT.
+    for entry in (LEGACY_JSON["value_component"][0], LEGACY_JSON["value_entity"][0]):
+        sign = w_compound(
+            "probe",
+            w_string("id", "minecraft:sign"), w_int("x", 1), w_int("y", 1), w_int("z", 1),
+            w_string("Text1", compact(entry)),
+        )
+        assert nbt_texts(wt, sign) == walked(wt, entry)
+    direct = w_compound(
+        "CustomName",
+        w_string("text", "Outer text"),
+        w_compound(
+            "hoverEvent",
+            w_string("action", "show_entity"),
+            w_compound("value", w_string("text", "Legacy tooltip")),
+        ),
+    )
+    assert nbt_texts(wt, direct) == ["Outer text", "Legacy tooltip"]
+    direct_item = w_compound(
+        "CustomName",
+        w_string("text", "Outer text"),
+        w_compound(
+            "hover_event",
+            w_string("action", "show_item"),
+            w_compound("value", w_string("text", "Item value")),
+            w_string("contents", "{id:\"minecraft:stone\",tag:{display:{Name:'{\"text\":\"Raw wrapper name\"}'}}}"),
+        ),
+    )
+    assert nbt_texts(wt, direct_item) == ["Outer text", "Item value"], "a raw SNBT wrapper string is not collected"
+    # Compound contents and inline fields are the targeted ones: names only.
+    targeted = w_compound(
+        "CustomName",
+        w_string("text", "Outer text"),
+        w_compound(
+            "hoverEvent",
+            w_string("action", "show_entity"),
+            w_compound(
+                "contents",
+                w_string("id", "minecraft:pig"),
+                w_compound("name", w_string("text", "Pig name")),
+                w_compound("custom_data", w_string("text", "Not a label")),
+            ),
+            w_compound("value", w_string("text", "Legacy value")),
+        ),
+    )
+    assert nbt_texts(wt, targeted) == ["Outer text", "Pig name", "Legacy value"]
+
+    # A command component whose hover uses the legacy value, found through the command path.
+    command = 'tellraw @a {"text":"Outer text","hoverEvent":{"action":"show_entity","value":{"text":"Legacy tooltip"}}}'
+    chunk = root(
+        w_list_of_compounds(
+            "block_entities",
+            [[w_string("id", "minecraft:command_block"), w_int("x", 1), w_int("y", 64), w_int("z", 1), w_string("Command", command)]],
+        )
+    )
+    _, refs = scan_chunk(wt, chunk)
+    assert wt.extract_unique_texts(refs) == ["Outer text", "Legacy tooltip"]
+    record("comp02.fix_legacy_hover_nbt")
+
+
+def test_explicit_type_wins_and_object_payloads_are_not_text() -> None:
+    wt = translator()
+    # An explicit type decides: this is a text component whatever else the compound holds.
+    for extra in ({"player": "SafeName"}, {"sprite": "block/stone"}, {"object": "atlas"}):
+        node = {"type": "text", "text": "Visible text", "fallback": {"text": "Not a component fallback"}, **extra}
+        assert walked(wt, node) == ["Visible text"], (extra, walked(wt, node))
+    for kind in ("translatable", "score", "selector", "keybind", "nbt"):
+        node = {"type": kind, "fallback": {"text": "Not a component fallback"}, "player": "SafeName"}
+        assert walked(wt, node) == [], kind
+    assert walked(wt, {"type": "minecraft:object", "fallback": {"text": "Namespaced"}}) == [], "an unrecognised type is not the shape"
+    assert walked(wt, {"type": 5, "object": "atlas", "fallback": {"text": "Bad type"}}) == []
+    # Object by type, with or without its own key; and the shape alone when type is left out.
+    assert walked(wt, {"type": "object", "fallback": {"text": "Typed"}}) == ["Typed"]
+    assert walked(wt, {"type": "object", "sprite": "a/b", "fallback": "Typed string"}) == ["Typed string"]
+    assert walked(wt, {"object": "atlas", "sprite": "a/b", "fallback": {"text": "Shaped"}}) == ["Shaped"]
+    assert walked(wt, {"player": {"name": "N"}, "fallback": {"text": "Shaped player"}}) == ["Shaped player"]
+    assert walked(wt, {"type": None, "sprite": "a/b", "fallback": {"text": "Null type"}}) == ["Null type"]
+    # translate keeps its own fallback rule.
+    assert walked(wt, {"translate": "k.v", "fallback": "Tr fallback"}) == ["Tr fallback"]
+
+    # Nothing nested in the payload is text, only the fallback is.
+    nested = {
+        "object": "player",
+        "player": {
+            "name": "SafeName",
+            "properties": [{"name": "textures", "value": "BASE64", "text": "Do not translate player property"}],
+            "text": "Do not translate player text",
+            "extra": [{"text": "Do not translate player extra"}],
+        },
+        "fallback": {"text": "Visible fallback"},
+    }
+    assert walked(wt, nested) == ["Visible fallback"]
+    sprite = {"type": "object", "object": "atlas", "sprite": {"text": "Sprite text", "extra": ["Sprite extra"]}, "fallback": "Visible glyph"}
+    assert walked(wt, sprite) == ["Visible glyph"]
+    assert walked(wt, {"type": "object", "object": {"text": "Object payload"}, "fallback": "Glyph"}) == ["Glyph"]
+    # A real component around an object is still read.
+    around = {"text": "Around", "extra": [nested, {"text": "After"}]}
+    assert walked(wt, around) == ["Around", "Visible fallback", "After"]
+    # A patch changes the fallback and leaves the payload alone.
+    node = copy.deepcopy(nested)
+    wt.patch_json_component(node, {"Visible fallback": "Changed", "Do not translate player property": "Oops"})
+    expected = copy.deepcopy(nested)
+    expected["fallback"]["text"] = "Changed"
+    assert node == expected
+
+    # The same rules for plain NBT.
+    def probe(*children: bytes) -> bytes:
+        return w_compound("CustomName", *children)
+
+    typed_text = probe(
+        w_string("type", "text"),
+        w_string("text", "Visible text"),
+        w_string("player", "SafeName"),
+        w_compound("fallback", w_string("text", "Not a component fallback")),
+    )
+    assert nbt_texts(wt, typed_text) == ["Visible text"]
+    assert nbt_texts(wt, probe(w_string("type", "text"), w_string("sprite", "a/b"), w_string("fallback", "Not a fallback"))) == []
+    shaped = w_compound(
+        "CustomName",
+        w_string("type", "object"),
+        w_string("object", "player"),
+        w_compound(
+            "player",
+            w_string("name", "SafeName"),
+            w_string("text", "Do not translate player text"),
+            w_list_of_compounds("extra", [[w_string("text", "Do not translate player extra")]]),
+            w_list_of_compounds("properties", [[w_string("name", "textures"), w_string("text", "Do not translate property")]]),
+        ),
+        w_compound("fallback", w_string("text", "Visible fallback")),
+    )
+    assert nbt_texts(wt, shaped) == ["Visible fallback"]
+    untyped = w_compound(
+        "CustomName",
+        w_string("object", "atlas"),
+        w_string("sprite", "a/b"),
+        w_compound("fallback", w_string("text", "Shaped fallback")),
+    )
+    assert nbt_texts(wt, untyped) == ["Shaped fallback"]
+    contradictory = w_compound(
+        "CustomName",
+        w_string("type", "text"),
+        w_string("text", "Visible text"),
+        w_compound("player", w_string("name", "SafeName"), w_string("text", "Do not translate")),
+        w_compound("fallback", w_string("text", "Not a component fallback")),
+    )
+    assert nbt_texts(wt, contradictory) == ["Visible text"]
+    record("comp02.fix_explicit_type_and_payloads")
+
+
+def review_fix_sign_lines(t: Tr) -> list[bytes]:
+    """JSON-in-string components as older worlds and command blocks write them, noncompact on purpose."""
+    inner = '{ "text" : "%s", "font" : "example:font", "color" : "\\u0072ed" }' % t("Hover blade")
+    outer = (
+        '{ "text" : "%s" , "hoverEvent" : { "action" : "show_item" , "contents" : '
+        '{ "id" : "minecraft:stone" , "components" : { "minecraft:custom_name" : %s } } } }'
+    ) % (t("Outer sign"), json.dumps(inner))
+    legacy_value = (
+        '{ "text" : "%s" , "hoverEvent" : { "action" : "show_entity" , "value" : { "text" : "%s" } } }'
+    ) % (t("Legacy sign"), t("Legacy tooltip"))
+    return [
+        w_string("id", "minecraft:sign"),
+        w_int("x", 8), w_int("y", 64), w_int("z", 1),
+        w_string("Text1", outer),
+        w_string("Text2", legacy_value),
+    ]
+
+
+def review_fix_command_block(t: Tr) -> list[bytes]:
+    inner = '{ "text" : "%s", "font" : "example:font", "color" : "\\u0072ed" }' % t("Cmd hover blade")
+    command = (
+        "tellraw @a {text:'%s',hover_event:{action:show_item,id:'minecraft:stone',"
+        "components:{'minecraft:custom_name':\"%s\"}}}"
+    ) % (t("Cmd outer"), inner.replace("\\", "\\\\").replace('"', '\\"'))
+    return [w_string("id", "minecraft:command_block"), w_int("x", 9), w_int("y", 64), w_int("z", 1), w_string("Command", command)]
+
+
+def review_fix_chunk(t: Tr = lambda text: text) -> bytes:
+    plain_nbt = [
+        w_string("id", "minecraft:sign"),
+        w_int("x", 10), w_int("y", 64), w_int("z", 1),
+        w_compound(
+            "front_text",
+            w_list_of_compounds(
+                "messages",
+                [
+                    [
+                        w_string("type", "text"),
+                        w_string("text", t("Plain visible")),
+                        w_compound("player", w_string("name", "SafeName"), w_string("text", "Not text")),
+                        w_compound("fallback", w_string("text", "Not a component fallback")),
+                    ],
+                    [
+                        w_string("object", "player"),
+                        w_compound(
+                            "player",
+                            w_string("name", "SafeName"),
+                            w_list_of_compounds("properties", [[w_string("text", "Not a property")]]),
+                        ),
+                        w_compound("fallback", w_string("text", t("Glyph fallback"))),
+                    ],
+                    [
+                        w_string("text", t("Plain legacy outer")),
+                        w_compound(
+                            "hoverEvent",
+                            w_string("action", "show_entity"),
+                            w_compound("value", w_string("text", t("Plain legacy value"))),
+                        ),
+                    ],
+                    empty_line(),
+                ],
+            ),
+        ),
+    ]
+    return root(
+        w_int("DataVersion", 4556),
+        w_list_of_compounds("block_entities", [review_fix_sign_lines(t), review_fix_command_block(t), plain_nbt]),
+    )
+
+
+REVIEW_FIX_TEXTS = (
+    "Hover blade", "Outer sign", "Legacy sign", "Legacy tooltip", "Cmd hover blade", "Cmd outer",
+    "Plain visible", "Glyph fallback", "Plain legacy outer", "Plain legacy value",
+)
+REVIEW_FIX_NOT_TEXT = ("Not text", "Not a component fallback", "Not a property", "example:font", "SafeName")
+
+
+def test_review_fixes_world_scan_write_reopen_restore() -> None:
+    class PrefixHandler(TranslatorHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(json.loads(self.rfile.read(length).decode("utf-8"))["messages"][1]["content"])
+            raw = json.dumps(
+                {"choices": [{"message": {"content": json.dumps({k: prefixed(v) for k, v in payload.items()})}}]}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), PrefixHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base_url = "http://%s:%s/v1" % server.server_address[:2]
+    try:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            world = tmp / "world"
+            region_path = world / "region" / "r.0.0.mca"
+            write_region(region_path, {0: (2, review_fix_chunk(), False)})
+            baseline = hashlib.sha256(region_path.read_bytes()).hexdigest()
+
+            scan = WorldTranslator(config_for(world, tmp / "scan.json", base_url, dry_run=True))
+            scan.run()
+            assert set(REVIEW_FIX_TEXTS) == set(scan.candidate_texts), sorted(set(REVIEW_FIX_TEXTS) ^ set(scan.candidate_texts))
+            assert hashlib.sha256(region_path.read_bytes()).hexdigest() == baseline, "a scan must not write"
+
+            report = run_world(world, tmp / "write.json", base_url, dry_run=False)
+            assert report["status"] == "completed", report
+            assert hashlib.sha256(region_path.read_bytes()).hexdigest() != baseline
+            reopened = RegionFile.read(region_path)
+            assert reopened.chunks[0].raw_nbt == review_fix_chunk(prefixed), (
+                "the written chunk equals the same fixture with translated strings: no other byte moved"
+            )
+            for text in REVIEW_FIX_NOT_TEXT:
+                assert prefixed(text).encode() not in reopened.chunks[0].raw_nbt
+
+            BackupSet(world, "latest").restore()
+            restored = hashlib.sha256(region_path.read_bytes()).hexdigest()
+            assert restored == baseline, "restore must return the baseline SHA-256"
+            print(f"comp02_fix_baseline_sha256 {baseline}")
+            print(f"comp02_fix_restored_sha256 {restored}")
+    finally:
+        server.shutdown()
+    record("comp02.fix_world_scan_write_reopen_restore")
+
+
 def run_all(_tmp: Path | None = None) -> list[str]:
     RESULTS.clear()
     test_scan_finds_exactly_the_visible_text()
@@ -564,6 +1053,13 @@ def run_all(_tmp: Path | None = None) -> list[str]:
     test_json_and_snbt_forms_keep_everything_else()
     test_non_text_object_parts_are_never_collected()
     test_world_scan_write_reopen_restore()
+    test_embedded_json_keeps_unchanged_bytes()
+    test_embedded_json_unmappable_edit_falls_back_to_compact()
+    test_snbt_keeps_the_quote_of_the_replaced_string()
+    test_legacy_hover_payloads_are_still_collected()
+    test_legacy_hover_payloads_in_nbt_are_still_collected()
+    test_explicit_type_wins_and_object_payloads_are_not_text()
+    test_review_fixes_world_scan_write_reopen_restore()
     return list(RESULTS)
 
 
