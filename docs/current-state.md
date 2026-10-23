@@ -21,7 +21,7 @@
 - 재개 요청의 최신 후보 제외·직접 번역을 우선 적용하며, 이전 클라이언트가 생략한 필드만 checkpoint로 보충한다. Native 회귀에서 변경 파일1/요청0/최신 번역문을 확인하고 대상4파일 byte-identical 복원했다.
 - Collect → Translate → Write, provider fail-fast/circuit breaker, checkpoint·retry·cancel, 사용량·실패·경고 보고. 취소 뒤 늦게 도착한 응답 사용량도 최종 보고에 합산한다.
 - NBT 원본 바이트 보존, Java modified UTF-8(NUL/CESU-8 emoji), nested component·extra/with/fallback/hover/click/container/text_display/command text 추출.
-- 명령 텍스트: JSON과 Java 1.21.5+ SNBT(`mwt/snbt.py`, 바뀐 문자열만 원래 따옴표로 재기록), 선행 `/` 명령과 문자열 컴포넌트. 해석 불가 명령은 원본 유지 + `command_unparsed` 경고. `EXTRACTOR_VERSION` 4(2026-10-23 COMP-02: object fallback·hover item/entity·separator·mannequin description 추가, 합성 fixture 검증). 서식 토큰은 개수 완전 일치·추가 금지로 검증.
+- 명령 텍스트: JSON과 Java 1.21.5+ SNBT(`mwt/snbt.py`, 바뀐 문자열만 원래 따옴표로 재기록), 선행 `/` 명령과 문자열 컴포넌트. 해석 불가 명령은 원본 유지 + `command_unparsed` 경고. `EXTRACTOR_VERSION` 5(2026-10-23 COMP-02: object fallback·hover item/entity·separator·mannequin description 추가, 검토 후 중첩 JSON은 바뀐 문자열 구간만 고쳐 쓰고 SNBT 따옴표 유지·구형 hover 수집 유지·명시한 component type 우선, 합성 fixture 검증). 서식 토큰은 개수 완전 일치·추가 금지로 검증.
 - 앱 데이터의 검증된 백업, legacy `.pomi-backups` 발견/복원, 복원 직전 recovery snapshot.
 - 번역 후 처음 생성된 `.mcc`의 원래 부재를 백업하고 복원 직전 payload를 recovery에 보존한다. payload→region 순 write/restore, 물리 `.mcc` 변경 파일 집계와 255-sector 경계·중간 write 실패 fixture/native 검증.
 - 기본 credential은 Rust SQLite/AES-256-GCM + 별도 설치별 key 파일. Session과 opt-in OS keychain; 자동 keychain 읽기/import 없음. 2026-10-23부터 앱은 `PomiTranslate/<제공사>` 이름의 항목만, 사람이 요청한 삭제·방식 변경·초기화 때만 지우며 keychain을 쓴 적이 없는 사용자에게는 OS 저장소를 부르지 않는다. 저장된 키 전체는 UI에 반환하지 않는다. Local→Session 전환 시 stale local ciphertext 제거를 atomic metadata transaction으로 처리한다.

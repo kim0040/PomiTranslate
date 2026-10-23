@@ -18,7 +18,7 @@
 | 1.20.5 이후 아이템 components | custom_name/item_name/lore/book 및 nested item 탐색 구현 | 개별 component와 버전별 표현 차이를 별도로 검증 |
 | 1.21.5 이후 직접 NBT component | compound/list 처리 구현 | 직접 NBT 지원과 명령 문자열 SNBT 지원을 구분 |
 | 명령 속 텍스트 | JSON/SNBT parser·span patch와 선행 `/`·문자열 component, 해석 실패 경고 구현(COMP-01) | 합성 fixture/E2E 기록 있음. 실제 게임 버전 생성/로드와 최신 component는 COMP-02/04 |
-| 최신 component fallback | 2026-10-23 COMP-02: 26.1 object component의 text component fallback, show_item/show_entity hover 이름·lore, selector/nbt separator, mannequin description을 수집·기록(합성 fixture 검증; 게임 로드 미확인, `EXTRACTOR_VERSION` 4). 근거는 [COMP-02 기록](history/comp02-component-shapes-2026-10-23.md) | 실제 게임 버전 생성/로드는 COMP-04. 구형 `filtered_pages`·`attribute_modifiers` display·dialog 텍스트는 근거 미확인으로 미구현 |
+| 최신 component fallback | 2026-10-23 COMP-02: 26.1 object component의 text component fallback, show_item/show_entity hover 이름·lore, selector/nbt separator, mannequin description을 수집·기록(합성 fixture 검증; 게임 로드 미확인, `EXTRACTOR_VERSION` 5, 검토 수정 포함). 근거는 [COMP-02 기록](history/comp02-component-shapes-2026-10-23.md) | 실제 게임 버전 생성/로드는 COMP-04. 구형 `filtered_pages`·`attribute_modifiers` display·dialog 텍스트는 근거 미확인으로 미구현 |
 | gzip/zlib/none/LZ4, 외부 .mcc | 처리 코드와 합성 round-trip 기록 있음 | 재구현보다 혼합 압축·대형 외부 청크·장애 복구 증거 보강 |
 | 버전 정보 | level.dat DataVersion 조회; UI는 첫 유효 값 표시. core는 DataVersion으로 미검증/미래 버전을 명시적으로 차단하지 않고 shape로 처리 | 청크별 버전 분포·혼합 여부·unknown 및 근거 표시와 쓰기 허용 정책 추가 |
 | 차원·서버 구조 | vanilla/custom dimension 및 선택한 서버 루트 내부 child world 탐색 | Paper 계열은 서버 루트 선택과 단일 월드 선택을 구분해 검증; 선택 범위 밖 자동 접근 금지 |
