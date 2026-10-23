@@ -1069,7 +1069,7 @@ export const ko = {
   "error.CORE_STATE_UNKNOWN": "번역 코어가 멈췄는지 확인하지 못해 다른 작업을 시작하지 않았습니다. 잠시 뒤 다시 시도하고, 계속되면 앱을 다시 시작해 주세요. 작업이 진행 중이었다면 이후 월드 화면의 ‘중단된 작업’을 확인하세요.",
   "error.CORE_TIMEOUT": "번역 코어가 제때 응답하지 않아 멈췄습니다. 이 요청은 월드 파일을 바꾸지 않았습니다. 다시 시도하고, 계속되면 인터넷 연결과 제공자 설정을 확인해 주세요.",
   "error.CREDENTIAL_ENDPOINT_UNBOUND": "저장된 사용자 지정 제공자 키는 이전 버전이 저장해 아직 서버 주소와 연결되어 있지 않아 전송하지 않습니다. 설정에서 이 주소에 쓸 키를 다시 입력해 주세요. 저장하면 이전 키를 대체합니다.",
-  "error.KEYCHAIN_UNCONFIRMED": "운영체제 키체인에 무엇이 저장되어 있는지 확인하지 못해, 추측하지 않고 해당 항목을 그대로 두었습니다. 다시 시도해 주세요. 계속 확인되지 않으면 시스템의 키체인(macOS 키체인 접근, Windows 자격 증명 관리자, Linux 암호 및 키)을 열어 PomiTranslate 항목을 직접 삭제해 주세요.",
+  "error.KEYCHAIN_UNCONFIRMED": "시스템 키체인의 항목을 삭제하지 못했습니다. 다시 시도해 주세요. 계속 안 되면 시스템의 키체인(macOS 키체인 접근, Windows 자격 증명 관리자, Linux 암호 및 키)을 열어 PomiTranslate 항목을 직접 삭제해 주세요.",
   "error.JOURNAL_WRITE_FAILED": "안전 기록을 쓰지 못해 더 바꾸기 전에 멈췄습니다. 월드 화면의 ‘중단된 작업’에 아무것도 없다면 월드는 바뀌지 않았습니다. 디스크 여유 공간과 폴더 권한을 확인한 뒤 다시 시도해 주세요.",
   "error.RECOVERY_FAILED": "일부 파일을 격리 폴더로 옮기지 못해 더 이상 바꾸지 않았습니다. 디스크 여유 공간과 폴더 권한을 확인한 뒤 다시 시도해 주세요.",
   "error.enterKeyAgain": "키 입력하기",
@@ -1240,14 +1240,6 @@ export const ko = {
   "glossary.import.noFile": "먼저 파일을 골라 주세요.",
   "glossary.unsupported": "이 버전의 번역 코어에서는 용어집을 사용할 수 없습니다. 앱을 최신 버전으로 업데이트해 주세요.",
   "glossary.retry": "다시 불러오기",
-  "keychain.ack.title": "시스템 키체인을 직접 확인해 주세요",
-  "keychain.ack.body": "앱이 시스템 키체인에 만든 항목이 무엇인지 확인하지 못했습니다. 확인하지 못한 항목을 앱이 추측해서 지우지는 않습니다.",
-  "keychain.ack.steps": "시스템의 키체인(Windows 자격 증명 관리자, macOS 키체인 접근, Linux 암호 및 키·Secret Service)을 열어 서비스 이름 PomiTranslate로 검색하고, 보이는 항목을 직접 삭제해 주세요.",
-  "keychain.ack.check": "시스템 키체인에서 PomiTranslate 항목을 직접 삭제했습니다",
-  "keychain.ack.note": "확인해도 앱은 시스템 키체인에서 아무것도 삭제하지 않습니다. 확인되지 않은 항목의 기록만 지워, 이어서 초기화나 키 삭제를 끝낼 수 있게 합니다.",
-  "keychain.ack.confirm": "확인",
-  "keychain.ack.working": "확인 중…",
-  "keychain.ack.failed": "확인을 기록하지 못했습니다. 다시 시도해 주세요.",
   "scan.warn.glossary_truncated": "한 번에 보낼 수 있는 용어는 80개라, 넘는 용어는 일부 묶음에 적용하지 않았습니다.",
 } as const;
 

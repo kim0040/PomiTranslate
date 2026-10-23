@@ -379,3 +379,26 @@ describe('review drafts and backups talk to the core', () => {
     expect(seen).toContain('review.draft.clear');
   });
 });
+
+describe('a system keychain entry that could not be deleted', () => {
+  it('deleting a key answers KEYCHAIN_UNCONFIRMED with the try-again-or-remove-it text and asks nothing else', async () => {
+    const seen: string[] = [];
+    route((request) => {
+      seen.push(request.type);
+      throw new BackendError('x', 'KEYCHAIN_UNCONFIRMED');
+    });
+    const app = new AppState();
+    expect(await app.deleteApiKey()).toBe(false);
+    expect(app.banner?.message).toBe(en['error.KEYCHAIN_UNCONFIRMED']);
+    expect(en['error.KEYCHAIN_UNCONFIRMED']).toContain('PomiTranslate');
+    expect(seen).toEqual(['credentials.delete']);
+  });
+
+  it('a reset that cannot delete the entry says the same and goes no further', async () => {
+    route(() => ({}), { native_reset: () => ({ keysDeleted: false, keysPartiallyDeleted: false, reportsCleared: true, errors: ['KEYCHAIN_UNCONFIRMED'] }) });
+    const app = new AppState();
+    expect(await app.resetApp(true)).toBe(false);
+    expect(app.resetShortfallLines(app.resetShortfall!)).toContain(en['error.KEYCHAIN_UNCONFIRMED']);
+    expect(invokeMock).not.toHaveBeenCalledWith('sidecar_request', expect.anything());
+  });
+});

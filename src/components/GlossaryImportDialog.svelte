@@ -94,9 +94,6 @@
         {#if result.skippedCount > result.skipped.length}<p class="muted">{t('glossary.import.skippedMore', { shown: formatNumber(result.skipped.length, app.locale) })}</p>{/if}
       </section>
     {/if}
-    {#snippet actions()}
-      <button type="button" class="btn btn-primary" data-autofocus onclick={onClose}>{t('common.close')}</button>
-    {/snippet}
   {:else}
     <p>{t('glossary.import.help')}</p>
     <div class="pick">
@@ -110,11 +107,16 @@
       <label class="check"><input type="radio" name="glossary-import-mode" value="replace" bind:group={mode} /><span>{t('glossary.import.replace')}</span></label>
     </fieldset>
     {#if error}<p class="problem" role="alert">{error}</p>{/if}
-    {#snippet actions()}
+  {/if}
+  <!-- The snippet sits at the top level of the dialog's content, or the dialog would not receive it. -->
+  {#snippet actions()}
+    {#if result}
+      <button type="button" class="btn btn-primary" data-autofocus onclick={onClose}>{t('common.close')}</button>
+    {:else}
       <button type="button" class="btn btn-quiet" disabled={working} onclick={onClose}>{t('common.cancel')}</button>
       <button type="button" class="btn btn-primary" data-autofocus disabled={working || !text} onclick={run}>{t('glossary.import.run')}</button>
-    {/snippet}
-  {/if}
+    {/if}
+  {/snippet}
 </Dialog>
 
 {#if confirmReplace}

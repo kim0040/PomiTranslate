@@ -10,7 +10,6 @@ import {
   diagnosticsSnapshot,
   fromShellError,
   nativeReset,
-  acknowledgeUnknownKeychain,
   resetCredentialStorage,
   onZoomFailed,
   onProgress,
@@ -151,11 +150,6 @@ export class AppState {
   exitPrompt = $state<{ job: boolean; dirty: boolean; reason: 'quit' | 'update'; intent: number; phase: 'ask' | 'waiting' | 'stuck' } | null>(null);
   /** What an incomplete reset left behind; the reset dialog shows it and offers a retry. */
   resetShortfall = $state<ResetShortfall | null>(null);
-  /**
-   * The question "did you remove the app's system-keychain entries yourself?", raised when the shell
-   * could not confirm which entries it made. `source` says what to run again once it is answered.
-   */
-  keychainAck = $state<{ source: 'reset' | 'delete'; clearKeys?: boolean; provider?: string; working: boolean } | null>(null);
   /** Set by the settings or glossary screen (whichever is open): saves its draft and says whether that worked. */
   saveDraft: (() => Promise<boolean>) | null = null;
   /** A move away from settings that waits until the user saves or drops the changes there. */
@@ -688,7 +682,6 @@ export class AppState {
       if (shortfall) {
         this.resetShortfall = shortfall;
         this.banner = { tone: 'error', message: this.resetShortfallLines(shortfall).join(' ') };
-        if (shortfall.keys && shortfall.errors.includes('KEYCHAIN_UNCONFIRMED')) this.keychainAck = { source: 'reset', clearKeys, working: false };
         return false;
       }
       nativeDone = true;
@@ -706,34 +699,6 @@ export class AppState {
       if (this.dialogDepth > 0) this.dialogError = message;
       return false;
     }
-  }
-
-  /**
-   * The person says they removed the entries themselves; the core forgets what it could not account
-   * for (nothing is deleted from the system store) and the step that was waiting on it runs again.
-   */
-  async confirmKeychainAck(): Promise<void> {
-    const ack = this.keychainAck;
-    if (!ack || ack.working) return;
-    this.keychainAck = { ...ack, working: true };
-    try {
-      if (!(await acknowledgeUnknownKeychain())) throw new LocalizedError(t('keychain.ack.failed'));
-    } catch (cause) {
-      this.keychainAck = { ...ack, working: false };
-      this.notify(cause instanceof LocalizedError ? cause.message : this.describe(cause), 'error');
-      return;
-    }
-    this.keychainAck = null;
-    if (ack.source === 'reset') {
-      if (await this.resetApp(ack.clearKeys ?? true)) location.reload();
-    } else {
-      await this.deleteApiKey(ack.provider ?? this.settings.provider);
-    }
-  }
-
-  cancelKeychainAck(): void {
-    if (this.keychainAck?.working) return;
-    this.keychainAck = null;
   }
 
   /** What is left after an incomplete reset, one sentence each, in the display language. */
@@ -1804,12 +1769,6 @@ export class AppState {
       this.notify(t('settings.apiKey.deleted'), 'success');
       return true;
     } catch (cause) {
-      // The system keychain could not be checked, but the app's own copy of the key is gone.
-      if (cause instanceof BackendError && cause.code === 'KEYCHAIN_UNCONFIRMED') {
-        if (provider === this.settings.provider) this.apiKeyStored = false;
-        this.credentialRecovery.delete(provider);
-        this.keychainAck = { source: 'delete', provider, working: false };
-      }
       this.fail(cause);
       return false;
     }

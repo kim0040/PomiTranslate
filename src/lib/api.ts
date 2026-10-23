@@ -513,15 +513,6 @@ export async function nativeReset(deleteKeys: boolean): Promise<NativeResetOutco
   };
 }
 
-/**
- * "I removed the system-keychain entries myself." The core records it and forgets the entries it could
- * not account for; nothing is deleted from the system store. Answers `{acknowledged}`.
- */
-export async function acknowledgeUnknownKeychain(): Promise<boolean> {
-  const answer = await callBackend<{ acknowledged?: boolean }>('credentials.acknowledgeUnknownKeychain');
-  return answer.acknowledged === true;
-}
-
 /** Versions, platform, recent events and the core's last output, with secrets and paths removed. */
 export async function diagnosticsSnapshot(): Promise<string> {
   return shell<string>('diagnostics_snapshot');
