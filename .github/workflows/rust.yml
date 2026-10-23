@@ -1,0 +1,56 @@
+name: rust
+
+# Unit tests of the desktop shell (credential vault, sidecar process handling, provider boundary).
+# A separate workflow so that path filters keep it to shell changes: Python-only changes run `ci`,
+# and shell-only changes do not run the Python suite. The tests never open the OS keychain (they use
+# an in-memory fake) and never start the packaged core.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src-tauri/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rust.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-test:
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: "1.98.1" # keep equal to rust-toolchain.toml
+      # tauri-build checks that the external sidecar binary exists and generate_context! embeds the
+      # frontend folder. Unit tests need neither, so empty placeholders stand in for both.
+      - name: Placeholder frontend and sidecar
+        shell: bash
+        run: |
+          mkdir -p dist
+          [ -f dist/index.html ] || printf '<!doctype html><title>PomiTranslate</title>\n' > dist/index.html
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          extension=""
+          if [ "$RUNNER_OS" = "Windows" ]; then extension=".exe"; fi
+          : > "src-tauri/binaries/pomi-sidecar-${triple}${extension}"
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked

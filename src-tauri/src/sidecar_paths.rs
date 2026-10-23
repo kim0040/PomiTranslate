@@ -24,6 +24,10 @@ pub fn arguments(data_dir: &Path, report_dir: &Path, cancel_path: &Path) -> Vec<
         report_dir.to_string_lossy().into_owned(),
         "--cancel-file".into(),
         cancel_path.to_string_lossy().into_owned(),
+        // The core watches this process: if the app goes away mid-job, the core cancels at its
+        // next safe point instead of running on unattended.
+        "--parent-pid".into(),
+        std::process::id().to_string(),
     ]
 }
 
@@ -51,5 +55,7 @@ mod tests {
             &["--data-dir".to_owned(), core.to_string_lossy().into_owned()]
         );
         assert!(!args.iter().any(|arg| arg.ends_with("/PomiTranslate")));
+        let parent = args.iter().position(|arg| arg == "--parent-pid").unwrap();
+        assert_eq!(args[parent + 1], std::process::id().to_string());
     }
 }

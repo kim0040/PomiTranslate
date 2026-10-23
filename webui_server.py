@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import ipaddress
 import json
 import mimetypes
+import secrets
 import threading
 import uuid
 import webbrowser
@@ -14,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from llm_backends import PROVIDER_SPECS, default_base_url
+from llm_backends import PROVIDER_SPECS, _same_endpoint, default_base_url
 from mc_world_translator import (
     DEFAULT_CONFIG,
     STYLE_PRESETS,
@@ -32,6 +35,8 @@ WEB_DIR = BASE_DIR / "webui"
 CONFIG_BASE_PATH = BASE_DIR / "config.example.toml"
 MAX_EVENTS = 400
 MAX_REQUEST_BODY_BYTES = 1_000_000
+TOKEN_HEADER = "X-Pomi-WebUI-Token"
+TOKEN_PLACEHOLDER = b"__POMI_WEBUI_TOKEN__"
 
 
 def now_iso() -> str:
@@ -185,7 +190,38 @@ def build_payload_config(payload: dict[str, Any]) -> dict[str, Any]:
     if config["runtime"]["resume_from_checkpoint"]:
         config["runtime"]["checkpoint_enabled"] = True
 
-    return normalize_config(merge_nested(DEFAULT_CONFIG, config), CONFIG_BASE_PATH)
+    supplied_key = config["api"]["api_key"]
+    normalized = normalize_config(merge_nested(DEFAULT_CONFIG, config), CONFIG_BASE_PATH)
+    # A key the request did not supply (environment, OS keyring or translate.py defaults) is only
+    # ever sent to the provider's own default endpoint, never to an endpoint the request chose.
+    provider = normalized["api"]["provider"]
+    if not supplied_key and not _same_endpoint(normalized["api"]["base_url"], default_base_url(provider)):
+        normalized["api"]["api_key"] = ""
+    _check_output_paths(normalized)
+    return normalized
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _check_output_paths(config: dict[str, Any]) -> None:
+    """Reports and checkpoints are written only inside the world folder or the app data folder."""
+    from mwt.userdata import user_data_dir
+
+    roots = [user_data_dir()]
+    if config.get("world_dir"):
+        roots.append(Path(config["world_dir"]))
+    for label, value in (
+        ("report_path", config.get("report_path")),
+        ("checkpoint_path", config["runtime"].get("checkpoint_path")),
+    ):
+        if value and not any(_inside(Path(value), root) for root in roots):
+            raise ValueError(f"`{label}` must be inside the world folder or the PomiTranslate data folder.")
 
 
 def summarize_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -500,14 +536,63 @@ class JobManager:
 JOB_MANAGER = JobManager()
 
 
+def allowed_host_headers(host: str, port: int) -> set[str]:
+    """Host header values that name this server. Anything else is a DNS-rebinding attempt."""
+    names = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+    if host and host not in {"0.0.0.0", "::", ""}:
+        try:
+            literal = ipaddress.ip_address(host)
+            names.add(f"[{host}]:{port}" if literal.version == 6 else f"{host}:{port}")
+        except ValueError:
+            names.add(f"{host.lower()}:{port}")
+    return names
+
+
+class WebUIServer(ThreadingHTTPServer):
+    """The legacy UI server with a per-launch token and the Host names it answers to."""
+
+    daemon_threads = True
+
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler] | None = None) -> None:
+        super().__init__(address, handler or AppHandler)
+        self.webui_token = secrets.token_urlsafe(32)
+        self.allowed_hosts = allowed_host_headers(address[0], self.server_address[1])
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "MinecraftWorldTranslatorUI/1.0"
 
     def do_GET(self) -> None:  # noqa: N802
-        self.handle_request(send_body=True)
+        if self.request_allowed(api=urlparse(self.path).path.startswith("/api/")):
+            self.handle_request(send_body=True)
 
     def do_HEAD(self) -> None:  # noqa: N802
-        self.handle_request(send_body=False)
+        if self.request_allowed(api=urlparse(self.path).path.startswith("/api/")):
+            self.handle_request(send_body=False)
+
+    def request_allowed(self, *, api: bool) -> bool:
+        """Refuse other sites and rebinding hosts; API calls must also carry this launch's token."""
+        server = self.server
+        allowed_hosts = getattr(server, "allowed_hosts", set())
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in allowed_hosts:
+            self.send_error_json(HTTPStatus.FORBIDDEN, "Unknown host.")
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.strip().lower() not in {f"http://{name}" for name in allowed_hosts}:
+            self.send_error_json(HTTPStatus.FORBIDDEN, "Cross-origin requests are not allowed.")
+            return False
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if api and fetch_site not in {"", "same-origin", "none"}:
+            self.send_error_json(HTTPStatus.FORBIDDEN, "Cross-site requests are not allowed.")
+            return False
+        if api:
+            supplied = self.headers.get(TOKEN_HEADER) or ""
+            expected = getattr(server, "webui_token", "")
+            if not expected or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+                self.send_error_json(HTTPStatus.FORBIDDEN, "Missing or invalid UI token. Reload the page.")
+                return False
+        return True
 
     def handle_request(self, send_body: bool) -> None:
         parsed = urlparse(self.path)
@@ -556,6 +641,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if not self.request_allowed(api=True):
+            return
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self.send_error_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Request body must be application/json.")
+            return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -660,9 +751,18 @@ class AppHandler(BaseHTTPRequestHandler):
 
         mime_type, _ = mimetypes.guess_type(str(target))
         body = target.read_bytes()
+        is_page = target.name == "index.html"
+        if is_page:
+            body = body.replace(TOKEN_PLACEHOLDER, getattr(self.server, "webui_token", "").encode("ascii"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", f"{mime_type or 'application/octet-stream'}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if is_page:
+            # The page carries the token: never cache it, never let another site frame it.
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if send_body:
             self.wfile.write(body)
@@ -681,7 +781,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), AppHandler)
+    server = WebUIServer((args.host, args.port), AppHandler)
     bound_host, bound_port = server.server_address[:2]
     display_host = args.host
     if bound_host in {"0.0.0.0", "::"}:

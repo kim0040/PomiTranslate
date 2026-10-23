@@ -29,7 +29,8 @@ tauri-plugin-updater = "=2.13.1"
 tauri-plugin-opener = "=2.7.0"
 tauri-plugin-notification = "=2.5.1"
 tauri-plugin-window-state = "=2.5.0"
-tokio = { version = "=1.53.1", features = ["time"] }
+tokio = { version = "=1.53.1", features = ["time", "sync"] }
+shared_child = "=1.1.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.52.0", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Memory", "Win32_System_Threading"] }
