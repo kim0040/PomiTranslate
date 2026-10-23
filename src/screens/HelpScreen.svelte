@@ -36,7 +36,9 @@
     { name: 'OpenRouter', url: 'https://openrouter.ai/settings/keys' },
     { name: 'Google Gemini', url: 'https://aistudio.google.com/app/apikey' },
     { name: 'OpenAI', url: 'https://platform.openai.com/api-keys' },
-    { name: 'Anthropic', url: 'https://console.anthropic.com/settings/keys' }
+    { name: 'Anthropic', url: 'https://console.anthropic.com/settings/keys' },
+    // CometAPI's own key guide and quickstart point to this console page (checked 2026-10-23).
+    { name: 'CometAPI', url: 'https://www.cometapi.com/console/token' }
   ];
 
   let version = $state(APP_VERSION);

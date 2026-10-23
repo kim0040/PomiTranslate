@@ -183,3 +183,13 @@ test.describe('diagnostics export', () => {
     await expect(page.getByText('진단 정보를 파일로 저장했습니다')).toHaveCount(0);
   });
 });
+
+test('help lists a key page for every provider that needs a key, CometAPI included', async ({ page }) => {
+  await boot(page, 'scenario=selected');
+  await page.getByRole('button', { name: '도움말', exact: true }).click();
+  for (const name of ['OpenRouter', 'Google Gemini', 'OpenAI', 'Anthropic', 'CometAPI']) {
+    await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
+  }
+  await page.getByRole('button', { name: 'CometAPI', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pomiOpened ?? [])).toContain('https://www.cometapi.com/console/token');
+});
