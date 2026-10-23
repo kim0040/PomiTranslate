@@ -59,6 +59,7 @@ const PYTHON_TESTS = [
   ['Review drafts survive restarts and stay bounded', 'tests/test_review_drafts.py'],
   ['Glossary store, CSV/TSV import and export, conflicts and damaged files', 'tests/test_glossary.py'],
   ['Glossary terms in a translation: prompt, cache keys, retry and warnings', 'tests/test_glossary_translation.py'],
+  ['Glossary source folding shared with the UI (fixture cases and casefold table)', 'tests/test_glossary_fold.py'],
   ['Source letters left next to a format code are detected', 'tests/test_format_residue.py'],
   ['Backup deletion and pruning respect locks, last copies and open recoveries', 'tests/test_backup_admin.py'],
   ['Journal review fixes: one reconciliation gate, verify-only keep, identity checks', 'tests/test_journal_review.py'],

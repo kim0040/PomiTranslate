@@ -217,6 +217,10 @@
 
   // The glossary, kept in memory for the page and in sessionStorage across reloads.
   // ?glossary=seeded|conflict-once|invalid|busy-once|write-failed|unsupported
+  // ?glossaryHold=save|import: that request waits until the test calls window.__pomiRelease().
+  // ?glossaryExport=save|cancel|fail: the app (not a browser) saves the export through the shell's save dialog,
+  // which writes the file, is dismissed, or cannot write it. Without the parameter the export is a download.
+  if (new URLSearchParams(location.search).has('glossaryExport')) window.isTauri = true;
   const glossaryMode = () => new URLSearchParams(location.search).get('glossary') || '';
   const glossaryStore = () => JSON.parse(sessionStorage.getItem('pomi.fixture.glossary') || '{}');
   const glossaryPut = (store) => sessionStorage.setItem('pomi.fixture.glossary', JSON.stringify(store));
@@ -232,12 +236,29 @@
   };
   const glossaryError = (request, code, message) => ({ v: 1, id: request.id, type: 'response.error', error: { code, message, recoverable: true } });
   const glossaryNewId = () => Array.from({ length: 20 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+  // RFC 4180 cells: quotes may hold separators, doubled quotes and line breaks.
+  function glossaryRows(text, sep) {
+    const rows = []; let row = []; let cell = ''; let quoted = false; let wasQuoted = false;
+    const push = () => { row.push(wasQuoted ? cell : cell.trim()); cell = ''; wasQuoted = false; };
+    const finish = () => { push(); if (row.some((c) => c !== '')) rows.push(row); row = []; };
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) {
+        if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false; } else cell += c;
+      } else if (c === '"' && cell.trim() === '') { quoted = true; wasQuoted = true; cell = ''; }
+      else if (c === sep) push();
+      else if (c === '\n') finish();
+      else if (c === '\r') { if (text[i + 1] === '\n') i++; finish(); }
+      else cell += c;
+    }
+    if (cell !== '' || row.length) finish();
+    return rows;
+  }
   function glossaryParse(text, format) {
     const sep = format === 'tsv' ? '\t' : ',';
-    const rows = text.replace(/^﻿/, '').split(/\r?\n/).filter((line) => line.trim() !== '');
+    const lines = glossaryRows(text.replace(/^﻿/, ''), sep);
     const out = []; const skipped = [];
-    rows.forEach((line, index) => {
-      const cells = line.split(sep).map((cell) => cell.trim().replace(/^"|"$/g, ''));
+    lines.forEach((cells, index) => {
       if (index === 0 && ['source', 'original'].includes((cells[0] || '').toLowerCase())) return;
       const [source = '', target = '', mode = '', note = '', flag = ''] = cells;
       const row = index + 1;
@@ -250,6 +271,9 @@
     });
     return { rows: out, skipped };
   }
+  const glossaryCell = (value) => (/[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+  const glossaryHold = (what) => (new URLSearchParams(location.search).get('glossaryHold') === what
+    ? new Promise((resolve) => { window.__pomiRelease = resolve; }) : null);
 
   async function sidecar(request) {
     const type = request.type;
@@ -441,7 +465,7 @@
       if (type === 'glossary.get') return ok(request, doc);
       if (type === 'glossary.export') {
         const header = 'source,target,mode,note,caseSensitive';
-        const lines = doc.entries.map((item) => [item.source, item.target, item.mode, item.note, String(item.caseSensitive)].join(','));
+        const lines = doc.entries.map((item) => [item.source, item.target, item.mode, item.note, String(item.caseSensitive)].map(glossaryCell).join(','));
         return ok(request, { scope: body.scope, format: body.format, revision: doc.revision, count: doc.entries.length, text: `﻿${[header, ...lines].join('\r\n')}\r\n` });
       }
       // set and import change the list: a stale revision, a refusal or a busy file are scripted per scenario.
@@ -462,12 +486,14 @@
         const entries = body.entries || [];
         if (mode === 'invalid' && entries.length > 1) return glossaryError(request, 'GLOSSARY_INVALID', 'entries[1].target: is longer than 200 characters');
         const saved = entries.map((item) => ({ id: item.id || glossaryNewId(), source: item.source, target: item.target || '', mode: item.mode, caseSensitive: !!item.caseSensitive, note: item.note || '' }));
+        await glossaryHold('save');
         store[key] = { revision: doc.revision + 1, entries: saved };
         glossaryPut(store);
         return ok(request, glossaryDoc(body));
       }
       if (type === 'glossary.import') {
         const parsed = glossaryParse(body.text || '', body.format);
+        await glossaryHold('import');
         if (!parsed.rows.length && body.mode === 'replace') return glossaryError(request, 'GLOSSARY_INVALID', 'text: has no usable rows');
         let added = 0; let updated = 0; let unchanged = 0; let removed = 0;
         const next = body.mode === 'replace' ? [] : [...doc.entries];
@@ -507,6 +533,13 @@
     runCallback(id, data) { callbacks.get(id)?.(data); },
     convertFileSrc(path) { return path; },
     async invoke(command, args = {}) {
+      if (command === 'export_document' && String(args.kind).startsWith('glossary_')) {
+        // The shell writes the exact text itself; nothing is downloaded. A dismissed dialog answers false.
+        (window.__pomiExports ||= []).push({ kind: args.kind, fileName: args.fileName ?? null, document: args.document });
+        const exportMode = new URLSearchParams(location.search).get('glossaryExport');
+        if (exportMode === 'fail') throw { code: 'EXPORT_FAILED', message: 'raw' };
+        return exportMode !== 'cancel';
+      }
       if (command === 'export_document') {
         const filename = args.kind === 'settings' ? 'pomi-settings.json' : args.kind === 'scan_report' ? 'scan-report.json' : 'translate-report.json';
         const url = URL.createObjectURL(new Blob([JSON.stringify(args.document, null, 2)], { type: 'application/json' }));

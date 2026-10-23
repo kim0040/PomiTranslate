@@ -15,7 +15,7 @@
     actions
   }: {
     title: string;
-    /** Escape (and the X, unless hidden) closes the dialog. */
+    /** Escape (and the X, unless hidden) closes the dialog; when false the X, if shown, is disabled. */
     dismissible?: boolean;
     /**
      * The X in the corner. A dialog that asks a question with its own buttons ("Keep" / "Discard")
@@ -60,7 +60,7 @@
   <div class="head">
     <h2 id={titleId}>{title}</h2>
     {#if showClose}
-      <button type="button" class="btn btn-quiet btn-icon btn-sm close" aria-label={t('common.close')} onclick={onClose}>
+      <button type="button" class="btn btn-quiet btn-icon btn-sm close" aria-label={t('common.close')} disabled={!dismissible} onclick={onClose}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
       </button>
     {/if}

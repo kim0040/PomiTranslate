@@ -3,7 +3,7 @@
   import { BackendError, type GlossaryImportResult, type GlossaryScope } from '../lib/api';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
-  import { formatFromName, importGlossary, isSkipReason, MAX_IMPORT_CHARS } from '../lib/glossary';
+  import { charCount, formatFromName, importGlossary, isSkipReason, MAX_IMPORT_CHARS } from '../lib/glossary';
   import Dialog from './Dialog.svelte';
 
   let { scope, worldDir, revision, entryCount, onDone, onStale, onClose }: {
@@ -25,16 +25,19 @@
   let error = $state('');
   let confirmReplace = $state(false);
   let result = $state<GlossaryImportResult | null>(null);
+  // The page is told once, however the request ends; the dialog cannot be closed while it runs.
+  let delivered = false;
 
   async function pick(event: Event): Promise<void> {
     const file = (event.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
     error = '';
     try {
-      // Up to four bytes a character; the core's own limit is on characters.
+      // Up to four bytes a character: the size only bounds what is read. The core's own limit is on
+      // characters (Unicode code points), so that is what the text is measured in.
       if (file.size > MAX_IMPORT_CHARS * 4) throw new BackendError('large', 'TOO_BIG');
       const content = await file.text();
-      if (content.length > MAX_IMPORT_CHARS) throw new BackendError('large', 'TOO_BIG');
+      if (charCount(content) > MAX_IMPORT_CHARS) throw new BackendError('large', 'TOO_BIG');
       text = content;
       fileName = file.name;
       format = formatFromName(file.name);
@@ -56,11 +59,15 @@
 
   async function go(): Promise<void> {
     confirmReplace = false;
+    if (working) return;
     working = true;
     error = '';
     try {
       result = await importGlossary(scope, worldDir, revision, text, format, mode);
-      onDone(result);
+      if (!delivered) {
+        delivered = true;
+        onDone(result);
+      }
     } catch (cause) {
       if (cause instanceof BackendError && cause.code === 'GLOSSARY_INVALID') error = t('glossary.import.invalid');
       else {
@@ -75,7 +82,8 @@
   const reasonText = (reason: string): string => t((isSkipReason(reason) ? `glossary.skip.${reason}` : 'glossary.skip.unknown') as MessageKey);
 </script>
 
-<Dialog title={result ? t('glossary.import.resultTitle') : t('glossary.import.title')} size={result?.skippedCount ? 'wide' : 'normal'} {onClose}>
+<!-- While the request runs the dialog stays: closing it would hide an import that may still be stored. -->
+<Dialog title={result ? t('glossary.import.resultTitle') : t('glossary.import.title')} size={result?.skippedCount ? 'wide' : 'normal'} showClose dismissible={!working} {onClose}>
   {#if result}
     <dl class="counts">
       <div><dt>{t('glossary.import.added')}</dt><dd class="num">{formatNumber(result.added, app.locale)}</dd></div>

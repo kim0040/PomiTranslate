@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 
@@ -6,7 +7,7 @@ import AxeBuilder from '@axe-core/playwright';
 // and the quality warnings of a run. The core is the fixture in tests/frontend/tauri-fixture-init.js.
 async function boot(page: Page, query: string) {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
-  // The shell has no save dialog for the glossary yet, so an export goes to the clipboard.
+  // The clipboard is only the fallback of an export the shell could not save.
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (text: string) => { (window as any).__clip = text; } }, configurable: true });
   });
@@ -218,6 +219,61 @@ test.describe('the glossary page', () => {
     await expect(source(page, 1)).toHaveValue('Elder Mira');
   });
 
+  test('while a save is on its way nothing can be edited, and the saved list is what was sent', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryHold=save');
+    await openGlossary(page);
+    await source(page, 1).fill('Elder Mira II');
+    await saveBar(page).getByRole('button', { name: '저장', exact: true }).click();
+    await expect.poll(async () => (await asked(page, 'glossary.set')).length).toBe(1);
+    const list = page.getByRole('list', { name: '용어집 항목' });
+    await expect(list).toHaveAttribute('aria-busy', 'true');
+    for (const n of [1, 2]) {
+      await expect(source(page, n)).toHaveAttribute('readonly', '');
+      await expect(target(page, n)).toHaveAttribute('readonly', '');
+      await expect(page.getByRole('textbox', { name: `메모, 항목 ${n}`, exact: true })).toHaveAttribute('readonly', '');
+      await expect(page.getByRole('combobox', { name: `처리 방법, 항목 ${n}` })).toBeDisabled();
+      await expect(page.getByRole('checkbox', { name: `대소문자 구분, 항목 ${n}` })).toBeDisabled();
+      await expect(page.getByRole('button', { name: `항목 ${n} 삭제` })).toBeDisabled();
+    }
+    await expect(page.locator('#glossary-add')).toBeDisabled();
+    for (const name of ['가져오기', '내보내기']) await expect(page.getByRole('button', { name, exact: true }).first()).toBeDisabled();
+    await expect(page.getByRole('button', { name: '이 월드', exact: true })).toBeDisabled();
+    // Typing and Enter go nowhere.
+    await source(page, 1).focus();
+    await page.keyboard.type('LOST');
+    await page.keyboard.press('Enter');
+    await expect(source(page, 1)).toHaveValue('Elder Mira II');
+    await expect(page.getByRole('textbox', { name: /^원문, 항목/ })).toHaveCount(2);
+    await page.evaluate(() => (window as any).__pomiRelease());
+    await expect(toasts(page)).toContainText('용어집을 저장했습니다');
+    await expect(saveBar(page)).toHaveCount(0);
+    await expect(source(page, 1)).toHaveValue('Elder Mira II');
+    await expect(source(page, 1)).not.toHaveAttribute('readonly', '');
+    await expect(list).not.toHaveAttribute('aria-busy', 'true');
+    await source(page, 1).fill('Again');
+    await expect(saveBar(page)).toBeVisible();
+  });
+
+  test('the duplicate check follows the core: ß is ss, and two case-sensitive spellings may coexist', async ({ page }) => {
+    await boot(page, 'scenario=selected');
+    await openGlossary(page);
+    await page.getByRole('button', { name: '첫 항목 추가' }).click();
+    await source(page, 1).fill('Straße');
+    await target(page, 1).fill('거리');
+    await source(page, 1).press('Enter');
+    await source(page, 2).fill('STRASSE');
+    await target(page, 2).fill('도로');
+    await saveBar(page).getByRole('button', { name: '저장', exact: true }).click();
+    await expect(page.getByText('같은 원문이 이미 있습니다.')).toBeVisible();
+    await expect(source(page, 2)).toHaveAttribute('aria-invalid', 'true');
+    expect((await asked(page, 'glossary.set')).length).toBe(0);
+    // Both case-sensitive: the spellings differ, so both may stay.
+    await page.getByRole('checkbox', { name: '대소문자 구분, 항목 1' }).check();
+    await page.getByRole('checkbox', { name: '대소문자 구분, 항목 2' }).check();
+    await saveBar(page).getByRole('button', { name: '저장', exact: true }).click();
+    await expect(toasts(page)).toContainText('용어집을 저장했습니다');
+  });
+
   test('an older core without a glossary says so', async ({ page }) => {
     await boot(page, 'scenario=selected&glossary=unsupported');
     await openGlossary(page);
@@ -287,16 +343,142 @@ test.describe('importing and exporting', () => {
     await expect(result.locator('.counts div').filter({ hasText: '삭제' })).toContainText('2');
   });
 
-  test('export goes to the clipboard in the app, without the byte-order mark, and says so', async ({ page }) => {
-    await boot(page, 'scenario=selected&glossary=seeded');
+  const exported = (page: Page): Promise<{ kind: string; fileName: string | null; document: string }[]> =>
+    page.evaluate(() => (window as any).__pomiExports ?? []);
+
+  test('export opens the save dialog with the exact text, and the toast explains the protective apostrophe', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryExport=save');
     await openGlossary(page);
     await page.getByRole('button', { name: '내보내기' }).click();
+    await expect(toasts(page)).toContainText('용어집 2개를 내보냈습니다');
+    await expect(toasts(page)).toContainText("맨 앞에 ' 가 붙으며");
+    const [saved] = await exported(page);
+    expect(saved).toMatchObject({ kind: 'glossary_csv', fileName: 'pomi-glossary-global.csv' });
+    // The text is handed over as the core wrote it, byte-order mark included.
+    expect(saved.document.charCodeAt(0)).toBe(0xfeff);
+    expect(saved.document).toContain('source,target,mode,note,caseSensitive');
+    expect(saved.document).toContain('Elder Mira,,keep,village elder,false');
+    expect(await page.evaluate(() => (window as any).__clip)).toBeUndefined();
+    expect((await asked(page, 'glossary.export'))[0].payload).toMatchObject({ scope: 'global', format: 'csv' });
+  });
+
+  test('in a browser the export is a download of the same text', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded');
+    await openGlossary(page);
+    const downloading = page.waitForEvent('download');
+    await page.getByRole('button', { name: '내보내기' }).click();
+    const download = await downloading;
+    expect(download.suggestedFilename()).toBe('pomi-glossary-global.csv');
+    const bytes = await readFile((await download.path())!);
+    expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    expect(bytes.toString('utf8')).toContain('Elder Mira,,keep,village elder,false');
+    await expect(toasts(page)).toContainText('용어집 2개를 내보냈습니다');
+    expect(await exported(page)).toEqual([]);
+  });
+
+  test('the file of a world list is named after the world scope', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryExport=save');
+    await openGlossary(page);
+    await page.getByRole('button', { name: '이 월드', exact: true }).click();
+    await page.getByRole('button', { name: '첫 항목 추가' }).click();
+    await source(page, 1).fill('Gate');
+    await target(page, 1).fill('문');
+    await saveBar(page).getByRole('button', { name: '저장', exact: true }).click();
+    await expect(toasts(page)).toContainText('용어집을 저장했습니다');
+    await page.getByRole('button', { name: '내보내기' }).click();
+    await expect.poll(async () => (await exported(page)).length).toBe(1);
+    expect((await exported(page))[0].fileName).toBe('pomi-glossary-world.csv');
+  });
+
+  test('a dismissed save dialog says nothing', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryExport=cancel');
+    await openGlossary(page);
+    await page.getByRole('button', { name: '내보내기' }).click();
+    await expect.poll(async () => (await exported(page)).length).toBe(1);
+    await expect(page.getByRole('button', { name: '내보내기' })).toBeEnabled();
+    await expect(toasts(page).locator('.toast')).toHaveCount(0);
+    await expect(page.getByRole('alert').filter({ hasText: '용어집을 내보내지 못했습니다' })).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__clip)).toBeUndefined();
+  });
+
+  test('when the file cannot be saved the clipboard copy is offered instead', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryExport=fail');
+    await openGlossary(page);
+    await page.getByRole('button', { name: '내보내기' }).click();
+    const failure = page.getByRole('alert').filter({ hasText: '용어집을 내보내지 못했습니다' });
+    await expect(failure).toContainText('파일을 저장하지 못했습니다');
+    await axe(page);
+    await failure.getByRole('button', { name: '클립보드에 복사' }).click();
     await expect(toasts(page)).toContainText('용어집 2개를 클립보드에 복사했습니다');
+    await expect(failure).toHaveCount(0);
     const clip = await page.evaluate(() => (window as any).__clip as string);
     expect(clip.charCodeAt(0)).not.toBe(0xfeff);
-    expect(clip).toContain('source,target,mode,note,caseSensitive');
     expect(clip).toContain('Elder Mira,,keep,village elder,false');
-    expect((await asked(page, 'glossary.export'))[0].payload).toMatchObject({ scope: 'global', format: 'csv' });
+  });
+
+  test('a note with line breaks survives import, an edit, a save and an export exactly', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryExport=save');
+    await openGlossary(page);
+    await page.getByRole('button', { name: '가져오기' }).first().click();
+    const dialog = page.getByRole('dialog', { name: '용어집 가져오기' });
+    await dialog.locator('input[type="file"]').setInputFiles(csv('source,target,mode,note,caseSensitive\nGate,문,translate,"line one\nline two\tthree",false\n'));
+    await dialog.getByRole('button', { name: '가져오기' }).click();
+    await page.getByRole('dialog', { name: '가져오기 결과' }).getByRole('button', { name: '닫기', exact: true }).last().click();
+    await expect(page.getByText('3 / 2,000개')).toBeVisible();
+
+    const note = page.getByRole('textbox', { name: '메모, 항목 3', exact: true });
+    await expect(note).toHaveValue('line one\nline two\tthree');
+    // The field is as tall as its two lines, not the height of a single-line field.
+    const oneLine = (await page.getByRole('textbox', { name: '메모, 항목 1', exact: true }).boundingBox())!.height;
+    expect((await note.boundingBox())!.height).toBeGreaterThan(oneLine + 10);
+    // Enter in a note is a line break; it does not add a row.
+    await note.click();
+    await note.press('Control+End');
+    await note.press('Enter');
+    await note.pressSequentially('line four');
+    await expect(page.getByRole('textbox', { name: /^원문, 항목/ })).toHaveCount(3);
+    await expect(note).toHaveValue('line one\nline two\tthree\nline four');
+    await saveBar(page).getByRole('button', { name: '저장', exact: true }).click();
+    await expect(toasts(page)).toContainText('용어집을 저장했습니다');
+    const [set] = await asked(page, 'glossary.set');
+    expect(set.payload.entries[2]).toMatchObject({ source: 'Gate', note: 'line one\nline two\tthree\nline four' });
+    await expect(note).toHaveValue('line one\nline two\tthree\nline four');
+
+    await page.getByRole('button', { name: '내보내기' }).click();
+    await expect.poll(async () => (await exported(page)).length).toBe(1);
+    expect((await exported(page))[0].document).toContain('Gate,문,translate,"line one\nline two\tthree\nline four",false');
+  });
+
+  test('Enter still adds a row from the source and translation fields only', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded');
+    await openGlossary(page);
+    await target(page, 2).press('Enter');
+    await expect(source(page, 3)).toBeFocused();
+    await expect(page.getByRole('textbox', { name: /^원문, 항목/ })).toHaveCount(3);
+    await page.getByRole('textbox', { name: '메모, 항목 3', exact: true }).press('Enter');
+    await expect(page.getByRole('textbox', { name: /^원문, 항목/ })).toHaveCount(3);
+  });
+
+  test('importing does not close while the request runs, and the result is shown once it is done', async ({ page }) => {
+    await boot(page, 'scenario=selected&glossary=seeded&glossaryHold=import');
+    await openGlossary(page);
+    await page.getByRole('button', { name: '가져오기' }).first().click();
+    const dialog = page.getByRole('dialog', { name: '용어집 가져오기' });
+    await dialog.locator('input[type="file"]').setInputFiles(csv('source,target,mode,note\nGate,문,translate,\n'));
+    await dialog.getByRole('button', { name: '가져오기' }).click();
+    await expect.poll(async () => (await asked(page, 'glossary.import')).length).toBe(1);
+    // The corner button is disabled, and Escape and a click on the backdrop leave the dialog open.
+    await expect(dialog.getByRole('button', { name: '닫기' })).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await page.mouse.click(5, 5);
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => (window as any).__pomiRelease());
+    const result = page.getByRole('dialog', { name: '가져오기 결과' });
+    await expect(result).toBeVisible();
+    await expect(toasts(page)).toContainText('가져왔습니다. 추가 1');
+    expect((await asked(page, 'glossary.import')).length).toBe(1);
+    await result.getByRole('button', { name: '닫기', exact: true }).last().click();
+    await expect(page.getByText('3 / 2,000개')).toBeVisible();
   });
 });
 

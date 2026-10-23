@@ -5,10 +5,13 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock, isTauri: () => true
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 
 import { BackendError, type GlossaryEntry } from '../../src/lib/api';
+import { exportDocument } from '../../src/lib/document-export';
 import {
-  addGlossaryEntry, blankDraft, entryForSample, filterDrafts, formatFromName, fromDraft, GLOSSARY_LIMIT, importGlossary, parseInvalidPath, splitEntryId,
-  savableDrafts, saveGlossary, seedSource, shownWarningSamples, snapshot, toDraft, validateDrafts, warningRows, warningTotal
+  addGlossaryEntry, blankDraft, charCount, entryForSample, exportFileName, filterDrafts, foldKey, formatFromName, fromDraft, GLOSSARY_LIMIT, importGlossary,
+  MAX_NOTE_CHARS, MAX_SOURCE_CHARS, MAX_TARGET_CHARS, parseInvalidPath, splitEntryId, savableDrafts, saveGlossary, seedSource, shownWarningSamples, snapshot,
+  toDraft, truncateChars, validateDrafts, warningRows, warningTotal
 } from '../../src/lib/glossary';
+import foldFixture from '../fixtures/glossary_fold_cases.json';
 import { emptyProgress, reduceProgress } from '../../src/lib/workflow';
 import { en } from '../../src/lib/i18n/en';
 import { ja } from '../../src/lib/i18n/ja';
@@ -245,5 +248,99 @@ describe('texts', () => {
 
   it('the empty state explains a glossary with the Elder Mira example', () => {
     for (const locale of ['ko', 'en', 'ja'] as const) expect(translate(locale, 'glossary.empty.body')).toContain('Elder Mira');
+  });
+});
+
+// The same fixture runs against the core in tests/test_glossary_fold.py, so the two foldings cannot drift apart.
+describe('the duplicate check mirrors the core', () => {
+  it.each(foldFixture.foldCases)('folds $text like str.casefold()', ({ text, folded }) => {
+    expect(foldKey(text)).toBe(folded);
+  });
+
+  it.each(foldFixture.clashCases)('$name', ({ entries, clashAt }) => {
+    const rows = entries.map((item) => blankDraft({ source: item.source, caseSensitive: item.caseSensitive, mode: 'keep' }));
+    const duplicate = validateDrafts(rows).find((problem) => problem.reason === 'duplicate');
+    expect(duplicate ? rows.findIndex((row) => row.key === duplicate.key) : null).toBe(clashAt);
+  });
+
+  it('adding from the review finds a rule the core would call a duplicate, in either case mode', async () => {
+    const stored = entry({ source: 'Straße', mode: 'keep', caseSensitive: false });
+    sidecar([{ payload: { scope: 'global', revision: 1, updatedAt: null, entries: [stored] } }]);
+    expect((await addGlossaryEntry('global', '', blankDraft({ source: 'STRASSE', mode: 'keep', caseSensitive: true }))).status).toBe('exists');
+    // Two case-sensitive spellings of one word may live together.
+    const sensitive = entry({ source: 'Mira', mode: 'keep', caseSensitive: true });
+    const asked = sidecar([
+      { payload: { scope: 'global', revision: 1, updatedAt: null, entries: [sensitive] } },
+      { payload: { scope: 'global', revision: 2, updatedAt: null, entries: [sensitive, entry({ source: 'mira', caseSensitive: true })] } }
+    ]);
+    expect((await addGlossaryEntry('global', '', blankDraft({ source: 'mira', mode: 'keep', caseSensitive: true }))).status).toBe('added');
+    expect(asked.map((item) => item.type)).toEqual(['glossary.get', 'glossary.set']);
+  });
+});
+
+describe('lengths are counted in Unicode characters, like the core', () => {
+  const emoji = (count: number) => '😀'.repeat(count);
+
+  it('counts and cuts by code point', () => {
+    expect(charCount('')).toBe(0);
+    expect(charCount('a')).toBe(1);
+    expect(charCount(emoji(3))).toBe(3);
+    expect(charCount(`a${emoji(2)}한`)).toBe(4);
+    expect(truncateChars(emoji(5), 3)).toBe(emoji(3));
+    expect(truncateChars('abc', 10)).toBe('abc');
+  });
+
+  it('110 emoji fit in a source, a translation and a note; the limit is on characters', () => {
+    expect(emoji(110).length).toBe(220);
+    expect(validateDrafts([blankDraft({ source: emoji(110), target: emoji(110), note: emoji(110) })])).toEqual([]);
+    expect(validateDrafts([blankDraft({ source: emoji(MAX_SOURCE_CHARS), target: emoji(MAX_TARGET_CHARS), note: emoji(MAX_NOTE_CHARS) })])).toEqual([]);
+    const over = blankDraft({ source: emoji(MAX_SOURCE_CHARS + 1), target: emoji(MAX_TARGET_CHARS + 1), note: emoji(MAX_NOTE_CHARS + 1) });
+    expect(validateDrafts([over]).map((item) => `${item.field}:${item.reason}`)).toEqual(['source:tooLong', 'target:tooLong', 'note:tooLong']);
+  });
+
+  it('a source seeded from a long sentence is never cut inside a surrogate pair', () => {
+    for (const lead of ['', 'a', 'ab', 'abc']) {
+      const seeded = seedSource(`${lead}${emoji(300)}`);
+      expect(charCount(seeded)).toBe(MAX_SOURCE_CHARS);
+      expect(seeded).toBe(`${lead}${emoji(MAX_SOURCE_CHARS - lead.length)}`);
+      // A lone surrogate is what the core refuses as invalid Unicode.
+      expect(seeded.isWellFormed()).toBe(true);
+      expect(validateDrafts([blankDraft({ source: seeded, mode: 'keep' })])).toEqual([]);
+    }
+    expect(seedSource('a'.repeat(250))).toHaveLength(MAX_SOURCE_CHARS);
+  });
+});
+
+describe('multiline notes', () => {
+  it('keep their line breaks and tabs, trimmed only at the ends', () => {
+    const note = 'line one\nline two\tthree\n\nfour';
+    const row = toDraft(entry({ note: `\n${note}\n`, mode: 'keep' }));
+    expect(validateDrafts([row])).toEqual([]);
+    expect(fromDraft(row).note).toBe(note);
+    expect(validateDrafts([blankDraft({ source: 'x', mode: 'keep', note: 'bell\u0007' })]).map((item) => item.reason)).toEqual(['control']);
+  });
+});
+
+describe('saving an export as a file', () => {
+  it('names the file after the list, in the form the shell accepts', () => {
+    expect(exportFileName('global', 'csv')).toBe('pomi-glossary-global.csv');
+    expect(exportFileName('world', 'tsv')).toBe('pomi-glossary-world.tsv');
+    for (const name of [exportFileName('global', 'csv'), exportFileName('world', 'csv'), exportFileName('world', 'tsv')]) {
+      expect(name).toMatch(/^pomi-glossary-(global|world)\.(csv|tsv)$/);
+    }
+  });
+
+  it('hands the exact text and the file name to the shell', async () => {
+    invokeMock.mockResolvedValue(true);
+    const text = '﻿source,target,mode,note,caseSensitive\r\n"a,b",,keep,"two\nlines",false\r\n';
+    await expect(exportDocument('glossary_csv', text, 'pomi-glossary-world.csv')).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('export_document', { kind: 'glossary_csv', document: text, fileName: 'pomi-glossary-world.csv' });
+    invokeMock.mockResolvedValue(false);
+    await expect(exportDocument('glossary_csv', text, 'pomi-glossary-global.csv')).resolves.toBe(false);
+  });
+
+  it('a refusal from the shell reaches the page as an error with its code', async () => {
+    invokeMock.mockRejectedValue({ code: 'EXPORT_FAILED', message: 'raw' });
+    await expect(exportDocument('glossary_csv', 'x', 'pomi-glossary-global.csv')).rejects.toMatchObject({ code: 'EXPORT_FAILED' });
   });
 });

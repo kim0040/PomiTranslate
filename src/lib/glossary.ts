@@ -9,6 +9,7 @@ import {
   type GlossaryScope,
   type TranslationWarningSample
 } from './api';
+import casefoldTable from './glossary-casefold.json';
 
 /** The limits the core enforces (mwt/glossary.py); checking them here only saves a round trip. */
 export const GLOSSARY_LIMIT = 2000;
@@ -17,6 +18,51 @@ export const MAX_TARGET_CHARS = 200;
 export const MAX_NOTE_CHARS = 300;
 /** The core refuses a longer import text. */
 export const MAX_IMPORT_CHARS = 2 * 1024 * 1024;
+
+// Every limit above counts Unicode characters (Python `len`), not UTF-16 units: one emoji is one.
+/** The number of Unicode code points in `text`. */
+export function charCount(text: string): number {
+  // Up to two units per character, so a short string needs no walk.
+  if (text.length <= 1) return text.length;
+  let count = 0;
+  for (const _ of text) count += 1;
+  return count;
+}
+
+/** The first `max` Unicode characters of `text`; it never cuts a surrogate pair in two. */
+export function truncateChars(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return Array.from(text).slice(0, max).join('');
+}
+
+// The characters whose full case folding is not their lowercase form (ß -> ss, ς -> σ, ligatures, ...).
+// Generated from Python's `str.casefold()`; tests/test_glossary_fold.py checks the table against it.
+const CASEFOLD_EXTRA = new Map<string, string>(Object.entries(casefoldTable.map));
+
+/**
+ * The folded form of a source, the same as the core's `fold_key` (`str.casefold()`): lowercase, then the
+ * characters where folding differs from lowercase. Lowercasing first also covers the rest of Unicode;
+ * a final sigma comes out as ς and the table turns it into σ like Python.
+ */
+export function foldKey(text: string): string {
+  let folded = '';
+  for (const char of text.toLowerCase()) folded += CASEFOLD_EXTRA.get(char) ?? char;
+  return folded;
+}
+
+type Named = { source: string; caseSensitive: boolean };
+
+/**
+ * Whether two entries cannot both be in one list, as the core decides it: equal folded sources, unless
+ * both are case-sensitive and differ in spelling ("Mira" and "mira"). An entry that ignores case claims
+ * every spelling. The sources are compared as they are saved, trimmed. The core stays the judge; this
+ * only saves a round trip.
+ */
+export function sourcesClash(a: Named, b: Named): boolean {
+  const left = a.source.trim();
+  const right = b.source.trim();
+  return foldKey(left) === foldKey(right) && !(a.caseSensitive && b.caseSensitive && left !== right);
+}
 
 export type FieldName = 'source' | 'target' | 'note';
 export type ProblemReason = 'required' | 'tooLong' | 'control' | 'duplicate' | 'targetRequired';
@@ -64,31 +110,29 @@ const CONTROL = /[\p{Cc}\p{Zl}\p{Zp}]/u;
 // A note may hold line breaks and tabs; any other control character is refused.
 const NOTE_CONTROL = /[^\P{Cc}\n\t]|[\p{Zl}\p{Zp}]/u;
 
-function dedupeKey(draft: DraftEntry): string {
-  const source = draft.source.trim();
-  return draft.caseSensitive ? source : source.toLocaleLowerCase('en-US');
-}
-
 /** Every rule the core checks, per field, in row order. */
 export function validateDrafts(drafts: DraftEntry[]): EntryProblem[] {
   const problems: EntryProblem[] = [];
-  const seen = new Map<string, string>();
+  // Sources taken so far, by folded form: only entries sharing one can clash.
+  const seen = new Map<string, Named[]>();
   for (const draft of savableDrafts(drafts)) {
     const source = draft.source.trim();
     const target = draft.mode === 'keep' ? '' : draft.target.trim();
     const note = draft.note.trim();
     if (!source) problems.push({ key: draft.key, field: 'source', reason: 'required' });
-    else if (source.length > MAX_SOURCE_CHARS) problems.push({ key: draft.key, field: 'source', reason: 'tooLong' });
+    else if (charCount(source) > MAX_SOURCE_CHARS) problems.push({ key: draft.key, field: 'source', reason: 'tooLong' });
     else if (CONTROL.test(source)) problems.push({ key: draft.key, field: 'source', reason: 'control' });
     else {
-      const id = dedupeKey(draft);
-      if (seen.has(id)) problems.push({ key: draft.key, field: 'source', reason: 'duplicate' });
-      else seen.set(id, draft.key);
+      const name = { source, caseSensitive: draft.caseSensitive };
+      const folded = foldKey(source);
+      const taken = seen.get(folded) ?? [];
+      if (taken.some((other) => sourcesClash(other, name))) problems.push({ key: draft.key, field: 'source', reason: 'duplicate' });
+      else seen.set(folded, [...taken, name]);
     }
     if (draft.mode === 'translate' && !target) problems.push({ key: draft.key, field: 'target', reason: 'targetRequired' });
-    else if (target.length > MAX_TARGET_CHARS) problems.push({ key: draft.key, field: 'target', reason: 'tooLong' });
+    else if (charCount(target) > MAX_TARGET_CHARS) problems.push({ key: draft.key, field: 'target', reason: 'tooLong' });
     else if (CONTROL.test(target)) problems.push({ key: draft.key, field: 'target', reason: 'control' });
-    if (note.length > MAX_NOTE_CHARS) problems.push({ key: draft.key, field: 'note', reason: 'tooLong' });
+    if (charCount(note) > MAX_NOTE_CHARS) problems.push({ key: draft.key, field: 'note', reason: 'tooLong' });
     else if (NOTE_CONTROL.test(note)) problems.push({ key: draft.key, field: 'note', reason: 'control' });
   }
   return problems;
@@ -257,9 +301,7 @@ export type AddResult = { status: 'added' | 'exists'; existing?: GlossaryEntry; 
 export async function addGlossaryEntry(scope: GlossaryScope, worldDir: string, entry: DraftEntry): Promise<AddResult> {
   for (let attempt = 0; ; attempt += 1) {
     const document = await loadGlossary(scope, worldDir);
-    const wanted = dedupeKey(entry);
-    const existing = document.entries.find((item) => (item.caseSensitive ? item.source : item.source.toLocaleLowerCase('en-US')) === wanted
-      || (entry.caseSensitive && item.source === entry.source.trim()));
+    const existing = document.entries.find((item) => sourcesClash(item, entry));
     if (existing) return { status: 'exists', existing, document };
     if (document.entries.length >= GLOSSARY_LIMIT) throw new BackendError('limit', 'GLOSSARY_INVALID', '', 'core');
     try {
@@ -272,12 +314,12 @@ export async function addGlossaryEntry(scope: GlossaryScope, worldDir: string, e
   }
 }
 
-/** Text for the clipboard or a file: what `glossary.export` returned, as is. */
+/** The file name offered for an export; the shell accepts exactly `pomi-glossary-(global|world).(csv|tsv)`. */
 export function exportFileName(scope: GlossaryScope, format: 'csv' | 'tsv'): string {
-  return `pomi-glossary-${scope === 'global' ? 'all-worlds' : 'world'}.${format}`;
+  return `pomi-glossary-${scope}.${format}`;
 }
 
 /** A sentence or a selected part of it as a glossary source: one line, at most the allowed length. */
 export function seedSource(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().slice(0, MAX_SOURCE_CHARS).trim();
+  return truncateChars(text.replace(/\s+/g, ' ').trim(), MAX_SOURCE_CHARS).trim();
 }

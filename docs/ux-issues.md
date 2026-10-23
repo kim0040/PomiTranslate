@@ -29,9 +29,8 @@
 | U12 | 낮음 | 저장 확인·시작 안내 dialog에 닫기(X)와 "계속 편집"/"건너뛰기"가 함께 있어 같은 동작이 두 번 보인다. | `Dialog.svelte` 사용처 | 선택지가 있는 dialog는 X를 숨기는 옵션 |
 | U18 | 낮음 | 최소 창(840px)에서 단계 표시가 현재 단계만 이름을 보이고 나머지는 숫자만 보인다. | `Stepper.svelte` | 숫자에 툴팁·접근 이름은 있으므로, 좁은 폭에서는 현재 단계 이름 + "n/5" 표기 검토 |
 | U19 | 낮음 | 도움말 "API 키 발급 페이지"에 지원 제공사인 Comet API가 없다. 공식 키 발급 주소를 코드에서 확인할 수 없어 추측해 넣지 않았다. | `HelpScreen.svelte` `keyPages` | Comet API 공식 키 발급 주소를 확인한 뒤 추가 |
-| U20 | 중간 | 용어집 내보내기는 앱(Tauri)에서 파일 저장 창이 없어 클립보드로 복사한다(브라우저에서는 파일 다운로드). 화면은 이를 알려 주지만 파일로 두고 싶은 사람에게는 번거롭다. | `GlossaryScreen.svelte` | `src-tauri/src/document_export.rs`에 `glossary` 종류와 저장 창을 추가한 뒤 화면을 `export_document`로 연결 |
 | U21 | 낮음 | 용어집 화면의 항목은 한 번에 200개까지만 그려지고 "더 보기"로 늘린다(2,000개 상한). 가상 스크롤이 아니라 2,000개를 모두 펼치면 낮은 사양 PC에서 느릴 수 있다. native·실제 데이터로 확인하지 않았다. | `GlossaryScreen.svelte` | 느림이 확인되면 가상 목록으로 교체 |
-| U22 | 낮음 | 용어집 화면·가져오기·"용어집에 추가"·품질 경고는 browser fixture(mock core)로만 확인했다. 실제 core의 glossary 응답, native 창에서의 클립보드 복사, 스크린 리더 읽기는 확인하지 않았다. | `tests/browser/glossary.spec.ts` | UX-NATIVE-01·QUALITY-01 native 점검에서 함께 확인 |
+| U22 | 낮음 | 용어집 화면·가져오기·"용어집에 추가"·품질 경고는 browser fixture(mock core)로만 확인했다. 실제 core의 glossary 응답, native 저장 창에서의 용어집 파일 저장(`glossary_csv`)과 저장 실패 시 클립보드 복사, 스크린 리더 읽기는 확인하지 않았다. | `tests/browser/glossary.spec.ts` | UX-NATIVE-01·QUALITY-01 native 점검에서 함께 확인 |
 
 ## 문서·화면 자료
 
