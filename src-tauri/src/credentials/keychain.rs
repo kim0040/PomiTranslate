@@ -13,7 +13,9 @@ const SERVICE: &str = "PomiTranslate";
 pub trait KeychainStore: Send + Sync {
     fn get(&self, provider: &str) -> Result<Option<Zeroizing<String>>, IpcError>;
     fn set(&self, provider: &str, secret: &str) -> Result<(), IpcError>;
-    /// Deleting an entry that does not exist succeeds.
+    /// Deleting an entry that does not exist succeeds. `KEYCHAIN_UNAVAILABLE` means the platform has
+    /// no credential store at all (nothing can be kept there, so nothing is left to delete); any
+    /// other error is a delete the store refused or could not finish.
     fn delete(&self, provider: &str) -> Result<(), IpcError>;
 }
 
@@ -52,9 +54,69 @@ impl KeychainStore for OsKeychain {
     }
 
     fn delete(&self, provider: &str) -> Result<(), IpcError> {
-        match Self::entry(provider)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(failed("Could not delete the OS credential")),
+        let entry = keyring::Entry::new(SERVICE, provider).map_err(|error| delete_error(&error))?;
+        delete_result(entry.delete_credential())
+    }
+}
+
+/// How a failed delete is told apart from "there is no store".
+///
+/// - `NoEntry`: nothing to delete, which is success (`delete_result`).
+/// - `NoDefaultStore`: keyring could not install the platform store when the first `Entry` was made
+///   (on Linux: no Secret Service / D-Bus session; on an unsupported platform: no store). Nothing
+///   can have been written there, so this is `KEYCHAIN_UNAVAILABLE`.
+/// - everything else (`NoStorageAccess`: locked or denied; `PlatformFailure`; `Ambiguous`, ...) is a
+///   store that exists and did not finish the delete: `KEYCHAIN_FAILED`. With the Secret Service
+///   store a missing service always fails at store creation, never at the delete, so these are
+///   never "no service"; a locked keyring in particular may still hold the entry.
+fn delete_error(error: &keyring::Error) -> IpcError {
+    match error {
+        keyring::Error::NoDefaultStore => IpcError::new(
+            code::KEYCHAIN_UNAVAILABLE,
+            "The OS credential store is unavailable",
+        ),
+        _ => failed("Could not delete the OS credential"),
+    }
+}
+
+/// `Ok(())` when the delete is done or there was nothing to delete (`NoEntry`), else the classified
+/// error.
+fn delete_result(result: Result<(), keyring::Error>) -> Result<(), IpcError> {
+    match result {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(delete_error(&error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn platform() -> keyring::Error {
+        keyring::Error::PlatformFailure(Box::new(std::io::Error::other("fixture")))
+    }
+
+    #[test]
+    fn a_missing_entry_is_a_deleted_entry() {
+        assert!(delete_result(Ok(())).is_ok());
+        assert!(delete_result(Err(keyring::Error::NoEntry)).is_ok());
+    }
+
+    #[test]
+    fn only_a_platform_without_a_store_is_unavailable() {
+        let error = delete_result(Err(keyring::Error::NoDefaultStore)).unwrap_err();
+        assert_eq!(error.code, code::KEYCHAIN_UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_locked_denied_or_failing_store_is_a_refused_delete() {
+        for refused in [
+            platform(),
+            keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("locked"))),
+            keyring::Error::Invalid("service".into(), "fixture".into()),
+        ] {
+            let error = delete_result(Err(refused)).unwrap_err();
+            assert_eq!(error.code, code::KEYCHAIN_FAILED);
         }
     }
 }
@@ -79,6 +141,8 @@ pub mod fake {
         pub calls: AtomicUsize,
         pub log: Mutex<Vec<String>>,
         pub fail_delete: AtomicBool,
+        /// Deletes fail the way a platform without any credential store fails.
+        pub unavailable: AtomicBool,
         /// How many of the next writes fail *after* they changed the entry: the worst case, one that
         /// has to be undone.
         pub fail_next_sets: AtomicUsize,
@@ -116,6 +180,12 @@ pub mod fake {
         fn delete(&self, provider: &str) -> Result<(), IpcError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.log.lock().unwrap().push(format!("delete:{provider}"));
+            if self.unavailable.load(Ordering::SeqCst) {
+                return Err(IpcError::new(
+                    code::KEYCHAIN_UNAVAILABLE,
+                    "The OS credential store is unavailable",
+                ));
+            }
             if self.fail_delete.load(Ordering::SeqCst) {
                 return Err(failed("fixture delete failure"));
             }
