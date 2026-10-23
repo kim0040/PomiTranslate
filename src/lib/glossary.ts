@@ -168,9 +168,22 @@ export function shownWarningSamples(samples: TranslationWarningSample[] | undefi
     .slice(0, WARNING_SAMPLE_LIMIT);
 }
 
-/** The entry a sample missed, when it still exists in the glossary. */
-export function entryForSample(entries: GlossaryEntry[], sample: TranslationWarningSample): GlossaryEntry | null {
-  return sample.entryId ? entries.find((entry) => entry.id === sample.entryId) ?? null : null;
+/** `global:<id>` or `world:<id>` (the core names the list); a bare id still works and means either list. */
+export function splitEntryId(entryId: string): { scope: GlossaryScope | null; id: string } {
+  const match = /^(global|world):(.+)$/.exec(entryId);
+  return match ? { scope: match[1] as GlossaryScope, id: match[2] } : { scope: null, id: entryId };
+}
+
+/** The entry a sample missed, when it still exists in the list the warning names. */
+export function entryForSample(entries: GlossaryEntry[] | Partial<Record<GlossaryScope, GlossaryEntry[]>>, sample: TranslationWarningSample): GlossaryEntry | null {
+  if (!sample.entryId) return null;
+  const { scope, id } = splitEntryId(sample.entryId);
+  const lists = Array.isArray(entries) ? [entries] : scope ? [entries[scope] ?? []] : [entries.world ?? [], entries.global ?? []];
+  for (const list of lists) {
+    const found = list.find((entry) => entry.id === id);
+    if (found) return found;
+  }
+  return null;
 }
 
 // --- requests ----------------------------------------------------------------------------------

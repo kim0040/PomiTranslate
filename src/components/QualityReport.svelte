@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
-  import type { GlossaryEntry, TranslationWarningSample } from '../lib/api';
+  import type { GlossaryEntry, GlossaryScope, TranslationWarningSample } from '../lib/api';
   import { hasMessage, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
   import { entryForSample, loadGlossary, shownWarningSamples, warningRows, warningTotal } from '../lib/glossary';
@@ -13,18 +13,18 @@
   const rows = $derived(warningRows(counts));
   const total = $derived(warningTotal(counts));
   const examples = $derived(shownWarningSamples(samples));
-  let entries = $state<GlossaryEntry[]>([]);
+  let entries = $state<Partial<Record<GlossaryScope, GlossaryEntry[]>>>({});
   let loaded = $state(false);
 
-  // Which rule a sample missed is looked up in the glossary as it is now (global, then this world).
+  // Which rule a sample missed is looked up in the glossary as it is now (the list the warning names: global or this world).
   $effect(() => {
     if (!examples.some((sample) => sample.entryId)) return;
     const world = app.worldDir;
     untrack(() => {
       void (async () => {
-        const found: GlossaryEntry[] = [];
+        const found: Partial<Record<GlossaryScope, GlossaryEntry[]>> = {};
         for (const scope of world ? (['world', 'global'] as const) : (['global'] as const)) {
-          try { found.push(...(await loadGlossary(scope, world)).entries); } catch { /* the sample then says the entry is gone */ }
+          try { found[scope] = (await loadGlossary(scope, world)).entries; } catch { /* the sample then says the entry is gone */ }
         }
         entries = found;
         loaded = true;

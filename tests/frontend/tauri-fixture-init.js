@@ -151,12 +151,12 @@
       translation: { unique: 6, translated: 6, failed: 0, kept_original: 0, unchanged: 0 },
       translationWarnings: { glossary_mismatch: 7, format_residue: 1, glossary_truncated: 1 },
       translationWarningSamples: [
-        { code: 'glossary_mismatch', entryId: '1'.repeat(20), source: 'Elder Mira greets you', translated: '장로 미라가 인사합니다' },
-        { code: 'glossary_mismatch', entryId: '2'.repeat(20), source: 'The Lost Key Shop', translated: '분실 열쇠 상점' },
-        { code: 'glossary_mismatch', entryId: '9'.repeat(20), source: 'Gate of Dawn', translated: '새벽의 문' },
+        { code: 'glossary_mismatch', entryId: 'global:' + '1'.repeat(20), source: 'Elder Mira greets you', translated: '장로 미라가 인사합니다' },
+        { code: 'glossary_mismatch', entryId: 'global:' + '2'.repeat(20), source: 'The Lost Key Shop', translated: '분실 열쇠 상점' },
+        { code: 'glossary_mismatch', entryId: 'world:' + '9'.repeat(20), source: 'Gate of Dawn', translated: '새벽의 문' },
         { code: 'format_residue', source: '§lcrypt', translated: '§lc지하실' },
-        { code: 'glossary_mismatch', entryId: '1'.repeat(20), source: 'Elder Mira again', translated: '장로 미라 다시' },
-        { code: 'glossary_mismatch', entryId: '1'.repeat(20), source: 'a sixth sample that must not be shown', translated: 'x' }
+        { code: 'glossary_mismatch', entryId: 'global:' + '1'.repeat(20), source: 'Elder Mira again', translated: '장로 미라 다시' },
+        { code: 'glossary_mismatch', entryId: 'global:' + '1'.repeat(20), source: 'a sixth sample that must not be shown', translated: 'x' }
       ],
       warnings: [{ code: 'glossary_changed', dropped_translations: 4 }],
       usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }

@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 
 import { BackendError, type GlossaryEntry } from '../../src/lib/api';
 import {
-  addGlossaryEntry, blankDraft, entryForSample, filterDrafts, formatFromName, fromDraft, GLOSSARY_LIMIT, importGlossary, parseInvalidPath,
+  addGlossaryEntry, blankDraft, entryForSample, filterDrafts, formatFromName, fromDraft, GLOSSARY_LIMIT, importGlossary, parseInvalidPath, splitEntryId,
   savableDrafts, saveGlossary, seedSource, shownWarningSamples, snapshot, toDraft, validateDrafts, warningRows, warningTotal
 } from '../../src/lib/glossary';
 import { emptyProgress, reduceProgress } from '../../src/lib/workflow';
@@ -197,6 +197,14 @@ describe('quality warnings', () => {
     expect(shownWarningSamples([...samples, { code: 'x' } as any])).toHaveLength(5);
     expect(entryForSample([entry()], samples[0])?.source).toBe('Elder Mira');
     expect(entryForSample([], samples[0])).toBeNull();
+    // The core names the list: `global:<id>` or `world:<id>`; a bare id is looked up in either.
+    const prefixed = { ...samples[0], entryId: `world:${'a'.repeat(20)}` };
+    expect(entryForSample({ global: [entry()], world: [] }, prefixed)).toBeNull();
+    expect(entryForSample({ global: [], world: [entry()] }, prefixed)?.source).toBe('Elder Mira');
+    expect(entryForSample({ global: [entry()], world: [] }, { ...samples[0], entryId: `global:${'a'.repeat(20)}` })?.source).toBe('Elder Mira');
+    expect(entryForSample({ global: [entry()] }, samples[0])?.source).toBe('Elder Mira');
+    expect(splitEntryId(`world:${'b'.repeat(20)}`)).toEqual({ scope: 'world', id: 'b'.repeat(20) });
+    expect(splitEntryId('b'.repeat(20))).toEqual({ scope: null, id: 'b'.repeat(20) });
     expect(entryForSample([entry()], { code: 'format_residue', source: 'a', translated: 'b' })).toBeNull();
   });
 
