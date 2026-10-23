@@ -118,12 +118,13 @@ def _load_root(root: Path | None, check: Check) -> None:
                 _roots[name] = _LOADING
                 break
             _cond.wait(POLL_SECONDS)  # another batch is reading the file
-    from mwt.userdata import load_gemini_level_floor_entries
-
     saved: dict[Key, tuple[str, float]] = {}
     complete = False
     try:
         try:
+            # Inside the try: whatever fails here must still take the folder out of "loading" below.
+            from mwt.userdata import load_gemini_level_floor_entries
+
             saved = load_gemini_level_floor_entries(root)
             complete = True
         except Exception:
