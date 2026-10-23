@@ -97,9 +97,10 @@ test.describe('the update question (3, 4, 8)', () => {
   test('Cancel calls the install off with exit_cancel and says nothing was installed', async ({ page }) => {
     const dialog = await askToInstall(page, 'install=ask');
     await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    // The toast goes away after a few seconds, so it is checked first.
+    await expect(page.getByText('업데이트를 취소했습니다. 아무것도 설치하지 않았습니다.')).toBeVisible();
     await expect.poll(() => shell(page)).toEqual(['exit_cancel']);
     expect(await calls(page)).toEqual([{ command: 'exit_cancel', args: { intent: 7 } }]);
-    await expect(page.getByText('업데이트를 취소했습니다. 아무것도 설치하지 않았습니다.')).toBeVisible();
     expect(await page.evaluate(() => (window as any).__pomiInstalled)).toBeUndefined();
   });
 

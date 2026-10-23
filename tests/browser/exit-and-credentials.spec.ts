@@ -44,6 +44,8 @@ test.describe('a running job', () => {
     await expect(page.getByRole('dialog', { name: '작업을 멈추는 중…' })).toBeVisible();
     // While waiting there is nothing to dismiss: the dialog is not closable.
     await expect(page.getByRole('dialog').getByRole('button')).toHaveCount(0);
+    // The shell's wait runs out.
+    await emit(page, 'pomi-exit-stuck', null);
     const stuck = page.getByRole('dialog', { name: '작업이 멈추지 않았습니다' });
     await expect(stuck).toBeVisible();
     // Keep waiting asks the shell to wait again and returns to the waiting state.

@@ -693,11 +693,11 @@
       }
       if (command === 'exit_confirm') {
         (window.__pomiShell ||= []).push('exit_confirm');
-        // ?exit=stuck: the job ignores the cancel, so the shell reports it after its wait.
-        if (['stuck', 'stuck-again'].includes(new URLSearchParams(location.search).get('exit'))) {
-          setTimeout(() => emit('pomi-exit-waiting', null), 20);
-          setTimeout(() => emit('pomi-exit-stuck', null), 150);
-        }
+        // ?exit=stuck: the job ignores the cancel; the test reports the end of the wait itself (pomi-exit-stuck),
+        // so the waiting state lasts as long as it needs. ?exit=stuck-again: the shell reports it after 150 ms.
+        const exitMode = new URLSearchParams(location.search).get('exit');
+        if (['stuck', 'stuck-again'].includes(exitMode)) setTimeout(() => emit('pomi-exit-waiting', null), 20);
+        if (exitMode === 'stuck-again') setTimeout(() => emit('pomi-exit-stuck', null), 150);
         return null;
       }
       if (command === 'exit_force') { (window.__pomiShell ||= []).push('exit_force'); return null; }
