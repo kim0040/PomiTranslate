@@ -1486,24 +1486,25 @@ fn a_failed_save_whose_undo_worked_keeps_the_note_so_a_delete_still_reaches_the_
     );
 }
 
-fn refused_delete_on_an_unreadable_vault() -> (tempfile::TempDir, Credentials, Fake) {
+#[test]
+fn a_refused_delete_leaves_the_unreadable_vault_as_it_was_and_a_retry_reaches_the_entry() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
     vault
         .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
         .unwrap();
     break_the_database(dir.path());
+    let before = tree(dir.path());
     fake.fail_delete.store(true, Ordering::SeqCst);
     let error = vault.delete(dir.path(), "openai").unwrap_err();
     assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
     assert!(has_entry(&fake, "openai"));
-    (dir, vault, fake)
-}
-
-#[test]
-fn a_refused_delete_on_an_unreadable_vault_is_retried_after_the_vault_is_replaced() {
-    let (dir, _first_run, fake) = refused_delete_on_an_unreadable_vault();
-    assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
+    assert!(broken_entries(dir.path(), "credentials.broken-").is_empty());
+    assert_eq!(
+        tree(dir.path()),
+        before,
+        "nothing is set aside, so no crash can leave the folder without the vault"
+    );
     // The app is started again; the OS store now allows the delete.
     fake.fail_delete.store(false, Ordering::SeqCst);
     fake.log.lock().unwrap().clear();
@@ -1515,39 +1516,11 @@ fn a_refused_delete_on_an_unreadable_vault_is_retried_after_the_vault_is_replace
         "the retry reaches the OS store"
     );
     assert!(!has_entry(&fake, "openai"));
-    // Confirmed: the note is gone and a further delete makes no OS call.
+    // Confirmed: the damaged vault is set aside now, and a further delete makes no OS call.
+    assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
     fake.log.lock().unwrap().clear();
     restarted.delete(dir.path(), "openai").unwrap();
     assert!(calls(&fake).is_empty());
-}
-
-#[test]
-fn a_refused_delete_keeps_the_unreadable_vault_when_no_replacement_can_be_made() {
-    let dir = tempfile::tempdir().unwrap();
-    let (vault, fake) = with_fake();
-    vault
-        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
-        .unwrap();
-    break_the_database(dir.path());
-    let before = tree(dir.path());
-    fake.fail_delete.store(true, Ordering::SeqCst);
-    tests_hook::FAIL_NEW_VAULT.with(|flag| flag.set(true));
-    let error = vault.delete(dir.path(), "openai").unwrap_err();
-    tests_hook::FAIL_NEW_VAULT.with(|flag| flag.set(false));
-    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
-    assert!(broken_entries(dir.path(), "credentials.broken-").is_empty());
-    assert_eq!(
-        tree(dir.path()),
-        before,
-        "the old vault is exactly as it was"
-    );
-    // Retry once the store allows it: the delete reaches the entry, then the vault is set aside.
-    fake.fail_delete.store(false, Ordering::SeqCst);
-    fake.log.lock().unwrap().clear();
-    credentials_on(&fake).delete(dir.path(), "openai").unwrap();
-    assert_eq!(calls(&fake), ["delete:openai"]);
-    assert!(!has_entry(&fake, "openai"));
-    assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
 }
 
 #[test]

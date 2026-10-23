@@ -1046,16 +1046,15 @@ impl Credentials {
                     code::VAULT_PERMISSIONS | code::VAULT_SCHEMA | code::VAULT_CORRUPT
                 ) =>
             {
-                // The vault cannot say, so the entry is tried. A refused delete is owed a retry: the
-                // damaged vault is replaced only by one that records the keychain for this provider
-                // (otherwise it stays, and the retry meets the same unreadable vault).
+                // The vault cannot say, so the entry is tried. Only a confirmed delete sets the
+                // damaged vault aside. A refused one leaves it exactly as it was, so the retry meets
+                // the same unreadable vault and tries the entry again; replacing it here would need
+                // two renames that a crash can separate, and a restart that then finds no vault
+                // would answer a retry with a success that never reached the OS store.
                 let entry = self.delete_entry(provider, EntryPlan::BestEffort);
                 if entry.is_ok() {
                     self.reset_locked(&mut sessions, root)?;
-                } else if self
-                    .reset_recording_keychain(&mut sessions, root, provider)
-                    .is_err()
-                {
+                } else {
                     sessions.remove(provider);
                 }
                 return entry;
@@ -1109,74 +1108,6 @@ impl Credentials {
     pub fn reset_storage(&self, root: &Path) -> Result<(), IpcError> {
         let mut sessions = lock_wait(&self.sessions)?;
         self.reset_locked(&mut sessions, root)
-    }
-
-    /// Like `reset_locked`, for a delete the OS store refused while the vault was unreadable: the new
-    /// vault holds `known_keychain=1` for `provider`, so deleting again reaches the entry. All or
-    /// nothing: if that vault cannot be made, whatever was set aside is moved back.
-    fn reset_recording_keychain(
-        &self,
-        sessions: &mut HashMap<String, Zeroizing<String>>,
-        root: &Path,
-        provider: &str,
-    ) -> Result<(), IpcError> {
-        let vault = Vault::new(root);
-        let stamp = now_millis();
-        // `moved`: set-aside copies to put back. `ours`: places that no longer hold the original.
-        let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-        let mut ours: Vec<PathBuf> = Vec::new();
-        let replace = |moved: &mut Vec<(PathBuf, PathBuf)>,
-                       ours: &mut Vec<PathBuf>|
-         -> Result<(), IpcError> {
-            for dir in [&vault.root, &vault.key_dir] {
-                match fs::symlink_metadata(dir) {
-                    Ok(_) => {
-                        moved.push((dir.clone(), set_aside(dir, stamp)?));
-                        ours.push(dir.clone());
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        ours.push(dir.clone());
-                    }
-                    Err(_) => return Err(io_error("Cannot inspect credential storage")),
-                }
-            }
-            #[cfg(test)]
-            if tests_hook::FAIL_NEW_VAULT.with(|flag| flag.get()) {
-                return Err(io_error("Fixture: the replacement vault cannot be made"));
-            }
-            private_fs::directory(&vault.key_dir)?;
-            let (conn, _held) = vault
-                .connection(true)?
-                .ok_or_else(|| io_error("Cannot initialize credential storage"))?;
-            conn.execute(
-                "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,'local',1,NULL) ON CONFLICT(provider) DO UPDATE SET known_keychain=1",
-                [provider],
-            )
-            .map_err(|error| sql(error, code::VAULT_IO, "Cannot save credential mode"))?;
-            Ok(())
-        };
-        if let Err(error) = replace(&mut moved, &mut ours) {
-            // Whatever stands in the old places was made by this attempt: remove it, then put the
-            // original back. A step that fails here leaves the set-aside copy where it is.
-            let cleared = ours.iter().all(|path| remove_path(path).is_ok());
-            let restored = cleared
-                && moved
-                    .iter()
-                    .rev()
-                    .all(|(original, aside)| private_fs::rename(aside, original).is_ok());
-            if !restored {
-                crate::diagnostics::global().log_error(
-                    "credentials",
-                    &io_error("Cannot restore the previous credential storage"),
-                );
-            }
-            return Err(error);
-        }
-        sessions.clear();
-        if let Ok(mut known) = lock_wait(&self.known_modes) {
-            known.clear();
-        }
-        Ok(())
     }
 
     fn reset_locked(
@@ -1403,15 +1334,6 @@ pub(crate) fn with_fake_keychain() -> (Credentials, std::sync::Arc<keychain::fak
         Credentials::with_keychain(Box::new(Shared(fake.clone()))),
         fake,
     )
-}
-
-/// Test-only switch: the replacement vault of `reset_recording_keychain` cannot be made.
-#[cfg(test)]
-mod tests_hook {
-    use std::cell::Cell;
-    thread_local! {
-        pub static FAIL_NEW_VAULT: Cell<bool> = const { Cell::new(false) };
-    }
 }
 
 #[cfg(test)]

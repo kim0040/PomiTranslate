@@ -475,7 +475,7 @@ export const en: Record<MessageKey, string> = {
   'settings.vault.keychain': 'OS keychain',
   'settings.vault.help': 'Local storage uses an encrypted database and a separate key file. A program running as your account that can read both files can decrypt the key. Press Save to apply a storage change.',
   'settings.vault.import': 'Import existing keychain key',
-  'settings.vault.importHelp': 'Reads the existing key from the OS keychain only when you press this button. The key is copied and encrypted locally; the keychain entry is kept, and deleting the key later removes it too.',
+  'settings.vault.importHelp': 'Press this button to copy the existing key from the OS keychain into local encrypted storage. The keychain entry is kept, and deleting the key later removes it too.',
   'settings.vault.imported': 'Existing API key imported into local encrypted storage.',
   'settings.language.title': 'Language & Tone',
   'settings.language.target': 'Target Language',
