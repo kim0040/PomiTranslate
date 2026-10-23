@@ -10,6 +10,7 @@
   import TranslationDetail from './TranslationDetail.svelte';
   import ApplyDialog from './ApplyDialog.svelte';
   import Callout from './Callout.svelte';
+  import UnpricedNotice from './UnpricedNotice.svelte';
   import Dialog from './Dialog.svelte';
   import Icon from './Icon.svelte';
   import GlossarySheet from './GlossarySheet.svelte';
@@ -184,6 +185,8 @@
       {#if review.dirtyCount > 0}<span class="pill pill-warning num">{t('translationReview.count.unsaved', { count: formatNumber(review.dirtyCount, app.locale) })}</span>{/if}
     </div>
   </header>
+
+  <UnpricedNotice />
 
   {#if staleCount > 0}
     <Callout tone="warning" title={t('glossary.changedTitle')} role="alert">

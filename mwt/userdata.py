@@ -311,6 +311,8 @@ APP_PREF_DEFAULTS: dict = {
     "update_skipped_version": "",
     # An OS notification when a long scan or translation ends while the window is in the background.
     "notify_on_finish": True,
+    # Text size in percent (100, 115 or 130), applied app-wide through a root CSS variable.
+    "font_scale": 100,
 }
 
 
@@ -323,6 +325,10 @@ def _valid_pref(key: str, value):
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false")
         return value
+    if key == "font_scale":
+        if isinstance(value, bool) or value not in (100, 115, 130):
+            raise ValueError("font_scale must be 100, 115 or 130")
+        return int(value)
     if key == "update_last_check":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             raise ValueError("update_last_check must be a timestamp")

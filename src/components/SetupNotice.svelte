@@ -1,14 +1,14 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import { t } from '../lib/i18n/index.svelte';
+  import { providerLabel } from '../lib/providers';
   import Callout from './Callout.svelte';
   import Icon from './Icon.svelte';
 
   // Early steps only point it out; the run step is where it blocks.
   let { blocking = false }: { blocking?: boolean } = $props();
 
-  const providerLabels: Record<string, string> = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', openrouter: 'OpenRouter', comet: 'Comet API' };
-  const provider = $derived(providerLabels[app.settings.provider] ?? t('settings.provider.custom'));
+  const provider = $derived(providerLabel(app.settings.provider));
   const needs = $derived(app.setupNeeds);
 </script>
 

@@ -135,6 +135,20 @@
       {/if}
     </header>
 
+    <!-- Outside the scrolling pane, so an error stays in view whatever the page is scrolled to. -->
+    <div class="banners" class:empty={!app.banners.length || app.startupFailed}>
+      {#if !app.startupFailed}
+        {#each app.banners as banner (banner.id)}
+          <Callout tone={banner.tone === 'error' ? 'danger' : 'warning'} title={t('error.title')} role="alert">
+            {banner.message}{#if banner.count > 1} <span class="times num">({t('error.times', { count: banner.count })})</span>{/if}
+            {#snippet actions()}
+              <button type="button" class="btn btn-quiet btn-sm" onclick={() => app.dismissBanner(banner.id)}>{t('error.dismiss')}</button>
+            {/snippet}
+          </Callout>
+        {/each}
+      {/if}
+    </div>
+
     <main id="main-content" tabindex="-1" bind:this={pane} class:review-page={app.page === 'workspace' && (app.step === 'review' || (app.reviewOpen && !app.isBusy && (app.step === 'run' || app.step === 'result')))}>
       {#if !app.ready}
         <div class="boot" role="status" aria-live="polite">
@@ -157,17 +171,6 @@
         </div>
         {#if app.page === 'help'}<HelpScreen />{:else if app.page === 'about'}<AboutScreen />{/if}
       {:else}
-        {#if app.banner}
-          <div class="banner">
-            <Callout tone={app.banner.tone === 'error' ? 'danger' : 'warning'} title={t('error.title')} role="alert">
-              {app.banner.message}
-              {#snippet actions()}
-                <button type="button" class="btn btn-quiet btn-sm" onclick={() => (app.banner = null)}>{t('error.dismiss')}</button>
-              {/snippet}
-            </Callout>
-          </div>
-        {/if}
-
         {#if app.page === 'workspace'}
           {#if app.step === 'world'}<WorldScreen />
           {:else if app.step === 'scan'}<ScanScreen />
@@ -228,7 +231,10 @@
   /* One window-sized grid: the sidebar and toolbar stay put, only the content pane scrolls. */
   .shell { height: 100vh; height: 100dvh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); overflow: hidden; }
   .shell.rail { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
-  .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: var(--toolbar-height) minmax(0, 1fr); background: var(--bg-page); }
+  .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: var(--toolbar-height) auto minmax(0, 1fr); background: var(--bg-page); }
+  .banners { display: grid; gap: var(--space-2); max-height: 40vh; overflow: auto; padding: var(--space-3) clamp(var(--space-4), 2.6vw, var(--space-6)) 0; background: var(--bg-page); }
+  .banners.empty { height: 0; padding: 0; overflow: hidden; }
+  .times { font-weight: 400; color: var(--text-secondary); }
   .toolbar {
     z-index: 20; min-width: 0; display: flex; align-items: center; gap: var(--space-3); overflow-x: auto; overflow-y: hidden;
     padding: 0 clamp(var(--space-3), 2.4vw, var(--space-6));

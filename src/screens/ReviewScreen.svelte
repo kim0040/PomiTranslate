@@ -3,7 +3,7 @@
   import { app } from '../lib/app.svelte';
   import type { Candidate, GlossaryEntry } from '../lib/api';
   import type { SortMode, StateFilter } from '../lib/candidates.svelte';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
   import CandidateTable from '../components/CandidateTable.svelte';
   import CandidateDetail from '../components/CandidateDetail.svelte';
@@ -89,6 +89,9 @@
     { value: 'excluded', key: 'review.state.excluded' },
     { value: 'manual', key: 'review.state.manual' }
   ];
+  // Closed by default; a filter that is already on keeps its count on the button, so nothing hides silently.
+  let filtersOpen = $state(false);
+  const activeFilters = $derived((source.state !== 'all' ? 1 : 0) + (source.kind ? 1 : 0) + (source.sort !== 'order' ? 1 : 0));
   const kindEntries = $derived(Object.entries(source.kinds).sort((a, b) => b[1] - a[1]));
 
   function setQuery(value: string): void {
@@ -151,47 +154,58 @@
     </div>
   </header>
 
-  <div class="toolbar">
-    <div class="search">
-      <Icon name="search" size={15} />
-      <input
-        id="review-search"
-        class="input"
-        type="search"
-        value={query}
-        placeholder={t('review.search')}
-        aria-label={t('review.searchLabel')}
-        oninput={(event) => setQuery(event.currentTarget.value)}
-      />
-    </div>
-    <div class="segmented" role="group" aria-label={t('review.state')}>
-      {#each states as item (item.value)}
-        <button type="button" aria-pressed={source.state === item.value} onclick={() => setState(item.value)}>{t(item.key)}</button>
-      {/each}
-    </div>
-    <label class="sort">
-      <span class="sr-only">{t('review.sort')}</span>
-      <select class="select" value={source.sort} onchange={(event) => setSort(event.currentTarget.value as SortMode)}>
-        <option value="order">{t('review.sort')}: {t('review.sort.order')}</option>
-        <option value="source">{t('review.sort')}: {t('review.sort.source')}</option>
-        <option value="count">{t('review.sort')}: {t('review.sort.count')}</option>
-        <option value="kind">{t('review.sort')}: {t('review.sort.kind')}</option>
-      </select>
-    </label>
-    <button type="button" class="btn btn-secondary btn-sm" disabled={!app.worldDir} onclick={() => openGlossary()}>
-      <Icon name="book" size={15} /> {t('glossary.worldButton')}
-    </button>
-  </div>
-
-  <div class="chips" role="group" aria-label={t('scan.summary.kinds')}>
-    <button type="button" class="chip" aria-pressed={!source.kind} onclick={() => setKind('')}>
-      {t('review.allKinds')}
-    </button>
-    {#each kindEntries as [kind, count] (kind)}
-      <button type="button" class="chip" aria-pressed={source.kind === kind} onclick={() => setKind(kind)}>
-        {t(`kind.${kind}` as MessageKey)} <span class="num n">{formatNumber(count, app.locale)}</span>
+  <!-- Search stays in view; the rest (state, sort, kind) sits behind "Filters" so the table gets the room. -->
+  <div class="filter-zone">
+    <div class="toolbar">
+      <div class="search">
+        <Icon name="search" size={15} />
+        <input
+          id="review-search"
+          class="input"
+          type="search"
+          value={query}
+          placeholder={t('review.search')}
+          aria-label={t('review.searchLabel')}
+          oninput={(event) => setQuery(event.currentTarget.value)}
+        />
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm filters-toggle" aria-expanded={filtersOpen} aria-controls="review-filters" onclick={() => (filtersOpen = !filtersOpen)}>
+        <Icon name="sliders" size={15} /> {t('review.filters')}
+        {#if activeFilters > 0}<span class="badge num" title={t('review.filters.active', { count: activeFilters })}>{activeFilters}</span>{/if}
+        <Icon name="chevron-down" size={14} />
       </button>
-    {/each}
+      <button type="button" class="btn btn-secondary btn-sm" disabled={!app.worldDir} onclick={() => openGlossary()}>
+        <Icon name="book" size={15} /> {t('glossary.worldButton')}
+      </button>
+    </div>
+    {#if filtersOpen}
+      <div class="filters" id="review-filters" role="group" aria-label={t('review.filters')}>
+        <div class="segmented" role="group" aria-label={t('review.state')}>
+          {#each states as item (item.value)}
+            <button type="button" aria-pressed={source.state === item.value} onclick={() => setState(item.value)}>{t(item.key)}</button>
+          {/each}
+        </div>
+        <label class="sort">
+          <span class="sr-only">{t('review.sort')}</span>
+          <select class="select" value={source.sort} onchange={(event) => setSort(event.currentTarget.value as SortMode)}>
+            <option value="order">{t('review.sort')}: {t('review.sort.order')}</option>
+            <option value="source">{t('review.sort')}: {t('review.sort.source')}</option>
+            <option value="count">{t('review.sort')}: {t('review.sort.count')}</option>
+            <option value="kind">{t('review.sort')}: {t('review.sort.kind')}</option>
+          </select>
+        </label>
+        <div class="chips" role="group" aria-label={t('scan.summary.kinds')}>
+          <button type="button" class="chip" aria-pressed={!source.kind} onclick={() => setKind('')}>
+            {t('review.allKinds')}
+          </button>
+          {#each kindEntries as [kind, count] (kind)}
+            <button type="button" class="chip" aria-pressed={source.kind === kind} onclick={() => setKind(kind)}>
+              {labelFor('kind', kind)} <span class="num n">{formatNumber(count, app.locale)}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
   </div>
 
   <div class="workarea" class:wide class:compact={workareaWidth < PANEL_FULL} class:empty-compact={!selected && workareaWidth < PANEL_FULL} bind:this={workarea}>
@@ -232,7 +246,11 @@
 <GlossarySheet bind:open={glossaryOpen} world={app.worldDir} initialEntry={glossaryEntry} initialScope="world" />
 
 <style>
-  .review { animation: pomi-enter var(--dur-base) var(--ease-out) backwards; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: var(--space-3); height: 100%; min-height: 460px; }
+  .review { animation: pomi-enter var(--dur-base) var(--ease-out) backwards; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: var(--space-3); height: 100%; min-height: 460px; }
+  .filter-zone { display: grid; gap: var(--space-3); min-width: 0; }
+  .filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); }
+  .filters-toggle .badge { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--radius-full); background: var(--accent); color: var(--text-on-accent); font-size: var(--text-xs); font-weight: 700; }
+  .filters-toggle[aria-expanded='true'] > :global(.icon:last-child) { rotate: 180deg; }
   .head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
   h1 { font-size: var(--text-2xl); }
   .lead { color: var(--text-secondary); margin-top: var(--space-1); }

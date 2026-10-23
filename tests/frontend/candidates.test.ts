@@ -7,6 +7,7 @@ vi.mock('../../src/lib/api', async () => {
   return { ...actual, callBackend: callBackendMock };
 });
 
+import { t } from '../../src/lib/i18n/index.svelte';
 import { CandidateSource, PAGE_SIZE, MAX_CACHED_PAGES } from '../../src/lib/candidates.svelte';
 
 const page = (overrides: Partial<Parameters<typeof callBackendMock>[1]> = {}) => ({
@@ -150,7 +151,7 @@ describe('CandidateSource query state', () => {
     const source = new CandidateSource(() => ({ excluded: [], manual: [] }));
     source.query = 'shop';
     source.reset('fixture');
-    await vi.waitFor(() => expect(source.error).toContain('fixture page failure'));
+    await vi.waitFor(() => expect(source.error).toBe(t('error.default')));
     source.reset();
     await vi.waitFor(() => expect(source.total).toBe(1));
     expect(source.error).toBe('');

@@ -16,7 +16,7 @@ const settingsSaves = (page: Page) => page.evaluate(() => (window as unknown as 
 async function review(page: Page, count = 0) {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
   await page.goto(`/?scenario=review&count=${count}`);
-  await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await expect(page.getByRole('grid')).toBeVisible();
   await expect(page.locator('tr[data-index="0"]')).toBeVisible();
 }
@@ -190,7 +190,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 840, height: 480 
     await expect(page.locator('tr[data-index]')).toHaveCount(1);
     const sourceWidth = await page.locator('td.c-source').first().evaluate((element) => element.getBoundingClientRect().width);
     expect(sourceWidth).toBeGreaterThan(120);
-    await expect(page.getByRole('button', { name: '번역 진행 단계로 이동' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '번역 준비 단계로 이동' })).toBeVisible();
     await page.screenshot({ path: `output/playwright/review-${viewport.width}x${viewport.height}.png`, fullPage: true });
   });
 }
@@ -253,7 +253,7 @@ test('model preserves scan; target language invalidates it', async ({ page }) =>
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   await expect(page.getByRole('grid')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /^월드 스캔.*진행 중/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^번역할 문장 찾기.*진행 중/ })).toBeVisible();
 });
 
 
@@ -364,12 +364,12 @@ test('literal Python settings import uses a preview and remains unsaved on failu
 test('Comet selection pins the public route and preserves reviewed scan', async ({ page }) => {
   await review(page);
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.getByLabel('제공사 선택', { exact: true }).selectOption('comet');
+  await page.getByLabel('AI 서비스 선택', { exact: true }).selectOption('comet');
   await page.getByLabel('사용 모델', { exact: true }).fill('comet-fixture');
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await expect(page.locator('main')).toContainText('Comet API');
 });
 

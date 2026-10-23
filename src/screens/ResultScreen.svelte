@@ -5,6 +5,7 @@
   import { formatNumber, formatCompact, formatUsd } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
+  import UnpricedNotice from '../components/UnpricedNotice.svelte';
   import { resultPresentation } from '../lib/workflow';
   import { exportDocument } from '../lib/document-export';
   import { failureKey } from '../lib/failures';
@@ -131,6 +132,12 @@
         {/if}
       {/snippet}
     </Callout>
+
+    <UnpricedNotice />
+    {#if result.costCapEnforced === false}
+      <!-- The run went ahead with the person's agreement, without the limit that was set. -->
+      <Callout tone="warning" title={t('result.capNotEnforced.title')} role="status">{t('result.capNotEnforced.body')}</Callout>
+    {/if}
 
     <section class="stats card" aria-label={t('result.title')}>
       {#each cards as card (card.label)}

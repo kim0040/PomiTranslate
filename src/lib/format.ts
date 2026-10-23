@@ -1,5 +1,5 @@
 import type { Locale, MessageKey } from './i18n/index.svelte';
-import { translate } from './i18n/index.svelte';
+import { labelFor, translate } from './i18n/index.svelte';
 import type { CandidateLocation, Estimate } from './api';
 
 const BCP47: Record<Locale, string> = { ko: 'ko-KR', en: 'en-US', ja: 'ja-JP', zh: 'zh-CN' };
@@ -88,7 +88,7 @@ export function describeLocation(location: CandidateLocation, locale: Locale, fa
     : dimension === 'minecraft:the_nether' ? translate(locale, 'review.dimension.nether')
     : dimension === 'minecraft:the_end' ? translate(locale, 'review.dimension.end') : dimension;
   const kindId = location.kind || fallbackKind;
-  const kind = kindId ? translate(locale, `kind.${kindId}` as MessageKey)
+  const kind = kindId ? labelFor('kind', kindId, locale)
     : (location.holder ?? '').replace(HOLDER_PREFIX, '').replaceAll('_', ' ');
   if (location.pos) {
     const [x, y, z] = location.pos;

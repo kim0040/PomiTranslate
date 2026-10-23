@@ -63,9 +63,12 @@ def main() -> None:
         prefs = remember_app_prefs({"theme": "dark", "notice_accepted": True, "notify_on_finish": False}, root)
         assert prefs["theme"] == "dark" and prefs["notice_accepted"] and prefs["update_auto_check"] is True
         assert prefs["notify_on_finish"] is False
+        assert APP_PREF_DEFAULTS["font_scale"] == 100 and prefs["font_scale"] == 100
+        assert remember_app_prefs({"font_scale": 130}, root)["font_scale"] == 130
         remember_user_settings({"model": "other"}, root)
         assert load_app_prefs(root)["theme"] == "dark", "a settings save must not drop app state"
-        for bad in ({"theme": "neon"}, {"notice_accepted": "yes"}, {"notify_on_finish": "yes"}, {"unknown": 1}, {"update_last_check": -1}):
+        for bad in ({"theme": "neon"}, {"notice_accepted": "yes"}, {"notify_on_finish": "yes"}, {"unknown": 1}, {"update_last_check": -1},
+                    {"font_scale": 120}, {"font_scale": "115"}, {"font_scale": True}):
             try:
                 remember_app_prefs(bad, root)
             except ValueError:

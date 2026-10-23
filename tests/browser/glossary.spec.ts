@@ -59,7 +59,7 @@ test('the global glossary is editable, validates entries, imports JSON and saves
 
 test('candidate review quick-add opens the world sheet and stores its entry per world', async ({ page }) => {
   await open(page, 'scenario=review');
-  await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await page.locator('tr[data-index="0"]').click();
   await page.getByRole('button', { name: '용어집에 추가' }).click();
   const dialog = glossaryDialog(page);
@@ -76,7 +76,7 @@ test('candidate review quick-add opens the world sheet and stores its entry per 
 
 test('both glossary scopes validate before saving and the scope error jumps to its row', async ({ page }) => {
   await open(page, 'scenario=review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await page.getByRole('button', { name: '이 월드 용어집' }).click();
   const dialog = glossaryDialog(page);
   await dialog.getByRole('button', { name: '용어 추가' }).click();
@@ -98,7 +98,7 @@ test('both glossary scopes validate before saving and the scope error jumps to i
 
 test('glossary sheet reports a partial two-scope save in localized per-scope results', async ({ page }) => {
   await open(page, 'scenario=review&glossaryFailScope=world');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await page.getByRole('button', { name: '이 월드 용어집' }).click();
   const dialog = glossaryDialog(page);
   await dialog.getByRole('button', { name: '용어 추가' }).click();
@@ -120,7 +120,7 @@ test('glossary sheet reports a partial two-scope save in localized per-scope res
 
 test('glossary refresh uses the stale-only count and estimate while normal retry includes failures', async ({ page }) => {
   await open(page, 'scenario=run&fail=1&stale=1');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('heading', { name: '번역 결과 검토', exact: true })).toBeVisible();
   const refresh = page.getByRole('button', { name: '영향받은 문장 다시 번역 (1)' });
@@ -134,7 +134,7 @@ test('glossary refresh uses the stale-only count and estimate while normal retry
 
 test('translation review filters and badges glossary mismatches and can quick-add the current translation', async ({ page }) => {
   await open(page, 'scenario=run&glossaryMismatch=1');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('heading', { level: 1, name: '번역 결과 검토', exact: true })).toBeVisible();
   const mismatch = page.getByRole('button', { name: /용어 확인/ });
@@ -169,14 +169,14 @@ test('a saved user-entered model price appears in the run estimate', async ({ pa
   expect(saved.payload?.customPriceCount).toBe(1);
   expect(JSON.stringify(saved.payload)).not.toContain('7.5');
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await expect(page.getByText('사용자 입력 단가 기준', { exact: true })).toBeVisible();
   expect(await requests(page, 'estimate.get')).not.toHaveLength(0);
 });
 
 test('a changed world glossary blocks apply until affected rows are refreshed and saved edits stay dirty', async ({ page }) => {
   await open(page, 'scenario=run');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('heading', { name: '번역 결과 검토', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '이 월드 용어집' }).click();
@@ -232,7 +232,7 @@ test('CSV import and export keep Unicode terms and the editor fits the minimum w
 
 test('a global glossary saved from Settings marks the active translation review for refresh', async ({ page }) => {
   await open(page, 'scenario=run');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('heading', { name: '번역 결과 검토', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
@@ -251,7 +251,7 @@ test('a global glossary saved from Settings marks the active translation review 
 
 test('native close and menu navigation keep the unsaved glossary in its own dialog', async ({ page }) => {
   await open(page, 'scenario=review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await page.getByRole('button', { name: '이 월드 용어집' }).click();
   const dialog = glossaryDialog(page);
   await dialog.getByRole('button', { name: '용어 추가' }).click();

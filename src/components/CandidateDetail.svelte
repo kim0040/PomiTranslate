@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { describeDetail, describeLocation, formatNumber, rawLocation, teleportCommand } from '../lib/format';
   import Icon from './Icon.svelte';
 
@@ -88,7 +88,7 @@
       <h3>{t('review.detail.places')}</h3>
       <ul class="kinds">
         {#each kinds as [kind, count] (kind)}
-          <li><span class="pill">{t(`kind.${kind}` as MessageKey)}</span><span class="num muted">{t('common.places', { count: formatNumber(count, app.locale) })}</span></li>
+          <li><span class="pill">{labelFor('kind', kind)}</span><span class="num muted">{t('common.places', { count: formatNumber(count, app.locale) })}</span></li>
         {/each}
       </ul>
       <ul class="places">

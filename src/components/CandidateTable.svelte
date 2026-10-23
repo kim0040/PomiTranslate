@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { describeDetail, describeLocation, formatNumber, rawLocation } from '../lib/format';
   import { visibleWindow } from '../lib/virtual';
   import Icon from './Icon.svelte';
@@ -10,7 +10,8 @@
   // `open` is true when the user asked to see the row (click, Enter), not when the selection just moved.
   let { selectedId, onSelect }: { selectedId: string; onSelect: (candidate: Candidate, open: boolean) => void } = $props();
 
-  const ROW = 60;
+  // The row grows with the user's text size, so larger text is never clipped.
+  const ROW = $derived(Math.round(60 * app.fontScale / 100));
   const source = app.candidates;
   let viewport: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
@@ -37,7 +38,13 @@
   });
 
   function kindLabel(kind: string): string {
-    return t(`kind.${kind}` as MessageKey);
+    return labelFor('kind', kind);
+  }
+
+  /** The whole location, for the tooltip of a row whose location column is left out. */
+  function fullLocation(candidate: Candidate): string {
+    const first = candidate.locations?.[0];
+    return first ? rawLocation(first) : candidate.location ?? '';
   }
 
   function placeText(candidate: Candidate): string {
@@ -208,7 +215,10 @@
   // Hiding cells of a fixed-layout table with CSS (container queries + display:none) makes WebKit,
   // the engine of the macOS app, shrink the whole table instead of giving the space to the text.
   let tableWidth = $state(0);
-  const showWhere = $derived(tableWidth === 0 || tableWidth > 800); // the source text keeps 200px+ beside it
+  // The source text is what the person reads and decides on, so it keeps at least ~420px; the
+  // location column only appears when there is room beyond that, and the full location is always in
+  // the cell's tooltip and in the detail panel.
+  const showWhere = $derived(tableWidth === 0 || tableWidth > 1000);
   const showKind = $derived(tableWidth === 0 || tableWidth > 480);
   const showState = $derived(tableWidth === 0 || tableWidth > 400);
   const columnCount = $derived(2 + (showKind ? 1 : 0) + (showWhere ? 1 : 0) + (showState ? 1 : 0));
@@ -260,7 +270,7 @@
                 onchange={(event) => app.setIncluded(candidate.id, event.currentTarget.checked)}
               />
             </td>
-            <td class="c-source"><span class="src">{candidate.source}</span></td>
+            <td class="c-source" title={showWhere ? undefined : fullLocation(candidate)}><span class="src">{candidate.source}</span></td>
             {#if showKind}<td class="c-kind" class:narrow={!showWhere}>
               <span class="kind">{kindLabel(candidate.kind)}</span>
               {#if detailText(candidate)}<span class="detail">{detailText(candidate)}</span>{/if}
@@ -326,11 +336,11 @@
   .c-include input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; vertical-align: middle; }
   .c-source { width: auto; }
   .c-kind { width: 130px; }
-  .c-where { width: 190px; }
+  .c-where { width: 170px; }
   .c-state { width: 104px; }
   .src { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-line; }
   .kind, .where { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .where { font-weight: 500; font-family: var(--font-mono); font-size: var(--text-xs); }
+  .where { font-weight: 500; font-family: var(--font-mono); font-size: var(--text-xs); display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; overflow-wrap: anywhere; }
   .detail { display: block; font-size: var(--text-xs); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (hover: hover) { tbody tr:not(.pad):not(.skeleton):not(.selected):hover td { background: var(--bg-hover); } }
   .bone { display: block; height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--bg-sunken), var(--bg-hover), var(--bg-sunken)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }

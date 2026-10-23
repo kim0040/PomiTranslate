@@ -23,7 +23,7 @@ const shifts = (page: Page) => page.evaluate(() => { const value = (window as an
 test('every screen enters with the same motion token and dialogs pop the same way', async ({ page }) => {
   await boot(page, 'scenario=review');
   const seen = new Set<string>();
-  for (const name of ['월드 선택', '월드 스캔', '후보 검토', '번역 진행']) {
+  for (const name of ['월드 고르기', '번역할 문장 찾기', '번역할 문장 고르기', '번역 준비']) {
     await step(page, name);
     seen.add(await page.locator('main > .page, main > .review').evaluate((el) => `${getComputedStyle(el).animationName} ${getComputedStyle(el).animationDuration}`));
   }
@@ -43,16 +43,16 @@ test('every screen enters with the same motion token and dialogs pop the same wa
 test('reduced motion turns screen and dialog motion off', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await boot(page, 'scenario=review');
-  await step(page, '월드 스캔');
+  await step(page, '번역할 문장 찾기');
   const duration = await page.locator('.page').evaluate((el) => parseFloat(getComputedStyle(el).animationDuration));
   expect(duration).toBeLessThan(0.001);
 });
 
 test('the run summary does not jump when the estimate arrives late', async ({ page }) => {
   await boot(page, 'scenario=review&slowEstimate=1');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await page.locator('tr[data-index="0"] input[type="checkbox"]').uncheck();
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await expect(page.getByText('계산 중…').first()).toBeVisible();
   await page.waitForTimeout(250);
   await shifts(page);
@@ -63,9 +63,9 @@ test('the run summary does not jump when the estimate arrives late', async ({ pa
 
 test('a world with a kept scan offers to open it instead of a rescan that would replace it', async ({ page }) => {
   await boot(page, 'scenario=review');
-  await step(page, '월드 선택');
+  await step(page, '월드 고르기');
   await expect(page.getByRole('button', { name: '스캔 시작', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '스캔 결과 보기', exact: true }).click();
-  await expect(page.getByRole('heading', { name: '월드 스캔', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '번역할 문장 찾기', exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as any).__pomiRequests.filter((r: any) => r.type === 'scan.start').length)).toBe(0);
 });

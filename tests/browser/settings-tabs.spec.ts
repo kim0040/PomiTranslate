@@ -71,20 +71,20 @@ test('the last tab is kept for the session, and every screen change returns to i
 
 test('"환경 설정 열기" from the run step lands on 번역 and "저장하고 돌아가기" returns', async ({ page }) => {
   await open(page, 'scenario=run&fresh=1');
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   // Another tab was used last: the fix-it link still opens the tab that holds the fix.
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
   await tab(page, '앱').click();
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await page.getByRole('alert').getByRole('button', { name: '환경 설정에서 설정하기' }).click();
   await expect(selected(page)).toHaveText('번역');
-  await expect(saveBar(page)).toContainText('"번역 진행" 단계로 돌아가기');
+  await expect(saveBar(page)).toContainText('"번역 준비" 단계로 돌아가기');
   await page.locator('#api-key').fill('sk-fixture');
   await page.locator('#model').fill('fixture-model');
   await expect(saveBar(page)).toContainText('번역 탭에 저장하지 않은 변경 2개');
   await page.getByRole('button', { name: '저장하고 돌아가기', exact: true }).click();
-  await expect(page.getByRole('heading', { level: 1, name: '번역 진행', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1, name: '번역 준비', exact: true })).toBeVisible();
   await expect(page.getByRole('alert').filter({ hasText: '번역을 시작하려면' })).toHaveCount(0);
   await expect(page.locator('main')).toContainText('OpenAI · fixture-model');
 });
@@ -315,7 +315,7 @@ test('the custom provider keeps its endpoint on the advanced tab', async ({ page
   await settings(page);
   await expect(tab(page, '고급')).toBeVisible();
   await page.locator('#provider').selectOption('custom');
-  await expect(page.getByText('사용자 지정 제공사의 주소와 통신 규격은 고급 탭에서 설정합니다.')).toBeVisible();
+  await expect(page.getByText('사용자 지정 AI 서비스의 주소와 통신 규격은 고급 탭에서 설정합니다.')).toBeVisible();
   await expect(page.getByRole('button', { name: '저장', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: '고급 탭 열기' }).click();
   await expect(selected(page)).toHaveText('고급');

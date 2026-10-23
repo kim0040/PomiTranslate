@@ -92,7 +92,7 @@ test('the saved mode is on the page before the app code runs, so a dark start ne
 test('every screen passes contrast checks in dark mode', async ({ page }) => {
   await boot(page, 'scenario=review&theme=dark');
   const step = (name: string) => page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: new RegExp(`^${name}`) }).click();
-  for (const name of ['월드 선택', '월드 스캔', '후보 검토', '번역 진행']) {
+  for (const name of ['월드 고르기', '번역할 문장 찾기', '번역할 문장 고르기', '번역 준비']) {
     await step(name);
     expect((await new AxeBuilder({ page }).analyze()).violations, name).toEqual([]);
   }

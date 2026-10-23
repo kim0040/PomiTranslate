@@ -20,7 +20,7 @@ const row = (page: Page, text: string) => page.locator('tr[data-index]').filter(
 /** From a resumable fixture to the review table. */
 async function toReview(page: Page, query = 'scenario=run') {
   await open(page, query);
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const overCap = page.getByRole('alert').filter({ hasText: '예상 비용이 설정한 한도를 넘습니다' });
   await expect.poll(async () => (await overCap.isVisible()) || !(await startButton(page).isDisabled())).toBe(true);
   if (await overCap.isVisible().catch(() => false)) await overCap.getByRole('button', { name: '그래도 시작' }).click();
@@ -38,7 +38,7 @@ test('translating stops for review and writes nothing until the person applies',
   const resumes = await requests(page, 'translate.resume');
   expect(resumes).toHaveLength(1);
   // The result step is not reachable before something was applied.
-  await expect(page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^완료 결과/ })).toBeDisabled();
+  await expect(page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^결과 확인·적용/ })).toBeDisabled();
 });
 
 test('a broken formatting code is refused per row, then a fixed edit is applied with zero provider requests', async ({ page }) => {
@@ -121,7 +121,7 @@ test('failed rows are retried on their own, with the cost shown first', async ({
   await toReview(page, 'scenario=run&fail=2');
   // A failed row says why in plain Korean and keeps the provider text behind a disclosure.
   await row(page, 'Welcome to Roguefire').click();
-  await expect(page.locator('.detail .failed')).toContainText('제공사의 응답이 너무 늦어');
+  await expect(page.locator('.detail .failed')).toContainText('AI 서비스의 응답이 너무 늦어');
   await expect(page.locator('.detail .raw')).toBeHidden();
   await page.locator('.detail summary').click();
   await expect(page.locator('.detail .raw')).toContainText('ReadTimeout');
@@ -159,7 +159,7 @@ test('normal retry counts and preflights the failed plus glossary-stale rows', a
 
 test('the run summary presents glossary reminder estimates as a request range', async ({ page }) => {
   await open(page, 'scenario=run&estimateRange=1');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await expect(page.locator('.group').filter({ hasText: '예상 요청 횟수' })).toContainText('요청 1–2회');
 });
 
@@ -265,7 +265,7 @@ test('a world that changed after applying explains why it cannot be applied agai
 
 test('an estimate above the spending cap blocks the start until it is confirmed', async ({ page }) => {
   await open(page, 'scenario=run');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const cap = page.getByLabel('비용 한도');
   await expect(cap).toHaveValue('0');
   await expect(page.getByText('0이면 제한하지 않습니다.')).toBeVisible();
@@ -298,12 +298,12 @@ test('an estimate above the spending cap blocks the start until it is confirmed'
   expect(settings?.maxCostUsd).toBe(0.0001);
 
   // Nonsense is not saved.
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
 });
 
 test('an invalid cap is rejected inline and the review switch is saved', async ({ page }) => {
   await open(page, 'scenario=run');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const cap = page.getByLabel('비용 한도');
   await cap.fill('abc');
   await cap.press('Enter');
@@ -320,7 +320,7 @@ test('an invalid cap is rejected inline and the review switch is saved', async (
 
 test('hitting the cap stops with a clear explanation and can be continued once without the cap', async ({ page }) => {
   await open(page, 'scenario=run&budget=1');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   const callout = page.getByRole('status').filter({ hasText: '비용 한도에 닿아 번역을 멈췄습니다' });
   await expect(callout).toContainText('지금까지의 번역은 보관되어 있어');
@@ -346,7 +346,7 @@ test('hitting the cap stops with a clear explanation and can be continued once w
 
 test('starting above the estimate keeps the runtime cap and offers the cap editor after it stops', async ({ page }) => {
   await open(page, 'scenario=run&overCap=1&cap=0.0001');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const warning = page.getByRole('alert').filter({ hasText: '예상 비용이 설정한 한도를 넘습니다' });
   await expect(warning).toContainText('실행 중 한도는 계속 적용');
   await warning.getByRole('button', { name: '그래도 시작' }).click();
@@ -370,7 +370,7 @@ test('rows the cost cap kept from sending are labeled as such in the review, not
 
 test('a cancelled result counts the unsent rows apart from failures and the retry button', async ({ page }) => {
   await open(page, 'scenario=result-cancelled');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   const stats = page.locator('.stats');
   await expect(stats.locator('.stat').filter({ hasText: '보내지 않은 문장' }).locator('.v')).toHaveText('4');
@@ -380,7 +380,7 @@ test('a cancelled result counts the unsent rows apart from failures and the retr
 
 test('a tiny cost cap and tiny estimates keep their significant digits', async ({ page }) => {
   await open(page, 'scenario=run');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const cap = page.getByLabel('비용 한도');
   await cap.fill('0.0001');
   await cap.press('Enter');
@@ -393,11 +393,11 @@ test('a tiny cost cap and tiny estimates keep their significant digits', async (
 
 test('failure reasons are readable per code, with the provider text behind "details"', async ({ page }) => {
   await open(page, 'scenario=result-failed');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   const list = page.locator('section').filter({ has: page.getByRole('heading', { name: '번역 실패 문장 목록' }) });
   await expect(list).toContainText('실패한 문장 6개 전체입니다.');
-  for (const text of ['제공사의 응답이 너무 늦어', '요청이 너무 많아', 'AI의 답을 쓸 수 없었습니다', '제공사에 연결하지 못했습니다', '잔액이나 사용 한도', '안전 필터가']) {
+  for (const text of ['AI 서비스의 응답이 너무 늦어', '요청이 너무 많아', 'AI의 답을 쓸 수 없었습니다', 'AI 서비스에 연결하지 못했습니다', '잔액이나 사용 한도', '안전 필터가']) {
     await expect(list).toContainText(text);
   }
   // Raw English from the provider is never the main text.
@@ -416,7 +416,7 @@ test('failure reasons are readable per code, with the provider text behind "deta
 
 test('a failed run with no saved translations offers to translate again', async ({ page }) => {
   await open(page, 'scenario=result-failed&nocp=1');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   await expect(page.getByRole('status').filter({ hasText: '번역에 실패했습니다' })).toBeVisible();
   const again = page.getByRole('button', { name: '다시 번역', exact: true });
@@ -428,7 +428,7 @@ test('a failed run with no saved translations offers to translate again', async 
 
 test('a partly applied run lists every failure and offers the retry and the corrections', async ({ page }) => {
   await open(page, 'scenario=result-partial');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   await expect(page.getByText('실패한 문장 2개 전체입니다.')).toBeVisible();
   await expect(page.locator('.stats').locator('.stat').filter({ hasText: '월드에 적용됨' })).toBeVisible();
@@ -447,7 +447,7 @@ test('a partly applied run lists every failure and offers the retry and the corr
 
 test('progress shows the time left after two batches and the latest translations, on one shared clock', async ({ page }) => {
   await open(page, 'scenario=run-progress');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   await expect(page.getByRole('heading', { name: '번역을 진행하고 있습니다' })).toBeVisible();
   await expect(page.getByText('남은 시간 계산 중…')).toBeVisible();
@@ -483,7 +483,7 @@ test('a saved job that was never applied opens straight into the review and says
 
 test('single-pass runs still work when review is switched off', async ({ page }) => {
   await open(page, 'scenario=run&review=0&fail=1');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await startButton(page).click();
   await expect(page.getByRole('status').filter({ hasText: '일부 텍스트만 번역되었습니다' })).toBeVisible();
   await expect(page.getByText('실패한 문장 1개 전체입니다.')).toBeVisible();

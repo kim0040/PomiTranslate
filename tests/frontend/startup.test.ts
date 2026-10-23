@@ -42,7 +42,7 @@ describe('app state from an earlier version', () => {
     app.destroy();
   });
 
-  it('a fresh install opens the wizard with the notice first, and the tour after "later"', async () => {
+  it('a fresh install opens the wizard with the notice first, and "later" does not start the tour', async () => {
     vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {} });
     backend.mockImplementation(async (type: string) => type === 'app.bootstrap'
       ? { ...payload(), settings: { ...defaultSettings(), app_prefs: {} }, prefs: { ...prefs, notice_accepted: false, tutorial_seen: false, setup_dismissed: false } }
@@ -54,13 +54,15 @@ describe('app state from an earlier version', () => {
     expect(app.showTour).toBe(false);
     app.acceptNotice();
     expect(backend).toHaveBeenCalledWith('prefs.set', { prefs: { notice_accepted: true } });
-    // The tour waits until the wizard is put off or finished.
+    // The tour is optional: it never starts by itself, not even after the wizard is put off.
     expect(app.showWizard).toBe(true);
     expect(app.showTour).toBe(false);
     app.dismissWizard();
     expect(app.showWizard).toBe(false);
     expect(backend).toHaveBeenCalledWith('prefs.set', { prefs: { setup_dismissed: true } });
-    expect(app.showTour).toBe(true);
+    expect(app.showTour).toBe(false);
+    // Help starts it on request, and finishing it counts the guide as seen.
+    app.showTour = true;
     app.finishTour();
     expect(backend).toHaveBeenCalledWith('prefs.set', { prefs: { tutorial_seen: true } });
     app.destroy();
@@ -231,7 +233,7 @@ describe('review undo and per-world summaries', () => {
     app.scan = scanPlan('plan-a');
     app.setIncludedMany(['old-a'], false);
     const resumedUndo = app.toasts.at(-1)?.action;
-    (app as any).applyResume({ available: false, lastJob: null, lastScan: null });
+    app.job.applyResume({ available: false, lastJob: null, lastScan: null });
     resumedUndo?.run();
     expect([...app.excluded]).toEqual(['old-a']);
     expect(app.toasts.some((toast) => toast.action)).toBe(false);

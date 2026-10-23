@@ -220,7 +220,7 @@ test('saved manual translations still reach the review list', async ({ page }) =
   await save(page).click();
   await expect.poll(async () => (await saves(page)).length).toBe(1);
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
   // Both saved translations match a candidate, so the manual filter lists two rows (plus the two header rows).
   await page.getByRole('group', { name: '상태 필터' }).getByRole('button', { name: '직접 번역', exact: true }).click();

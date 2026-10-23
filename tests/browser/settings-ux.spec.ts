@@ -34,7 +34,7 @@ test('model lookup never saves drafts, keys or invalidates reviewed candidates',
   // Nothing is left to save, so the save bar is gone.
   await expect(page.locator('.save-bar')).toHaveCount(0);
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
 });
 
@@ -109,7 +109,7 @@ test('run preflight shows the saved reasoning choice and cost boundary', async (
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await expect(page.locator('.save-bar')).toHaveCount(0);
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await page.getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('button', { name: /^번역 준비/ }).click();
   await expect(page.getByRole('definition').filter({ hasText: '직접 설정 · 최대 (max)' })).toBeVisible();
   await expect(page.getByText('추론 토큰과 재시도는 이 추정에 포함되지 않으며 실제 비용이 늘어날 수 있습니다.', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'output/playwright/reasoning-preflight.png', fullPage: true });

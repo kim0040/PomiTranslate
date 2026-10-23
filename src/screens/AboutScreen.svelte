@@ -113,6 +113,7 @@
     <div class="side-stack">
       <Callout tone="warning" title={t('notice.title')}>
         <p class="required" lang="en">{UNOFFICIAL}</p>
+        <p>{t('notice.officialLocal')}</p>
         <p>{t('about.unofficial')}</p>
         <p>{t('notice.item1')}</p>
         <p>{t('notice.item2')}</p>
