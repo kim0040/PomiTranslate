@@ -130,7 +130,7 @@
     { key: 'translation', label: 'settings.tab.translation' },
     { key: 'app', label: 'settings.tab.app' }
   ];
-  let tab = $state<SettingsTab>(app.helpSection === 'updates' ? 'app' : 'translation');
+  let tab = $state<SettingsTab>(app.settingsTabRequest === 'app' || app.helpSection === 'updates' ? 'app' : 'translation');
   // The part the person asked for while the translation draft has unsaved changes (answered in the dialog).
   let pendingTab = $state<SettingsTab | null>(null);
 
@@ -422,6 +422,8 @@
     if (pendingTab) {
       pendingTab = null;
       if (app.helpSection === 'updates') app.helpSection = '';
+      // The dialog gives focus back to whatever had it (the tab just clicked); the part still shown owns it.
+      void tick().then(() => document.getElementById(`settings-tab-${tab}`)?.focus());
     } else app.resolveLeave(false);
   }
 
@@ -455,10 +457,12 @@
     else void showTab(next, true);
   }
 
-  // The Help menu's "Check for Updates…" arrives while this page may already be open.
+  // Every entry point (the menu, "Check for Updates…", a credential error) names its part, also while this page is already open.
   $effect(() => {
-    if (app.helpSection !== 'updates') return;
-    untrack(() => selectTab('app'));
+    const requested = app.settingsTabRequest;
+    if (!requested) return;
+    app.settingsTabRequest = null;
+    untrack(() => selectTab(requested));
   });
 
   async function changeLanguage(select: HTMLSelectElement): Promise<void> {

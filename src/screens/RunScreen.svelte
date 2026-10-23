@@ -83,7 +83,7 @@
           ? t('run.progress.collect', { index: p.fileIndex, total: p.fileTotal })
           : t('common.loading')
   );
-  const eta = $derived(remainingSeconds(p, now));
+  const eta = $derived(remainingSeconds(p, now, app.cancelling));
   // What a screen reader hears: the phase when it changes, then every 10% — never each sentence.
   const announcement = $derived.by(() => {
     const phase = phases.find((item) => item.id === p.phase);

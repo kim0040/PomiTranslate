@@ -124,6 +124,8 @@ export class AppState {
   showLicenses = $state(false);
   /** A section of the help page to bring into view (set by the Help menu). */
   helpSection = $state('');
+  /** The part of Settings an entry point asked for. Settings consumes it, also while it is already open, through its guarded tab switch. */
+  settingsTabRequest = $state<'translation' | 'app' | null>(null);
   update = $state<UpdateInfo | null>(null);
   updateState = $state<UpdateState>('idle');
   updateError = $state('');
@@ -822,7 +824,10 @@ export class AppState {
   resolveLeave(proceed: boolean): void {
     const next = this.pendingLeave;
     this.pendingLeave = null;
-    if (!proceed || !next) return;
+    if (!proceed || !next) {
+      this.settingsTabRequest = null;
+      return;
+    }
     this.settingsDirty = false;
     this.glossaryDirty = false;
     next();
@@ -849,6 +854,7 @@ export class AppState {
   openSettingsFor(step: Step = this.step): void {
     if (this.busy === 'settings') return;
     this.returnStep = this.page === 'workspace' ? step : null;
+    this.settingsTabRequest = 'translation';
     this.goto('settings');
   }
 
@@ -877,6 +883,7 @@ export class AppState {
     // Help, licenses and the issue link need nothing from the core, so they stay open when it failed to start.
     if (this.startupFailed && !STARTUP_SAFE_ACTIONS.includes(action)) return;
     if (action === 'settings') {
+      this.settingsTabRequest = 'translation';
       this.goto('settings');
     } else if (action === 'open-world') {
       if (this.isBusy) return;
@@ -895,6 +902,7 @@ export class AppState {
       void openExternal(ISSUES_URL).catch((cause) => this.fail(cause));
     } else if (action === 'updates') {
       this.helpSection = 'updates';
+      this.settingsTabRequest = 'app';
       this.goto('settings');
       void this.checkUpdates(true);
     } else if (action === 'find') {

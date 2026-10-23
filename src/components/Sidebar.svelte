@@ -19,6 +19,7 @@
   const startupSafe: Page[] = ['help', 'about'];
   function showUpdate(): void {
     app.helpSection = 'updates';
+    app.settingsTabRequest = 'app';
     app.goto('settings');
   }
 

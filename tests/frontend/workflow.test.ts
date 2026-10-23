@@ -146,6 +146,36 @@ describe('remaining time estimate', () => {
     expect(remainingSeconds(run(steady), START + 200_000)).toBeNull();
   });
 
+  it('hides the estimate once progress stalls for 3 typical gaps (at least 15 s), and brings it back with fresh progress', () => {
+    const progress = run(steady);
+    // Events came every 10 s, so 30 s of silence is the limit; the last event was at 40 s.
+    expect(remainingSeconds(progress, START + 70_000)).not.toBeNull();
+    expect(remainingSeconds(progress, START + 71_000)).toBeNull();
+    // The estimate would still have had 10 s left at 80 s without the stall rule; it stays hidden.
+    expect(remainingSeconds(progress, START + 80_000)).toBeNull();
+    // A new event passes the usual stability checks again: the number returns.
+    const resumed = reduceProgress(progress, { event: 'translation_progress', completed: 60, total: 100 }, START + 80_000);
+    expect(remainingSeconds(resumed, START + 81_000)).not.toBeNull();
+  });
+
+  it('never waits less than 15 s before calling a fast run stalled', () => {
+    const fast = run([[5, 12], [10, 24], [15, 36], [20, 48]]);
+    expect(remainingSeconds(fast, START + 34_000)).not.toBeNull();
+    expect(remainingSeconds(fast, START + 36_000)).toBeNull();
+  });
+
+  it('hides the estimate while a retry is reported and while cancelling', () => {
+    const progress = run(steady);
+    expect(remainingSeconds(progress, START + 45_000)).not.toBeNull();
+    const retrying = reduceProgress(progress, { event: 'translation_batch_error', attempt: 1, max_attempts: 3, failure: 'rate_limit' }, START + 42_000);
+    expect(remainingSeconds(retrying, START + 45_000)).toBeNull();
+    // Fresh progress clears the retry and the estimate is back.
+    const after = reduceProgress(retrying, { event: 'translation_progress', completed: 60, total: 100 }, START + 50_000);
+    expect(after.retry).toBeNull();
+    expect(remainingSeconds(after, START + 51_000)).not.toBeNull();
+    expect(remainingSeconds(progress, START + 45_000, true)).toBeNull();
+  });
+
   it('is silent outside the translate phase and when nothing is left', () => {
     expect(remainingSeconds({ ...run(steady), phase: 'write' }, START + 40_000)).toBeNull();
     expect(remainingSeconds(run([[10, 25], [20, 50], [30, 75], [40, 100]]), START + 40_000)).toBeNull();
