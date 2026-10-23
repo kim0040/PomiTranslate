@@ -25,6 +25,7 @@
 | # | 심각도 | 문제 | 위치 | 제안 |
 | --- | --- | --- | --- | --- |
 | U22 | 낮음 | 용어집 화면·가져오기·"용어집에 추가"·품질 경고는 browser fixture(mock core)로만 확인했다. 실제 core의 glossary 응답, native 저장 창에서의 용어집 파일 저장(`glossary_csv`)과 저장 실패 시 클립보드 복사, 스크린 리더 읽기는 확인하지 않았다. | `tests/browser/glossary.spec.ts` | UX-NATIVE-01·QUALITY-01 native 점검에서 함께 확인 |
+| U23 | 낮음 | 용어집을 "더 보기"로 200개 넘게 펼치면 화면 밖 줄은 `content-visibility: auto`로 그리기를 미룬다. Chrome에서 이 줄들은 목록 항목으로는 남지만 안의 입력란이 접근성 트리에 스크롤해 가까워질 때까지 나타나지 않아, 화면 읽기 프로그램의 탐색 모드(NVDA/JAWS)에서 먼 줄이 비어 보일 수 있다. Tab·포커스는 모든 줄에 닿는다. 200개 이하 목록은 영향 없음. 실제 화면 읽기 프로그램으로 확인하지 않았다. | `GlossaryScreen.svelte` `.entries.long .entry` | 실제 화면 읽기 프로그램 확인 후 문제가 되면 검색 안내를 두거나 접근 가능한 가상 목록으로 교체 |
 
 ## 문서·화면 자료
 
