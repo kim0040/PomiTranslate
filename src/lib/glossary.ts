@@ -144,6 +144,118 @@ export function snapshot(drafts: DraftEntry[]): string {
 }
 
 /**
+ * Answers "is there anything unsaved" and "how many rows are saved" exactly as `snapshot(drafts) !==
+ * base` and `savableDrafts(drafts).length` do, without walking and serializing every row on every
+ * keystroke. A snapshot is the list of the serialized savable rows, so two snapshots are equal exactly
+ * when those lists are. The tracker keeps the serialized rows (`current`) next to the saved ones
+ * (`saved`) and how many positions differ (`mismatch`). A keystroke in a row that stays savable
+ * re-serializes that one row and moves `mismatch` by at most one; the list is walked again (from
+ * the cached strings, not by serializing) only when rows are added, removed or moved, or a row becomes
+ * blank or stops being blank.
+ *
+ * The rows are edited in place, so every change must be reported: `edit(key)` after a row's fields
+ * changed, `structure(drafts)` after rows were added, removed or moved, `reset(drafts)` after a load or save.
+ */
+export class DraftTracker {
+  private drafts: DraftEntry[] = [];
+  private rows = new Map<string, DraftEntry>();
+  /** The serialized savable rows when the list was loaded or saved. */
+  private saved: string[] = [];
+  /** The serialized form of each savable row, by key; only `edit` and a rebuild refresh an entry. */
+  private cache = new Map<string, string>();
+  private current: string[] = [];
+  private position = new Map<string, number>();
+  private mismatch = 0;
+
+  /** The list as just loaded or saved becomes the one "unsaved" is measured against. */
+  reset(drafts: DraftEntry[]): void {
+    this.cache = new Map();
+    this.drafts = drafts;
+    this.index();
+    this.saved = [];
+    for (const draft of drafts) if (!isBlank(draft)) this.saved.push(this.serialized(draft));
+    this.walk();
+  }
+
+  /** Rows were added, removed or moved (the array changed). */
+  structure(drafts: DraftEntry[]): void {
+    this.drafts = drafts;
+    this.index();
+    this.walk();
+  }
+
+  /** The fields of one row changed. */
+  edit(key: string): void {
+    const draft = this.rows.get(key);
+    if (!draft) return;
+    const at = this.position.get(key);
+    const blank = isBlank(draft);
+    if (at === undefined && blank) return; // a blank row stays blank: it is not part of any snapshot
+    if (at === undefined || blank) {
+      this.walk(); // the row stopped being blank, or became blank
+      return;
+    }
+    const text = JSON.stringify(fromDraft(draft));
+    const before = this.current[at];
+    if (text === before) return;
+    this.cache.set(key, text);
+    this.current[at] = text;
+    if (at < this.saved.length) this.mismatch += Number(text !== this.saved[at]) - Number(before !== this.saved[at]);
+  }
+
+  /** The row on screen with this key (the object that is edited in place). */
+  draft(key: string): DraftEntry | undefined {
+    return this.rows.get(key);
+  }
+
+  /** Exactly `snapshot(drafts) !== base`. */
+  get dirty(): boolean {
+    return this.current.length !== this.saved.length || this.mismatch > 0;
+  }
+
+  /** Exactly `savableDrafts(drafts).length`. */
+  get count(): number {
+    return this.current.length;
+  }
+
+  /** The saved rows as `JSON.parse` of the old base snapshot gave them. */
+  savedEntries(): GlossaryEntry[] {
+    return this.saved.map((text) => JSON.parse(text) as GlossaryEntry);
+  }
+
+  private serialized(draft: DraftEntry): string {
+    let text = this.cache.get(draft.key);
+    if (text === undefined) {
+      text = JSON.stringify(fromDraft(draft));
+      this.cache.set(draft.key, text);
+    }
+    return text;
+  }
+
+  private index(): void {
+    this.rows = new Map();
+    for (const draft of this.drafts) this.rows.set(draft.key, draft);
+  }
+
+  private walk(): void {
+    const cache = new Map<string, string>();
+    this.current = [];
+    this.position = new Map();
+    this.mismatch = 0;
+    for (const draft of this.drafts) {
+      if (isBlank(draft)) continue;
+      const text = this.serialized(draft);
+      cache.set(draft.key, text);
+      const at = this.current.length;
+      this.position.set(draft.key, at);
+      this.current.push(text);
+      if (at < this.saved.length && text !== this.saved[at]) this.mismatch += 1;
+    }
+    this.cache = cache;
+  }
+}
+
+/**
  * Rows whose source, target or note contains the text (case-insensitive). An empty query keeps
  * everything. Rows still being typed (`pinned` keys, and empty rows) stay, so a new row does not
  * vanish mid-edit.
@@ -151,8 +263,22 @@ export function snapshot(drafts: DraftEntry[]): string {
 export function filterDrafts(drafts: DraftEntry[], query: string, pinned: readonly string[] = []): DraftEntry[] {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return drafts;
-  return drafts.filter((draft) => pinned.includes(draft.key) || isBlank(draft)
-    || `${draft.source}\n${draft.target}\n${draft.note}`.toLocaleLowerCase().includes(needle));
+  return drafts.filter((draft) => pinned.includes(draft.key) || matchesQuery(draft, needle));
+}
+
+/** Whether a row is shown for a search: it contains the text, or it is still empty. `needle` is trimmed and lowercased. */
+export function matchesQuery(draft: DraftEntry, needle: string): boolean {
+  return isBlank(draft) || `${draft.source}
+${draft.target}
+${draft.note}`.toLocaleLowerCase().includes(needle);
+}
+
+/** The keys of the rows `matchesQuery` accepts for `query`; every key for an empty query. */
+export function matchingKeys(drafts: DraftEntry[], query: string): Set<string> {
+  const needle = query.trim().toLocaleLowerCase();
+  const keys = new Set<string>();
+  for (const draft of drafts) if (!needle || matchesQuery(draft, needle)) keys.add(draft.key);
+  return keys;
 }
 
 type EntryField = FieldName | 'mode' | 'id' | 'caseSensitive';

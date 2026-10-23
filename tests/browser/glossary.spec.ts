@@ -291,6 +291,77 @@ test.describe('the glossary page', () => {
   });
 });
 
+test.describe('a long list', () => {
+  const seed2000 = (page: Page) => page.addInitScript(() => {
+    if (sessionStorage.getItem('pomi.fixture.glossary')) return;
+    const entries = Array.from({ length: 2000 }, (_, i) => ({ id: i.toString(16).padStart(20, '0'), source: `Source term number ${i}`, target: `번역 ${i}`, mode: 'translate', caseSensitive: false, note: i % 5 ? '' : 'a note' }));
+    sessionStorage.setItem('pomi.fixture.glossary', JSON.stringify({ global: { revision: 1, entries } }));
+  });
+  // The page measures "unsaved" and the count from the edited row, not from the whole list; these are
+  // the cases where that must still agree with a comparison of the whole list.
+  const input = (page: Page, label: string) => page.locator(`[aria-label="${label}"]`);
+
+  test('typing in a row keeps the count and the unsaved state right, even when the typing is undone', async ({ page }) => {
+    test.setTimeout(60000);
+    await seed2000(page);
+    await boot(page, 'scenario=selected');
+    await openGlossary(page);
+    await expect(page.getByText('2,000 / 2,000개')).toBeVisible();
+    await expect(saveBar(page)).toHaveCount(0);
+    // 200 rows are drawn first; every one of them keeps its names.
+    await expect(page.locator('li.entry')).toHaveCount(200);
+
+    const row1 = input(page, '번역, 항목 1');
+    await row1.fill('번역 0!');
+    await expect(saveBar(page)).toContainText('저장하지 않은 변경');
+    await expect(page.getByText('2,000 / 2,000개')).toBeVisible();
+    await row1.fill('번역 0');
+    await expect(saveBar(page)).toHaveCount(0);
+    // A row emptied completely is not saved, so it leaves the count; filling it again brings the count and the clean state back.
+    await input(page, '원문, 항목 1').fill('');
+    await row1.fill('');
+    await input(page, '메모, 항목 1').fill('');
+    await expect(page.getByText('1,999 / 2,000개')).toBeVisible();
+    await expect(saveBar(page)).toContainText('저장하지 않은 변경');
+    await input(page, '원문, 항목 1').fill('Source term number 0');
+    await row1.fill('번역 0');
+    await input(page, '메모, 항목 1').fill('a note');
+    await expect(page.getByText('2,000 / 2,000개')).toBeVisible();
+    await expect(saveBar(page)).toHaveCount(0);
+  });
+
+  test('a row far down the list can be reached by "show more" and by a refused save', async ({ page }) => {
+    test.setTimeout(90000);
+    await seed2000(page);
+    await boot(page, 'scenario=selected');
+    await openGlossary(page);
+    const more = page.locator('button.more');
+    // Axe over a few rows near the top and a few from the second page, which is drawn with the long-list rules.
+    await more.click();
+    await expect(page.locator('li.entry')).toHaveCount(400);
+    const rows = await new AxeBuilder({ page }).include('.entries > li:nth-child(-n+3)').include('.entries > li:nth-child(n+398)')
+      .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+    expect(rows.violations.map((item) => item.id)).toEqual([]);
+    for (let i = 1; i < 9; i += 1) await more.click();
+    await expect(more).toHaveCount(0);
+    await expect(page.locator('li.entry')).toHaveCount(2000);
+    // Past the first page the rows far from the screen are not laid out, but they keep their names and take focus.
+    const last = input(page, '번역, 항목 2000');
+    await last.focus();
+    await expect(last).toBeFocused();
+    await expect(last).toBeInViewport();
+    // Clearing the source of a row that still has a translation is refused on screen, and the row is brought into view.
+    await input(page, '번역, 항목 1').focus();
+    await input(page, '원문, 항목 1500').fill('');
+    await input(page, '원문, 항목 1').scrollIntoViewIfNeeded();
+    await saveBar(page).getByRole('button', { name: '저장', exact: true }).click();
+    await expect(input(page, '원문, 항목 1500')).toBeFocused();
+    await expect(input(page, '원문, 항목 1500')).toBeInViewport();
+    await expect(input(page, '원문, 항목 1500')).toHaveAttribute('aria-invalid', 'true');
+    expect(await asked(page, 'glossary.set')).toHaveLength(0);
+  });
+});
+
 test.describe('importing and exporting', () => {
   const csv = (text: string) => ({ name: 'terms.csv', mimeType: 'text/csv', buffer: Buffer.from(text, 'utf-8') });
 
