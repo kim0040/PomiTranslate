@@ -1,8 +1,10 @@
-# 현재 상태 — 2026-10-02
+# 현재 상태 — 2026-10-23
 
 ## 판정
 
 **Phase2 데스크톱 기능·macOS arm64 개발 환경 gate 완료 / Phase3 진행 중(COMP-01 완료) / release-ready 아님.** 2026-10-01 후속 작업으로 [네이티브 UX·Gemini·SNBT 개선](history/native-ux-and-compat-2026-10-01.md)을 구현했다. 이 후속 변경의 macOS native 확인은 아직 하지 않았다(Linux에서 Rust 컴파일·테스트와 browser fixture로만 확인). `claude/review-and-plan-2026-10-01`의 7개 commit을 2026-10-02 main에 fast-forward 통합했다. [통합·대조 기록](history/main-integration-2026-10-02.md). 최신 SHA/원격 상태는 Git 기록을 따른다. 플랫폼·서명 배포 gate는 남아 있다.
+
+2026-10-23 상용 수준 점검(`improve/commercial-readiness` 브랜치, 로컬 commit·push 안 함): 쓰기 저널·재시도 계약, sidecar 패키징·프로세스 감독·stdin EOF 종료, 응답 계약, 진단 정리·파일 저장, 자격 증명 경로 검증과 keychain 이름 공간 소유, 종료·업데이트 의도 경로, 시각 디자인, 용어집과 서식 잔여 감지(QUALITY-01 일부)를 고쳤다. Windows 개발 환경의 자동 검사와 반대 계열 검토로 확인했고 native 창·설치 프로그램·macOS/Linux·실제 OS keychain·실제 제공사는 확인하지 않았다. Phase 상태는 바뀌지 않는다. [기록](history/commercial-readiness-2026-10-23.md)
 
 최신 증거는 [Phase2 완료 검증](history/phase2-completion-2026-10-01.md), 샘플 provenance·실제 provider는 [샘플·시작 복구 검증](history/sample-startup-validation-2026-10-01.md), 설정 증거는 [설정·추론 UI/UX 개선](history/settings-ux-2026-10-01.md), 전체 backlog는 [남은 작업](follow-up-work.md)이다. 과거 중단 기록은 현재 실행 상태를 덮어쓰지 않는다.
 
@@ -22,7 +24,7 @@
 - 명령 텍스트: JSON과 Java 1.21.5+ SNBT(`mwt/snbt.py`, 바뀐 문자열만 원래 따옴표로 재기록), 선행 `/` 명령과 문자열 컴포넌트. 해석 불가 명령은 원본 유지 + `command_unparsed` 경고. `EXTRACTOR_VERSION` 3. 서식 토큰은 개수 완전 일치·추가 금지로 검증.
 - 앱 데이터의 검증된 백업, legacy `.pomi-backups` 발견/복원, 복원 직전 recovery snapshot.
 - 번역 후 처음 생성된 `.mcc`의 원래 부재를 백업하고 복원 직전 payload를 recovery에 보존한다. payload→region 순 write/restore, 물리 `.mcc` 변경 파일 집계와 255-sector 경계·중간 write 실패 fixture/native 검증.
-- 기본 credential은 Rust SQLite/AES-256-GCM + 별도 설치별 key 파일. Session과 opt-in OS keychain; 자동 keychain 읽기/import 없음. 저장된 키 전체는 UI에 반환하지 않는다. Local→Session 전환 시 stale local ciphertext 제거를 atomic metadata transaction으로 처리한다.
+- 기본 credential은 Rust SQLite/AES-256-GCM + 별도 설치별 key 파일. Session과 opt-in OS keychain; 자동 keychain 읽기/import 없음. 2026-10-23부터 앱은 `PomiTranslate/<제공사>` 이름의 항목만, 사람이 요청한 삭제·방식 변경·초기화 때만 지우며 keychain을 쓴 적이 없는 사용자에게는 OS 저장소를 부르지 않는다. 저장된 키 전체는 UI에 반환하지 않는다. Local→Session 전환 시 stale local ciphertext 제거를 atomic metadata transaction으로 처리한다.
 - 같은 계정으로 DB와 key 파일을 모두 읽는 프로세스까지 막는 설계는 아니다. Windows permission 코드는 target typecheck만 통과했으며 native 검증 전이다.
 - OpenAI/Gemini/Anthropic/OpenRouter/Comet/Custom, provider endpoint 고정과 Custom wire format·URL 검증. Gemini는 헤더 인증, thinking 제어(3.x level/2.5 budget), 사고 토큰 사용량 합산, MAX_TOKENS 실패 처리. CLI 환경변수 호환과 Rust-owned sidecar 환경변수 차단을 구분한다.
 - 설정 그룹/disclosure, 종류별 scope 및 curated presets, 파일/key 규칙, global source overrides, performance/file retry/error 정책, 공개 JSON import/export/reset, literal `translate.py` 읽기 전용 preview, 명시적 확인 후 style helper.
