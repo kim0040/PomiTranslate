@@ -59,3 +59,5 @@ playwright-cli --session=pomi-l10n close
 캡처 entry는 `locale=ko|en|ja`를 검증하고, 각 언어의 UI·도착 언어·합성 수동 번역을 초기화합니다. 언어 전환이 실제 번역 대상의 지원을 확장한다는 뜻은 아닙니다. 캡처는 Review→Settings→Run까지만 이동하며 스캔·번역·복원을 시작하지 않습니다. 글꼴·화면 전환·저장 알림이 끝난 뒤 찍고 외부 요청·실행 요청·가로 overflow를 확인합니다. 파일 생성 후 모든 화면을 직접 검토해 빈 화면·잘림·비밀·개인 경로를 확인합니다.
 
 [`docs/images/manifest.json`](images/manifest.json)은 PNG 9개 hash, UI/fixture/lock 입력 hash와 이번 한국어 캡처의 기존 URL 3개 별칭을 기록합니다. 소개 화면은 **합성 데이터의 브라우저 캡처**이며 최신 native·실제 provider·설치 검증의 증거가 아닙니다. 과거 PASS를 이번 언어 작업의 결과로 복사하지 않습니다.
+
+`playwright-cli`가 없으면 같은 스크립트 본문(`async (page) => {...}`)을 `@playwright/test`의 Chromium에서 실행해도 됩니다. 화면 PNG만 다시 찍었다면 SVG 생성은 `--check`로 최신인지만 확인하고 공유 이미지·안내 카드 PNG는 다시 렌더하지 않으며, `update-docs-image-manifest.mjs`가 고쳐 쓰는 `assets/localization-manifest.json`은 그 PNG를 다시 렌더하지 않았다면 되돌립니다(다른 OS 글꼴로 이유 없이 바뀌는 것을 막습니다). 이 스크립트는 `docs/images/manifest.json`의 `environment`를 `macOS / Playwright Chromium`으로 고정해 적으므로 다른 OS에서 찍었다면 실제 환경으로 고칩니다.
