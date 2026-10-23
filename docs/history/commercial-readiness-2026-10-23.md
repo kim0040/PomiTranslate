@@ -92,6 +92,11 @@
 - 모델 목록에서 번역에 쓸 수 없는 모델(임베딩·음성 전용·이미지·영상·실시간·robotics·computer-use 등)을 빼되, 글을 출력할 수 있는 모델은 다른 출력이 함께 있어도 남긴다. 저장된 모델은 빠지지 않고 표시된다.
 - 반대 계열 검토(High 1 / Medium 5 / Low 3)를 반영했다. 가격표 기반 비용 추정과 실제 Gemini 확인은 남았다.
 
+## 7d. 이 시점의 자동 검사 (Windows 개발 환경)
+
+- `700aad8`에서 `pnpm verify:local` 57/57 PASS(Python·frontend·Rust: Rust lib 247 PASS/5 ignored, clippy·fmt, vitest 250). 같은 소스에서 browser fixture 전체 Playwright 293/293 PASS(2 workers, 21.9분). 같은 날 앞선 실행에서 `test_webui_security`가 부하 중 한 번 실패하고 단독 실행에서 통과했다(부하 의존 불안정, 원인 미확정).
+- 반대 계열 검토는 Codex 사용 한도로 마지막 제공사 수정 재검토를 끝내지 못해, 구현(Sonnet)과 다른 모델(Opus)이 대조 검토했다(대기 중 로더 import 위치 한 건 수정).
+
 ## 8. 남은 증거 (이 문서 시점)
 
 - 실제 Windows 창에서 X·Alt+F4·Ctrl+Q 종료 흐름, 설치 프로그램 빌드·설치, 패키지된 sidecar(콘솔/비콘솔)의 JSONL.
