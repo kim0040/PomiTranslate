@@ -112,6 +112,8 @@ jobs:
         run: python tests/test_glossary.py
       - name: Glossary terms in a translation, cache keys, retry and warnings
         run: python tests/test_glossary_translation.py
+      - name: Glossary source folding shared with the UI, fixture cases and casefold table
+        run: python tests/test_glossary_fold.py
       - name: Source letters left next to a format code are detected
         run: python tests/test_format_residue.py
       - name: Backup deletion and pruning respect locks, last copies and open recoveries

@@ -1,0 +1,465 @@
+{
+ "about": "Shared by tests/test_glossary_fold.py (the core) and tests/frontend/glossary.test.ts (the UI). foldCases: fold_key(text) == folded. clashCases: the index of the first entry the core refuses as a duplicate source (null: none).",
+ "foldCases": [
+  {
+   "text": "Elder Mira",
+   "folded": "elder mira"
+  },
+  {
+   "text": "MIRA",
+   "folded": "mira"
+  },
+  {
+   "text": "Straße",
+   "folded": "strasse"
+  },
+  {
+   "text": "STRASSE",
+   "folded": "strasse"
+  },
+  {
+   "text": "ẞ",
+   "folded": "ss"
+  },
+  {
+   "text": "ß",
+   "folded": "ss"
+  },
+  {
+   "text": "ΟΔΟΣ",
+   "folded": "οδοσ"
+  },
+  {
+   "text": "οδος",
+   "folded": "οδοσ"
+  },
+  {
+   "text": "οδοσ",
+   "folded": "οδοσ"
+  },
+  {
+   "text": "ς",
+   "folded": "σ"
+  },
+  {
+   "text": "Σ",
+   "folded": "σ"
+  },
+  {
+   "text": "ﬁle",
+   "folded": "file"
+  },
+  {
+   "text": "ﬃ",
+   "folded": "ffi"
+  },
+  {
+   "text": "ŉ",
+   "folded": "ʼn"
+  },
+  {
+   "text": "ǅ",
+   "folded": "ǆ"
+  },
+  {
+   "text": "ǰ",
+   "folded": "ǰ"
+  },
+  {
+   "text": "İstanbul",
+   "folded": "i̇stanbul"
+  },
+  {
+   "text": "ı",
+   "folded": "ı"
+  },
+  {
+   "text": "I",
+   "folded": "i"
+  },
+  {
+   "text": "K",
+   "folded": "k"
+  },
+  {
+   "text": "k",
+   "folded": "k"
+  },
+  {
+   "text": "Å",
+   "folded": "å"
+  },
+  {
+   "text": "Å",
+   "folded": "å"
+  },
+  {
+   "text": "µ",
+   "folded": "μ"
+  },
+  {
+   "text": "ſ",
+   "folded": "s"
+  },
+  {
+   "text": "և",
+   "folded": "եւ"
+  },
+  {
+   "text": "ᾈ",
+   "folded": "ἀι"
+  },
+  {
+   "text": "ꭰ",
+   "folded": "Ꭰ"
+  },
+  {
+   "text": "Ꭰ",
+   "folded": "Ꭰ"
+  },
+  {
+   "text": "ͅ",
+   "folded": "ι"
+  },
+  {
+   "text": "한국어",
+   "folded": "한국어"
+  },
+  {
+   "text": "猫cat",
+   "folded": "猫cat"
+  },
+  {
+   "text": "😀😀",
+   "folded": "😀😀"
+  },
+  {
+   "text": "カナ",
+   "folded": "カナ"
+  },
+  {
+   "text": "Ǆ",
+   "folded": "ǆ"
+  },
+  {
+   "text": "ΐ",
+   "folded": "ΐ"
+  },
+  {
+   "text": "ὈΔΥΣΣΕΎΣ",
+   "folded": "ὀδυσσεύσ"
+  },
+  {
+   "text": "Sigma ΑΣ end",
+   "folded": "sigma ασ end"
+  },
+  {
+   "text": "ΑΣ Β",
+   "folded": "ασ β"
+  },
+  {
+   "text": "",
+   "folded": ""
+  }
+ ],
+ "clashCases": [
+  {
+   "name": "sensitive then insensitive of another case",
+   "entries": [
+    {
+     "source": "MIRA",
+     "caseSensitive": true
+    },
+    {
+     "source": "mira",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "insensitive then sensitive of another case",
+   "entries": [
+    {
+     "source": "mira",
+     "caseSensitive": false
+    },
+    {
+     "source": "MIRA",
+     "caseSensitive": true
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "two insensitive of another case",
+   "entries": [
+    {
+     "source": "Mira",
+     "caseSensitive": false
+    },
+    {
+     "source": "mira",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "two sensitive of another case may coexist",
+   "entries": [
+    {
+     "source": "Mira",
+     "caseSensitive": true
+    },
+    {
+     "source": "mira",
+     "caseSensitive": true
+    }
+   ],
+   "clashAt": null
+  },
+  {
+   "name": "two sensitive of the same spelling clash",
+   "entries": [
+    {
+     "source": "Mira",
+     "caseSensitive": true
+    },
+    {
+     "source": "Mira",
+     "caseSensitive": true
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "different words",
+   "entries": [
+    {
+     "source": "Mira",
+     "caseSensitive": false
+    },
+    {
+     "source": "Mirage",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": null
+  },
+  {
+   "name": "sharp s against ss, both insensitive",
+   "entries": [
+    {
+     "source": "Straße",
+     "caseSensitive": false
+    },
+    {
+     "source": "STRASSE",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "sharp s against ss, both sensitive",
+   "entries": [
+    {
+     "source": "Straße",
+     "caseSensitive": true
+    },
+    {
+     "source": "STRASSE",
+     "caseSensitive": true
+    }
+   ],
+   "clashAt": null
+  },
+  {
+   "name": "sharp s against ss, one sensitive",
+   "entries": [
+    {
+     "source": "Straße",
+     "caseSensitive": true
+    },
+    {
+     "source": "strasse",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "capital sharp s",
+   "entries": [
+    {
+     "source": "ẞ",
+     "caseSensitive": false
+    },
+    {
+     "source": "ss",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "final sigma",
+   "entries": [
+    {
+     "source": "ΟΔΟΣ",
+     "caseSensitive": false
+    },
+    {
+     "source": "οδος",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "final sigma against sigma",
+   "entries": [
+    {
+     "source": "οδος",
+     "caseSensitive": false
+    },
+    {
+     "source": "οδοσ",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "ligature",
+   "entries": [
+    {
+     "source": "ﬁle",
+     "caseSensitive": false
+    },
+    {
+     "source": "FILE",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "Kelvin sign",
+   "entries": [
+    {
+     "source": "Kelvin",
+     "caseSensitive": false
+    },
+    {
+     "source": "kelvin",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "dotted capital I",
+   "entries": [
+    {
+     "source": "İ",
+     "caseSensitive": false
+    },
+    {
+     "source": "i̇",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "Cherokee letters",
+   "entries": [
+    {
+     "source": "ꭰ",
+     "caseSensitive": false
+    },
+    {
+     "source": "Ꭰ",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "Greek extended with iota",
+   "entries": [
+    {
+     "source": "ᾈ",
+     "caseSensitive": false
+    },
+    {
+     "source": "ἀι",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "surrounding spaces are not part of the source",
+   "entries": [
+    {
+     "source": "Mira ",
+     "caseSensitive": false
+    },
+    {
+     "source": " mira",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "inner spaces are",
+   "entries": [
+    {
+     "source": "Elder Mira",
+     "caseSensitive": false
+    },
+    {
+     "source": "Elder  Mira",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": null
+  },
+  {
+   "name": "emoji and Hangul",
+   "entries": [
+    {
+     "source": "😀한국",
+     "caseSensitive": false
+    },
+    {
+     "source": "😀한국",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 1
+  },
+  {
+   "name": "third entry clashes with the first",
+   "entries": [
+    {
+     "source": "one",
+     "caseSensitive": false
+    },
+    {
+     "source": "two",
+     "caseSensitive": false
+    },
+    {
+     "source": "ONE",
+     "caseSensitive": false
+    }
+   ],
+   "clashAt": 2
+  }
+ ]
+}

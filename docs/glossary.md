@@ -6,7 +6,7 @@
 
 - 전체 월드 공용: `<data_dir>/glossary/global.json`
 - 월드별: `<data_dir>/glossary/worlds/<worldKey>.json` (`worldKey`는 백업 journal과 같은 `world_key()`)
-- 한 파일에 항목 최대 2000개. `source` 1~200자, `target` 0~200자, `note` 0~300자. `mode`는 `translate`(항상 `target`으로 번역) 또는 `keep`(원문 그대로).
+- 한 파일에 항목 최대 2000개. `source` 1~200자, `target` 0~200자, `note` 0~300자. `mode`는 `translate`(항상 `target`으로 번역) 또는 `keep`(원문 그대로). 길이는 Python `len`처럼 유니코드 글자(코드 포인트) 수로 센다(이모지 하나는 1). 화면도 같은 방식으로 세고 자른다.
 - `translate` 항목은 `target`이 비어 있으면 저장하지 않는다(`GLOSSARY_INVALID`, `entries[i].target`). "빈 번역"은 따를 수 있는 규칙이 아니므로, 그대로 두려면 `keep`을 쓴다. `source`/`target`에는 줄바꿈 등 제어 문자를 쓸 수 없고 `note`만 줄바꿈·탭을 허용한다. 짝이 없는 서로게이트 같은 잘못된 유니코드도 필드 경로와 함께 `GLOSSARY_INVALID`다.
 - 같은 `source` 판정은 접은 문자열(`fold_key` = `casefold`)로 한다. 대소문자를 구분하는 두 항목은 대소문자만 달라도 함께 둘 수 있지만(`Mira`, `mira`), 대소문자를 구분하지 않는 항목은 접은 문자열이 같은 모든 항목과 충돌한다(`MIRA`(구분) + `mira`(구분 안 함)은 거부, `Straße` + `STRASSE`도 거부).
 - 월드별 항목이 접은 `source`가 같은 전역 항목을 통째로 덮어쓴다(양쪽의 `caseSensitive`와 무관). 번역에 쓰는 병합 목록의 항목 id는 파일 안에서만 유일하므로 `global:<id>` / `world:<id>`로 범위를 붙인다(경고의 `entryId`도 이 값).
@@ -19,6 +19,10 @@
 `glossary.get` / `glossary.set` / `glossary.import` / `glossary.export`. 입력 오류는 `GLOSSARY_INVALID`이며 메시지는 `entries[3].source: ...`처럼 필드 경로로 시작한다. 저장 실패는 `GLOSSARY_WRITE_FAILED`, 잠금 대기 초과는 `GLOSSARY_BUSY`.
 
 CSV/TSV는 `source,target[,mode,note[,caseSensitive]]` 열이며 머리글은 선택, UTF-8(BOM 있어도 없어도 됨). 따옴표·쉼표·줄바꿈이 든 칸을 지원한다. 내보내기는 스프레드시트가 한글을 바로 읽도록 BOM을 붙인다.
+
+**화면의 내보내기**: 앱(Tauri)에서는 내보내기 버튼이 저장 창을 연다. 화면은 `glossary.export`가 돌려준 텍스트를 그대로 `export_document`(`glossary_csv` / `glossary_tsv`, `document`는 그 텍스트의 JSON 문자열)에 넘기고, Rust가 BOM을 포함해 바이트 그대로 쓴다. 기본 파일 이름은 `pomi-glossary-global.csv` / `pomi-glossary-world.csv`(`fileName`, `^pomi-glossary-(global|world)\.(csv|tsv)$`만 받고 그 밖은 `pomi-glossary.csv`). 저장 창을 닫으면 아무 말도 하지 않고, 저장에 실패하면 클립보드 복사를 제안한다. 보고서와 달리 사이드카 작업 잠금은 잡지 않는다(읽는 파일이 없다). 브라우저에서는 같은 텍스트를 파일로 내려받는다.
+
+**화면의 중복 검사**: 저장 전에 화면이 `fold_key`와 같은 규칙(`src/lib/glossary.ts`의 `foldKey` = `toLowerCase()` + `src/lib/glossary-casefold.json`의 `casefold`와 다른 글자 297개, 그리고 "둘 다 대소문자 구분이고 철자가 다르면 공존" 규칙)으로 미리 알려 준다. 참고용이며 최종 판정은 코어다. 두 구현이 어긋나지 않도록 `tests/fixtures/glossary_fold_cases.json`을 `tests/test_glossary_fold.py`(코어)와 `tests/frontend/glossary.test.ts`(화면)가 함께 쓰고, 같은 Python 테스트가 JSON 표가 `casefold() != lower()`인 글자 전부와 일치하는지 확인한다. 표는 Python 3.12(Unicode 15.0)로 만들었고 Python 버전이 바뀌어 표가 달라지면 그 테스트가 알려 준다.
 
 **수식 방지**: 내보낼 때 `source`/`target`/`note` 칸이 `=`, `+`, `-`, `@`, 탭, CR로 시작하면 앞에 작은따옴표 하나를 붙인다(스프레드시트가 수식으로 실행하지 않게). 이미 작은따옴표로 시작하고 그 뒤가 수식 문자인 글(`'=x`)은 따옴표를 하나 더 붙인다. 가져올 때는 "작은따옴표 뒤가 수식 문자"인 칸에서 따옴표 하나를 벗긴다. 그래서 내보내기 → 가져오기는 글자를 그대로 되돌린다. 손으로 쓴 파일의 `'=Sum`도 `=Sum`으로 읽는다.
 
@@ -35,4 +39,4 @@ CSV/TSV는 `source,target[,mode,note[,caseSensitive]]` 열이며 머리글은 �
 - 직접 번역(검토 화면)은 항상 용어집보다 우선하며 용어집 검사를 받지 않는다. 이미 번역 캐시에 있는 문자열도 직접 번역이 덮어쓴다.
 - 용어집 지문(fingerprint)이 바뀐 뒤 이어하기(resume)하면 월드에 이미 쓴 상태는 유지하고 번역 캐시와 답변 로그는 통째로 버린다(경고 `glossary_changed`).
 
-검증: `python tests/test_glossary.py`, `tests/test_glossary_translation.py`, `tests/test_format_residue.py`. 실제 모델 응답에서의 효과는 합성 fixture로만 확인했고 실제 provider 호출은 하지 않았다.
+검증: `python tests/test_glossary.py`, `tests/test_glossary_translation.py`, `tests/test_glossary_fold.py`, `tests/test_format_residue.py`. 실제 모델 응답에서의 효과는 합성 fixture로만 확인했고 실제 provider 호출은 하지 않았다.
