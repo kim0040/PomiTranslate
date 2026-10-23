@@ -108,6 +108,11 @@
 
 - **두 번째 묶음의 자동 검사**: `fa3a2a6`에서 `pnpm verify:local` 60/60 PASS. 같은 소스의 전체 Playwright는 314 PASS·2 실패였고, 두 실패는 부하에 따른 테스트 타이밍(멈춘 종료의 대기 상태 150 ms, 5.2초 뒤 사라지는 알림)이라 테스트를 고쳐 반복 실행으로 확인했다. 최종 소스 `b0ac487`에서 전체 Playwright 316/316 PASS(2 workers, 26.9분).
 
+- **Windows native 추가 확인(`b0ac487` build)**:
+  - 실제 packaged core 대상 Rust smoke 5/5 PASS(`cargo test --lib smoke_ -- --ignored`, 합성 월드 복사본): 시작·`system.hello`·`app.bootstrap` 599 ms, 합성 월드 scan 후보 3·파일 SHA-256 불변, 실행 중 scan 취소 marker와 작업 종료, 멈춘 core 강제 종료 2.0초, 그리고 orphan 확인 — 정지(suspend)시킨 core를 띄운 부모를 `taskkill /F`로 죽이자 core가 Job Object로 사라졌다.
+  - NSIS 설치 파일을 사용자 범위로 조용히 설치(`/S`, 종료 코드 0) → `%LOCALAPPDATA%\PomiTranslate`에 실행 파일·`pomi-sidecar`·제거 프로그램, 제거 정보(0.1.0)·시작 메뉴 바로가기 등록 → 설치된 앱이 설치 폴더의 core로 시작, 창 닫기 종료 코드 0·core 잔류 없음 → 조용한 제거(종료 코드 0)로 프로그램 폴더·제거 정보·바로가기가 사라지고 앱 데이터는 남음(설계대로). 제거 뒤 Tauri NSIS가 설치 경로만 적어 둔 `HKCU\Software\PomiTranslate contributors\PomiTranslate` 키가 남는다(낮음, 템플릿 기본 동작; 이번 확인에서 만든 것은 지웠다). 확인 전에 없던 앱 데이터 폴더도 지웠다.
+  - 하지 않은 것: 설치 프로그램 화면(언어·경로) 조작, 이전 버전 위 업데이트 설치, 앱 안 클릭(X 확인 창·Alt+F4·저장 창), 키체인.
+
 ## 8. 남은 증거 (이 문서 시점)
 
 - 실제 Windows 창에서 X·Alt+F4·Ctrl+Q 종료 흐름, 설치 프로그램 빌드·설치, 패키지된 sidecar(콘솔/비콘솔)의 JSONL.
