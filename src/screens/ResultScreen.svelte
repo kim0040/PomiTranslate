@@ -9,6 +9,7 @@
   import { resultPresentation } from '../lib/workflow';
   import { exportDocument } from '../lib/document-export';
   import { failureKey, failureSummary, warningText } from '../lib/failures';
+  import QualityReport from '../components/QualityReport.svelte';
 
   async function exportReport(): Promise<void> {
     try {
@@ -133,6 +134,8 @@
         </ul>
       </Callout>
     {/if}
+
+    <QualityReport counts={result.translationWarnings} samples={result.translationWarningSamples} />
 
     {#if result.translationSamples?.length}
       <section class="card samples" aria-labelledby="samples-title">

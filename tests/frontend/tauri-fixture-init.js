@@ -145,6 +145,22 @@
     return { candidates: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, kinds: scan.kinds };
   }
   function resultPayload(status) {
+    if (status === 'quality') return {
+      status: 'completed', candidateCount: candidates.length, changedFileCount: 8, providerRequests: 2,
+      backupSetId: backups[0].backupSetId,
+      translation: { unique: 6, translated: 6, failed: 0, kept_original: 0, unchanged: 0 },
+      translationWarnings: { glossary_mismatch: 7, format_residue: 1, glossary_truncated: 1 },
+      translationWarningSamples: [
+        { code: 'glossary_mismatch', entryId: 'global:' + '1'.repeat(20), source: 'Elder Mira greets you', translated: '장로 미라가 인사합니다' },
+        { code: 'glossary_mismatch', entryId: 'global:' + '2'.repeat(20), source: 'The Lost Key Shop', translated: '분실 열쇠 상점' },
+        { code: 'glossary_mismatch', entryId: 'world:' + '9'.repeat(20), source: 'Gate of Dawn', translated: '새벽의 문' },
+        { code: 'format_residue', source: '§lcrypt', translated: '§lc지하실' },
+        { code: 'glossary_mismatch', entryId: 'global:' + '1'.repeat(20), source: 'Elder Mira again', translated: '장로 미라 다시' },
+        { code: 'glossary_mismatch', entryId: 'global:' + '1'.repeat(20), source: 'a sixth sample that must not be shown', translated: 'x' }
+      ],
+      warnings: [{ code: 'glossary_changed', dropped_translations: 4 }],
+      usage: { prompt_tokens: 712, completion_tokens: 231, cost: 0.00025, cost_reported: true }
+    };
     if (status === 'codes') return {
       status: 'partial', candidateCount: candidates.length, changedFileCount: 3, providerRequests: 4,
       backupSetId: backups[0].backupSetId,
@@ -199,6 +215,42 @@
     };
   }
 
+  // The glossary, kept in memory for the page and in sessionStorage across reloads.
+  // ?glossary=seeded|conflict-once|invalid|busy-once|write-failed|unsupported
+  const glossaryMode = () => new URLSearchParams(location.search).get('glossary') || '';
+  const glossaryStore = () => JSON.parse(sessionStorage.getItem('pomi.fixture.glossary') || '{}');
+  const glossaryPut = (store) => sessionStorage.setItem('pomi.fixture.glossary', JSON.stringify(store));
+  const glossaryKey = (body) => (body.scope === 'world' ? `world:${body.worldDir}` : 'global');
+  const glossarySeed = () => (glossaryMode() === 'seeded' ? [
+    { id: '1'.repeat(20), source: 'Elder Mira', target: '', mode: 'keep', caseSensitive: false, note: 'village elder' },
+    { id: '2'.repeat(20), source: 'Lost Key', target: '잃어버린 열쇠', mode: 'translate', caseSensitive: true, note: '' }
+  ] : []);
+  const glossaryDoc = (body) => {
+    const store = glossaryStore();
+    const found = store[glossaryKey(body)];
+    return { scope: body.scope, revision: found ? found.revision : 0, updatedAt: found ? '2026-10-20T00:00:00+00:00' : null, entries: found ? found.entries : (body.scope === 'global' ? glossarySeed() : []) };
+  };
+  const glossaryError = (request, code, message) => ({ v: 1, id: request.id, type: 'response.error', error: { code, message, recoverable: true } });
+  const glossaryNewId = () => Array.from({ length: 20 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+  function glossaryParse(text, format) {
+    const sep = format === 'tsv' ? '\t' : ',';
+    const rows = text.replace(/^﻿/, '').split(/\r?\n/).filter((line) => line.trim() !== '');
+    const out = []; const skipped = [];
+    rows.forEach((line, index) => {
+      const cells = line.split(sep).map((cell) => cell.trim().replace(/^"|"$/g, ''));
+      if (index === 0 && ['source', 'original'].includes((cells[0] || '').toLowerCase())) return;
+      const [source = '', target = '', mode = '', note = '', flag = ''] = cells;
+      const row = index + 1;
+      if (!source) { skipped.push({ row, reason: 'empty_source', source }); return; }
+      const kind = mode.toLowerCase() === 'keep' ? 'keep' : 'translate';
+      if (mode && !['keep', 'translate'].includes(mode.toLowerCase())) { skipped.push({ row, reason: 'invalid_mode', source }); return; }
+      if (kind === 'translate' && !target) { skipped.push({ row, reason: 'missing_target', source }); return; }
+      if (out.some((item) => item.source.toLowerCase() === source.toLowerCase())) { skipped.push({ row, reason: 'duplicate_in_file', source }); return; }
+      out.push({ source, target: kind === 'keep' ? '' : target, mode: kind, note, caseSensitive: flag.toLowerCase() === 'true' });
+    });
+    return { rows: out, skipped };
+  }
+
   async function sidecar(request) {
     const type = request.type;
     const body = request.payload || {};
@@ -215,7 +267,7 @@
       if (current === 'startup-delay') await new Promise((resolve) => setTimeout(resolve, 500));
       const empty = current === 'empty';
       const resumed = ['scanned', 'review', 'run', 'run-progress', 'recovery-required', 'translate-fails', 'result-success', 'result-failed', 'dark-review'].includes(current);
-      const resultScenarios = ['result-codes', 'result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
+      const resultScenarios = ['result-quality', 'result-codes', 'result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
@@ -361,7 +413,10 @@
             setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 2 + round, total: 6, failed: 0, batch: round + 1, batches: 3, requests: round + 1, cost: null, samples: [1, 2, 3].map((n) => sentence(round * 3 + n)) } }), 120 + round * 30);
           }
         } else {
-          setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1, cost: progressMode === 'nocost' ? null : 0.000123, samples: [{ source: 'Welcome to Roguefire', translated: '로그파이어에 오신 것을 환영합니다' }, { source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }] } }), 120);
+          if (progressMode === 'quality') {
+            setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'checkpoint_glossary_changed', dropped_translations: 9 } }), 80);
+          }
+          setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed: 4, total: 6, failed: 0, batch: 1, batches: 2, requests: 1, ...(progressMode === 'quality' ? { warnings: { glossary_mismatch: 2, format_residue: 1 } } : {}), cost: progressMode === 'nocost' ? null : 0.000123, samples: [{ source: 'Welcome to Roguefire', translated: '로그파이어에 오신 것을 환영합니다' }, { source: 'The Lost Key Shop', translated: '잃어버린 열쇠 상점' }] } }), 120);
         }
         return new Promise((resolve) => setTimeout(() => resolve(ok(request, resultPayload('completed'))), 60000));
       }
@@ -377,7 +432,62 @@
       return ok(request, resultPayload(current.startsWith('result-') ? current.slice('result-'.length) : 'completed'));
     }
     if (type === 'restore.start') return ok(request, { status: 'restored', recoverySetId: 'recovery-before-restore' });
+    if (type.startsWith('glossary.')) {
+      (window.__pomiGlossary ||= []).push({ type, payload: body });
+      if (glossaryMode() === 'unsupported') return glossaryError(request, 'UNSUPPORTED_REQUEST', 'unknown');
+      const store = glossaryStore();
+      const key = glossaryKey(body);
+      const doc = glossaryDoc(body);
+      if (type === 'glossary.get') return ok(request, doc);
+      if (type === 'glossary.export') {
+        const header = 'source,target,mode,note,caseSensitive';
+        const lines = doc.entries.map((item) => [item.source, item.target, item.mode, item.note, String(item.caseSensitive)].join(','));
+        return ok(request, { scope: body.scope, format: body.format, revision: doc.revision, count: doc.entries.length, text: `﻿${[header, ...lines].join('\r\n')}\r\n` });
+      }
+      // set and import change the list: a stale revision, a refusal or a busy file are scripted per scenario.
+      const mode = glossaryMode();
+      if (mode === 'conflict-once' && sessionStorage.getItem('pomi.fixture.glossaryConflict') !== 'true') {
+        sessionStorage.setItem('pomi.fixture.glossaryConflict', 'true');
+        store[key] = { revision: doc.revision + 1, entries: [...doc.entries, { id: glossaryNewId(), source: 'Added Elsewhere', target: '', mode: 'keep', caseSensitive: false, note: '' }] };
+        glossaryPut(store);
+        return glossaryError(request, 'GLOSSARY_CONFLICT', 'The glossary was changed by another save');
+      }
+      if (mode === 'busy-once' && sessionStorage.getItem('pomi.fixture.glossaryBusy') !== 'true') {
+        sessionStorage.setItem('pomi.fixture.glossaryBusy', 'true');
+        return glossaryError(request, 'GLOSSARY_BUSY', 'busy');
+      }
+      if (mode === 'write-failed') return glossaryError(request, 'GLOSSARY_WRITE_FAILED', 'The glossary could not be saved: disk full');
+      if (body.baseRevision !== doc.revision) return glossaryError(request, 'GLOSSARY_CONFLICT', 'stale');
+      if (type === 'glossary.set') {
+        const entries = body.entries || [];
+        if (mode === 'invalid' && entries.length > 1) return glossaryError(request, 'GLOSSARY_INVALID', 'entries[1].target: is longer than 200 characters');
+        const saved = entries.map((item) => ({ id: item.id || glossaryNewId(), source: item.source, target: item.target || '', mode: item.mode, caseSensitive: !!item.caseSensitive, note: item.note || '' }));
+        store[key] = { revision: doc.revision + 1, entries: saved };
+        glossaryPut(store);
+        return ok(request, glossaryDoc(body));
+      }
+      if (type === 'glossary.import') {
+        const parsed = glossaryParse(body.text || '', body.format);
+        if (!parsed.rows.length && body.mode === 'replace') return glossaryError(request, 'GLOSSARY_INVALID', 'text: has no usable rows');
+        let added = 0; let updated = 0; let unchanged = 0; let removed = 0;
+        const next = body.mode === 'replace' ? [] : [...doc.entries];
+        for (const row of parsed.rows) {
+          const at = next.findIndex((item) => item.source.toLowerCase() === row.source.toLowerCase());
+          if (at < 0) { next.push({ id: glossaryNewId(), ...row }); added++; continue; }
+          const same = next[at].target === row.target && next[at].mode === row.mode && next[at].note === row.note;
+          if (same) unchanged++; else { next[at] = { ...next[at], ...row }; updated++; }
+        }
+        if (body.mode === 'replace') removed = doc.entries.filter((item) => !next.some((row) => row.source.toLowerCase() === item.source.toLowerCase())).length;
+        store[key] = { revision: doc.revision + 1, entries: next };
+        glossaryPut(store);
+        return ok(request, { ...glossaryDoc(body), added, updated, unchanged, removed, skipped: parsed.skipped, skippedCount: parsed.skipped.length });
+      }
+    }
     if (type === 'credentials.delete') {
+      // ?delete=unconfirmed: the system keychain entry could not be deleted.
+      if (new URLSearchParams(location.search).get('delete') === 'unconfirmed') {
+        return { v: 1, id: request.id, type: 'response.error', error: { code: 'KEYCHAIN_UNCONFIRMED', message: 'raw core text', recoverable: true } };
+      }
       const cleared = JSON.parse(sessionStorage.getItem('pomi.fixture.cleared') || '[]');
       sessionStorage.setItem('pomi.fixture.cleared', JSON.stringify([...cleared, body.provider]));
       return ok(request, { deleted: true });

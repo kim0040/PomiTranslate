@@ -40,7 +40,8 @@ export function warningKey(code: string): MessageKey | null {
  * A warning from the core as a sentence in the display language. Only the code and the numbers the
  * core sent are used; an unknown code gets the generic sentence, never the core's own text.
  */
-export function warningText(warning: { code: string; file?: string; count?: number }): string {
+export function warningText(warning: { code: string; file?: string; count?: number; dropped_translations?: number }): string {
   const key = warningKey(warning.code);
-  return key ? t(key, { file: warning.file ?? '', count: warning.count ?? 0 }) : t('scan.warn.unknown');
+  // glossary_changed carries how many saved translations it dropped instead of a count.
+  return key ? t(key, { file: warning.file ?? '', count: warning.count ?? warning.dropped_translations ?? 0 }) : t('scan.warn.unknown');
 }

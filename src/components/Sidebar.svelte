@@ -7,9 +7,10 @@
   import Icon, { type IconName } from './Icon.svelte';
   import Brand from './Brand.svelte';
 
-  const items: { page: Page; icon: IconName; label: 'nav.workspace' | 'nav.backups' | 'nav.settings' | 'nav.help' | 'nav.about' }[] = [
+  const items: { page: Page; icon: IconName; label: 'nav.workspace' | 'nav.backups' | 'nav.glossary' | 'nav.settings' | 'nav.help' | 'nav.about' }[] = [
     { page: 'workspace', icon: 'language', label: 'nav.workspace' },
     { page: 'backups', icon: 'archive', label: 'nav.backups' },
+    { page: 'glossary', icon: 'book', label: 'nav.glossary' },
     { page: 'settings', icon: 'sliders', label: 'nav.settings' },
     { page: 'help', icon: 'help', label: 'nav.help' },
     { page: 'about', icon: 'info', label: 'nav.about' }
@@ -165,7 +166,7 @@
     .sidebar { height: auto; flex-direction: row; align-items: center; gap: var(--space-2); padding: var(--space-2); border-inline-end: 0; border-block-end: 1px solid var(--border); overflow: visible; }
     .titlebar { display: none; }
     .brand { min-height: 40px; }
-    nav { flex: 1; grid-template-columns: repeat(5, minmax(40px, 1fr)); }
+    nav { flex: 1; grid-template-columns: repeat(6, minmax(40px, 1fr)); }
     .foot { display: none; }
   }
 </style>

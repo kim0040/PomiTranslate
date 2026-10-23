@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { hasMessage, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { baseName, formatDuration, formatNumber, formatCompact, formatUsd, middleEllipsis } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
@@ -13,6 +13,7 @@
   import { clock, holdClock } from '../lib/clock.svelte';
   import { milestone, percentDone, remainingSeconds } from '../lib/workflow';
   import { failureKey } from '../lib/failures';
+  import { warningRows, warningTotal } from '../lib/glossary';
 
   const providerLabels: Record<string, string> = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', openrouter: 'OpenRouter', comet: 'Comet API', custom: 'Custom' };
   const running = $derived(app.busy === 'translate');
@@ -101,6 +102,16 @@
     if (!estimate.cost) return t('run.cost.unknown');
     return t('run.cost.band', { low: formatUsd(estimate.cost.low, app.locale), high: formatUsd(estimate.cost.high, app.locale) });
   });
+  // Quality warnings so far, said once and quietly: they never stop the run.
+  const qualityLine = $derived.by(() => {
+    const rows = warningRows(p.warnings);
+    if (!rows.length) return '';
+    const details = rows.map((row) => t('quality.run.detail', {
+      label: t((hasMessage(`quality.run.short.${row.code}`) ? `quality.run.short.${row.code}` : 'quality.run.short.other') as MessageKey),
+      count: formatNumber(row.count, app.locale)
+    })).join(', ');
+    return t('quality.run.line', { count: formatNumber(warningTotal(p.warnings), app.locale), details });
+  });
   const resumeText = $derived(
     app.resume
       ? (app.resume.status === 'cancelled'
@@ -154,6 +165,11 @@
             {#if p.retry.code}{t(failureKey(p.retry.code))}{/if}
           </Callout>
         {/if}
+
+        {#if p.glossaryDropped !== null}
+          <p class="muted quality">{t('quality.glossaryChanged', { count: formatNumber(p.glossaryDropped, app.locale) })}</p>
+        {/if}
+        {#if qualityLine}<p class="muted quality">{qualityLine}</p>{/if}
 
         <div>
           <button type="button" class="btn btn-secondary" disabled={app.cancelling} onclick={() => app.cancel()}>
@@ -318,6 +334,7 @@
   .bar { display: grid; gap: var(--space-2); }
   .line { display: flex; align-items: baseline; gap: var(--space-3); }
   .strong { font-weight: 600; }
+  .quality { margin: 0; font-size: var(--text-sm); text-wrap: pretty; }
   .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding-top: var(--space-4); border-top: 1px solid var(--border); }
   .facts dt { font-size: var(--text-sm); color: var(--text-secondary); font-weight: 500; }
   .facts dd { margin: 0; font-size: var(--text-lg); font-weight: 600; }

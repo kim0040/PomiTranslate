@@ -36,8 +36,8 @@ test.describe('reset that stops half way (2, 8)', () => {
     const left = confirm.getByRole('alert');
     await expect(left).toContainText('초기화를 끝내지 못했습니다.');
     await expect(left).toContainText('일부는 이미 지워졌고 나머지는 지우지 못했습니다');
-    // "Could not confirm", with what the person can do by hand.
-    await expect(left).toContainText('확인하지 못해');
+    // "Could not delete", with what the person can do by hand.
+    await expect(left).toContainText('삭제하지 못했습니다');
     await expect(left).toContainText('PomiTranslate 항목을 직접 삭제');
     await expect(left).toContainText('다시 시도하면 멈춘 곳부터 이어서');
     expect(await requests(page, 'app.reset')).toBe(0);
@@ -213,4 +213,17 @@ test.describe('the live feed (6)', () => {
     const cost = page.locator('.facts div').filter({ hasText: '지금까지 든 비용' }).locator('dd');
     await expect(cost).toContainText('$0.0001');
   });
+});
+
+test('a key that cannot be deleted from the system keychain says to try again or remove the entry by hand', async ({ page }) => {
+  await boot(page, 'scenario=selected&delete=unconfirmed');
+  await openSettings(page);
+  await page.locator('#key-management > summary').click();
+  await page.getByRole('button', { name: '저장된 키 삭제', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '저장된 키 삭제', exact: true }).click();
+  const alert = page.getByRole('alert').filter({ hasText: '키체인의 항목을 삭제하지 못했습니다' });
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText('PomiTranslate 항목을 직접 삭제');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await requests(page, 'credentials.delete')).toBe(1);
 });

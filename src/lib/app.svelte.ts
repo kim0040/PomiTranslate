@@ -50,7 +50,7 @@ import { applyTheme, type ThemeChoice } from './theme';
 import { emptyProgress, reduceProgress, type JobProgress } from './workflow';
 import { normalizedScanOptions, scanOptionsSignature } from './settings';
 
-export type Page = 'workspace' | 'backups' | 'settings' | 'about' | 'help';
+export type Page = 'workspace' | 'backups' | 'glossary' | 'settings' | 'about' | 'help';
 export type Step = 'world' | 'scan' | 'review' | 'run' | 'result';
 export type Busy = '' | 'loading' | 'scan' | 'translate' | 'restore' | 'recovery' | 'prompt' | 'settings' | 'usage';
 export type Tone = 'info' | 'success' | 'error';
@@ -139,6 +139,8 @@ export class AppState {
   railCollapsed = $state(false);
   /** Set by the settings screen while it holds changes that are not saved yet. */
   settingsDirty = $state(false);
+  /** Set by the glossary screen while its list has edits that are not saved yet. */
+  glossaryDirty = $state(false);
   /**
    * The question the shell asked when the window was closed or Quit was chosen: a running job, unsaved
    * settings, or both. `reason: 'update'` is the same question raised by an update that restarts the app.
@@ -148,7 +150,7 @@ export class AppState {
   exitPrompt = $state<{ job: boolean; dirty: boolean; reason: 'quit' | 'update'; intent: number; phase: 'ask' | 'waiting' | 'stuck' } | null>(null);
   /** What an incomplete reset left behind; the reset dialog shows it and offers a retry. */
   resetShortfall = $state<ResetShortfall | null>(null);
-  /** Set by the settings screen: saves its draft and says whether that worked. */
+  /** Set by the settings or glossary screen (whichever is open): saves its draft and says whether that worked. */
   saveDraft: (() => Promise<boolean>) | null = null;
   /** A move away from settings that waits until the user saves or drops the changes there. */
   pendingLeave = $state<(() => void) | null>(null);
@@ -791,15 +793,15 @@ export class AppState {
   // --- navigation --------------------------------------------------------------------------
 
   /**
-   * Leave the current page. Unsaved settings are never dropped silently: the move waits until the
-   * settings screen asks whether to save them, drop them, or stay.
+   * Leave the current page. Unsaved settings or glossary edits are never dropped silently: the move
+   * waits until that screen asks whether to save them, drop them, or stay.
    */
   private leave(next: () => void): void {
     const run = () => {
       if (this.page === 'settings') this.returnStep = null;
       next();
     };
-    if (this.page === 'settings' && this.settingsDirty) this.pendingLeave = run;
+    if ((this.page === 'settings' && this.settingsDirty) || (this.page === 'glossary' && this.glossaryDirty)) this.pendingLeave = run;
     else run();
   }
 
@@ -809,6 +811,7 @@ export class AppState {
     this.pendingLeave = null;
     if (!proceed || !next) return;
     this.settingsDirty = false;
+    this.glossaryDirty = false;
     next();
   }
 

@@ -76,9 +76,20 @@ Search text/locations, sort by world order/source/frequency/kind, and filter by 
 
 Keep `§` formatting codes and placeholders such as `%s` and `{0}`. If required tokens are missing or extra tokens appear, the source is retained and the result reports formatting protection. Moving a token while preserving its count is allowed.
 
-One candidate applies the same translation to all occurrences of that source. Per-occurrence translation, a glossary and translation memory remain follow-up work. An entirely manual run needs no translation API request.
+One candidate applies the same translation to all occurrences of that source. Per-occurrence translation and translation memory remain follow-up work. Terms are set in the "Glossary" below. An entirely manual run needs no translation API request.
 
 ![English candidate review with a manual translation](images/locales/en/review.png)
+
+## Glossary
+
+"Glossary" in the sidebar sets terms and names to be translated the same way every time (`Translate as`), or left as written (`Keep as written`). For example, keeping "Elder Mira" leaves Elder Mira in the translation.
+
+- **Scope:** "All worlds" applies everywhere; "This world" only to the selected world. When both have the same source, this world's entry wins.
+- **Entries:** source, how to handle it, translation, case sensitivity and a note. Up to 2,000 entries; source and translation are up to 200 characters each. Changes apply only after "Save"; leaving the page or quitting with unsaved changes asks first.
+- **Changed elsewhere:** if the glossary changed while you were editing, your input stays on screen and you can "Load the saved version" (your changes are dropped) or "Keep my edits".
+- **Import and export:** import a CSV/TSV file (first line `source,target,mode,note,caseSensitive`) as "Merge" or "Replace". The result shows how many were added, updated, unchanged and removed, and which rows were skipped and why. Export copies to the clipboard in the app for now, and downloads a file in a browser.
+- **Add from the review:** select a candidate and press "Add to glossary"; the selected text (or the whole sentence) fills the source.
+- **Checking the result:** when a translation differs from the glossary (glossary mismatch) or leaves source characters after a formatting code, the run and result screens show the count and up to 5 examples. Changing the glossary discards some saved translations before a resume and translates them again.
 
 ## 4. Run and result
 
