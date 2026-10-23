@@ -83,7 +83,7 @@
 </script>
 
 <!-- While the request runs the dialog stays: closing it would hide an import that may still be stored. -->
-<Dialog title={result ? t('glossary.import.resultTitle') : t('glossary.import.title')} size={result?.skippedCount ? 'wide' : 'normal'} showClose dismissible={!working} {onClose}>
+<Dialog title={result ? t('glossary.import.resultTitle') : t('glossary.import.title')} size={result?.skippedCount ? 'wide' : 'normal'} showClose={false} dismissible={!working} {onClose}>
   {#if result}
     <dl class="counts">
       <div><dt>{t('glossary.import.added')}</dt><dd class="num">{formatNumber(result.added, app.locale)}</dd></div>

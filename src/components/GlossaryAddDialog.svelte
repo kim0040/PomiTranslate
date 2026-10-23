@@ -57,7 +57,7 @@
   }
 </script>
 
-<Dialog title={t('glossary.addDialog.title')} {onClose}>
+<Dialog showClose={false} title={t('glossary.addDialog.title')} {onClose}>
   <form id="glossary-add-form" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
     <div class="field">
       <label class="label" for="glossary-add-source">{t('glossary.addDialog.source')}</label>

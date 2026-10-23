@@ -155,3 +155,63 @@ for (const width of [1440, 840, 320]) {
     await expect(page.locator('.section-nav a:focus')).toHaveCount(1);
   });
 }
+
+test.describe('model list before and after the key', () => {
+  async function fresh(page: Page, parameters = '') {
+    await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
+    await page.goto(`/?scenario=selected&fresh=1${parameters}`);
+    await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await expect(page.locator('#model')).toBeVisible();
+  }
+  const requests = (page: Page) => page.evaluate(() => (window as unknown as { __pomiRequests: { type: string }[] }).__pomiRequests.map((request) => request.type).filter((type) => type === 'models.list' || type === 'settings.set'));
+
+  test('before a key exists the model field says the list comes after saving, and an ID can still be typed', async ({ page }) => {
+    await fresh(page);
+    await expect(page.getByText('API 키를 저장하면 이 제공사의 모델 목록이 나타납니다. 그 전에도 모델 ID를 직접 입력할 수 있습니다.', { exact: true })).toBeVisible();
+    await page.locator('#model').fill('gpt-typed-by-hand');
+    await expect(page.locator('#model')).toHaveValue('gpt-typed-by-hand');
+    // Typing never asks the provider for a list.
+    expect(await requests(page)).toEqual([]);
+  });
+
+  test('saving a key loads the model list once, with the saved key only, and a typo is flagged without blocking', async ({ page }) => {
+    await fresh(page, '&slowModels=1');
+    await page.locator('#model').fill('not-in-the-list');
+    await page.locator('#api-key').fill('synthetic-new-openai-key');
+    expect(await requests(page)).toEqual([]);
+    await page.getByRole('button', { name: '저장', exact: true }).click();
+    // The list is asked for after the save, never before it, and exactly once.
+    await expect(page.getByRole('status').filter({ hasText: '저장한 키로 모델 목록을 불러오는 중…' })).toBeVisible();
+    await expect(page.getByText('이 제공사의 모델 목록에 없는 ID입니다', { exact: false })).toBeVisible();
+    expect(await requests(page)).toEqual(['settings.set', 'models.list']);
+    await page.waitForTimeout(500);
+    expect(await requests(page)).toEqual(['settings.set', 'models.list']);
+    expect(await page.evaluate(() => (window as unknown as { __pomiKeySaves: string[] }).__pomiKeySaves)).toEqual(['openai']);
+    // The warning does not block: the ID can be saved as typed, and a listed ID clears it.
+    await page.locator('#model').fill('not-in-the-list-either');
+    await expect(page.getByRole('button', { name: '저장', exact: true })).toBeEnabled();
+    await page.locator('#model').fill('mandatory-fixture');
+    await expect(page.getByText('이 제공사의 모델 목록에 없는 ID입니다', { exact: false })).toHaveCount(0);
+    await expect(page.getByText('모델 지원 정보 확인됨')).toBeVisible();
+  });
+
+  test('a failed automatic lookup blocks nothing and the button retries', async ({ page }) => {
+    await fresh(page, '&modelError=1');
+    await page.locator('#model').fill('typed-model');
+    await page.locator('#api-key').fill('synthetic-new-openai-key');
+    await page.getByRole('button', { name: '저장', exact: true }).click();
+    await expect(page.getByText('모델 목록을 불러오지 못했습니다. 네트워크와 저장된 키를 확인한 뒤 다시 불러와 주세요.', { exact: true })).toBeVisible();
+    expect(await requests(page)).toEqual(['settings.set', 'models.list']);
+    await expect(page.locator('#model')).toHaveValue('typed-model');
+    await expect(page.locator('#model')).toBeEnabled();
+    await expect(page.getByRole('button', { name: '모델 목록 불러오기', exact: true })).toBeEnabled();
+  });
+
+  test('no list is fetched when something other than a key is saved', async ({ page }) => {
+    await fresh(page);
+    await page.locator('#target-language').fill('English');
+    await page.getByRole('button', { name: '저장', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: '저장된 설정과 같습니다' })).toBeVisible();
+    expect(await requests(page)).toEqual(['settings.set']);
+  });
+});

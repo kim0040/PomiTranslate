@@ -164,6 +164,7 @@ test.describe('Reset dialog', () => {
   test('keeps focus on Cancel and makes the final action the solid danger button', async ({ page }) => {
     await boot(page, 'scenario=selected');
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     await page.getByRole('button', { name: '초기화…' }).click();
     let dialog = page.getByRole('dialog', { name: '앱을 초기화할까요?' });
     await expect(dialog.getByRole('button', { name: '취소', exact: true })).toBeFocused();

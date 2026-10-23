@@ -467,8 +467,9 @@ test.describe('importing and exporting', () => {
     await dialog.locator('input[type="file"]').setInputFiles(csv('source,target,mode,note\nGate,문,translate,\n'));
     await dialog.getByRole('button', { name: '가져오기' }).click();
     await expect.poll(async () => (await asked(page, 'glossary.import')).length).toBe(1);
-    // The corner button is disabled, and Escape and a click on the backdrop leave the dialog open.
-    await expect(dialog.getByRole('button', { name: '닫기' })).toBeDisabled();
+    // There is no corner X next to the choices; Cancel is disabled, and Escape and a click on the backdrop leave the dialog open.
+    await expect(dialog.getByRole('button', { name: '닫기' })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: '취소', exact: true })).toBeDisabled();
     await page.keyboard.press('Escape');
     await page.mouse.click(5, 5);
     await expect(dialog).toBeVisible();
@@ -505,6 +506,9 @@ test.describe('adding from the review', () => {
     await page.getByRole('button', { name: '용어집에 추가' }).click();
     const dialog = page.getByRole('dialog', { name: '용어집에 추가' });
     await expect(dialog.getByRole('textbox', { name: '원문' })).toHaveValue('Roguefire');
+    // Cancel is the way out; there is no second corner X.
+    await expect(dialog.getByRole('button', { name: '닫기', exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: '취소', exact: true })).toBeVisible();
     await axe(page);
     await dialog.getByRole('textbox', { name: '번역' }).fill('로그파이어');
     await dialog.getByRole('button', { name: '이 월드', exact: true }).click();

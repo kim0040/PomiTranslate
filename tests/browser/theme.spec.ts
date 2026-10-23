@@ -16,6 +16,7 @@ const background = (page: Page) => page.evaluate(() => getComputedStyle(document
 
 async function openAppearance(page: Page) {
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
   return page.locator('#application-settings');
 }
 
