@@ -128,7 +128,10 @@ mod tests {
     fn os_keychain_round_trip() {
         let provider = format!("native-check-{}", std::process::id());
         let store = OsKeychain;
-        assert!(store.get(&provider).unwrap().is_none(), "the probe name is free");
+        assert!(
+            store.get(&provider).unwrap().is_none(),
+            "the probe name is free"
+        );
         store.set(&provider, "dummy value — 더미 ✓").unwrap();
         assert_eq!(
             store.get(&provider).unwrap().as_deref().map(String::as_str),
