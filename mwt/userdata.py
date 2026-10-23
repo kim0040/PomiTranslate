@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import sys
@@ -211,7 +212,10 @@ def _catalog_path(provider: str, root: Path | None = None) -> Path:
 def remember_model_catalog(provider: str, models: list[dict], root: Path | None = None) -> None:
     path = _catalog_path(provider, root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    document = {"schema": SCHEMA, "provider": provider, "models": models}
+    # The catalog is what the provider published. Which model is chosen is not part of it: a mark that
+    # one request put on a row would otherwise follow the row into the next request's list.
+    plain = [{key: value for key, value in item.items() if key != "unsuitable_reason"} for item in models]
+    document = {"schema": SCHEMA, "provider": provider, "models": plain}
     durable_write_text(path, json.dumps(document, ensure_ascii=False, indent=2))
 
 
@@ -263,24 +267,37 @@ def _live_gemini_floor(item: dict, now: float) -> tuple[tuple[str, str, str], st
         return None
     if isinstance(learned, bool) or not isinstance(learned, (int, float)):
         return None
-    age = now - float(learned)
+    try:
+        stamp = float(learned)  # a JSON integer beyond the float range raises here
+    except OverflowError:
+        return None
+    if not math.isfinite(stamp):  # NaN compares false with everything and would never expire
+        return None
+    age = now - stamp
     if age > GEMINI_FLOOR_TTL_SECONDS or age < -_GEMINI_FLOOR_FUTURE_SLACK_SECONDS:
         return None
-    return (provider, endpoint, model), str(level), float(learned)
+    return (provider, endpoint, model), str(level), stamp
 
 
-def load_gemini_level_floors(root: Path | None = None, now: float | None = None) -> dict[tuple[str, str, str], str]:
-    """Lowest thinking level each (provider, endpoint digest, model) accepted. Expired or damaged entries are skipped."""
+def load_gemini_level_floor_entries(
+    root: Path | None = None, now: float | None = None
+) -> dict[tuple[str, str, str], tuple[str, float]]:
+    """(level, learned_at) per (provider, endpoint digest, model). Expired or damaged entries are skipped."""
     path = _gemini_floor_path(root)
     if not path.is_file():
         return {}
     moment = time.time() if now is None else now
-    floors: dict[tuple[str, str, str], str] = {}
+    entries: dict[tuple[str, str, str], tuple[str, float]] = {}
     for item in _read_gemini_floors(path):
         live = _live_gemini_floor(item, moment)
         if live is not None:
-            floors[live[0]] = live[1]
-    return floors
+            entries[live[0]] = (live[1], live[2])
+    return entries
+
+
+def load_gemini_level_floors(root: Path | None = None, now: float | None = None) -> dict[tuple[str, str, str], str]:
+    """Lowest thinking level each (provider, endpoint digest, model) accepted. Expired or damaged entries are skipped."""
+    return {key: level for key, (level, _) in load_gemini_level_floor_entries(root, now).items()}
 
 
 def remember_gemini_level_floor(

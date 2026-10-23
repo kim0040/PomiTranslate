@@ -96,6 +96,8 @@ jobs:
         run: python tests/test_provider_hardening.py
       - name: Gemini thinking floor is kept across jobs and concurrent batches
         run: python tests/test_gemini_floor.py
+      - name: Batches waiting for the thinking-level learner follow cancellation and its outcome
+        run: python tests/test_provider_coordination.py
       - name: Model lists offer only models that can translate text
         run: python tests/test_model_filter.py
       - name: Formatter and Minecraft placeholder preservation

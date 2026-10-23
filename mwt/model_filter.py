@@ -6,9 +6,11 @@ person picking from a long list should not have to know that. This is the one pl
 
 Rules are written down here, not learned: a model is left out when
 
-* the provider says its output is not text (``output_modalities`` without "text", or with an extra
-  audio/image/video output), or
-* its id contains one of ``SUBSTRINGS`` or has one of ``WORDS`` as a whole segment (segments are
+* the provider says its output is not text (``output_modalities`` without "text"), or that it cannot be called
+  to generate content (Gemini ``supportedGenerationMethods`` without ``generateContent``), or the list reader
+  marked the record ``text: false``. A record that lists "text" among its outputs is never left out only
+  because it lists audio, image or video as well: ``gpt-audio`` answers in text through chat completions.
+* its id names a family that cannot be served by chat completions or generateContent: it contains one of ``SUBSTRINGS`` or has one of ``WORDS`` as a whole segment (segments are
   split at ``-``, ``_``, ``.``, ``/``, ``:`` and spaces), for any provider, or one of the provider's
   own entries in ``PROVIDER_SUBSTRINGS`` / ``PROVIDER_WORDS``.
 
@@ -37,7 +39,6 @@ SUBSTRINGS: tuple[str, ...] = (
     "-image",  # gemini-2.5-flash-image, gemini-3-pro-image-preview
     "realtime",  # gpt-4o-realtime-preview, gpt-realtime
     "native-audio",  # gemini-2.5-flash-native-audio-preview
-    "audio-preview",  # gpt-4o-audio-preview
     "audio-only",
     "computer-use",  # gemini-2.5-computer-use-preview, computer-use-preview
     "robotics",  # gemini-robotics-er-1.5-preview
@@ -60,11 +61,12 @@ WORDS: tuple[str, ...] = (
 
 # Rules that only make sense for one provider's naming. Each entry says why.
 PROVIDER_SUBSTRINGS: dict[str, tuple[str, ...]] = {
-    "openai": ("-audio",),  # gpt-audio, gpt-audio-mini: speech in and out
-    "gemini": (),  # generateContent support is checked when the list is read
+    # No audio rule: gpt-audio, gpt-audio-mini and gpt-4o-audio-preview take and give text in chat completions.
+    "openai": (),
+    "gemini": (),  # generateContent support comes from the record's generation_methods
     "anthropic": (),  # the list holds Claude chat models only
-    "openrouter": ("-audio",),  # openai/gpt-audio, openai/gpt-4o-audio-preview
-    "comet": ("-audio",),  # OpenAI-style gateway
+    "openrouter": (),
+    "comet": (),
 }
 PROVIDER_WORDS: dict[str, tuple[str, ...]] = {
     "openai": (),
@@ -75,7 +77,6 @@ PROVIDER_WORDS: dict[str, tuple[str, ...]] = {
 }
 
 _SEGMENTS = re.compile(r"[-_./: ]+")
-_NON_TEXT_OUTPUTS = ("audio", "image", "video", "embeddings", "embedding", "speech")
 
 
 def _provider_rules(provider: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -84,12 +85,13 @@ def _provider_rules(provider: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 def unsuitable_reason(provider: str, model_id: str, record: dict[str, Any] | None = None) -> str:
     """Why this model cannot translate text, or an empty string when it can."""
-    outputs = [str(part).lower() for part in ((record or {}).get("output_modalities") or [])]
+    record = record or {}
+    outputs = [str(part).lower() for part in (record.get("output_modalities") or [])]
     if outputs and "text" not in outputs:
         return f"output:{','.join(outputs)}"
-    extra = [part for part in outputs if part in _NON_TEXT_OUTPUTS]
-    if extra:
-        return f"output:{','.join(extra)}"
+    methods = record.get("generation_methods")
+    if isinstance(methods, list) and methods and "generateContent" not in methods:
+        return "method:generateContent"
     lowered = str(model_id).lower()
     extra_substrings, extra_words = _provider_rules(provider)
     for token in (*SUBSTRINGS, *extra_substrings):
@@ -99,6 +101,8 @@ def unsuitable_reason(provider: str, model_id: str, record: dict[str, Any] | Non
     for word in (*WORDS, *extra_words):
         if word in segments:
             return f"id:{word}"
+    if record.get("text") is False:
+        return "capability:text"  # the list reader found no text output, whatever the name says
     return ""
 
 
@@ -108,10 +112,14 @@ def filter_translation_models(
     """The models a person can pick for translating, in the order given.
 
     ``configured`` is the model already chosen: it is kept even when unsuitable, with
-    ``unsuitable_reason`` set on a copy of its record.
+    ``unsuitable_reason`` set on a copy of its record. A mark that an earlier call left on a record (a cached
+    list) is dropped first: the mark belongs to the selection, and the selection may have changed.
+    If ``configured`` is not in ``models`` at all, nothing is added for it.
     """
     kept: list[dict[str, Any]] = []
     for record in models:
+        if "unsuitable_reason" in record:
+            record = {key: value for key, value in record.items() if key != "unsuitable_reason"}
         model_id = str(record.get("id", ""))
         reason = unsuitable_reason(provider, model_id, record)
         if not reason:
