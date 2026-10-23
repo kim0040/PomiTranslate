@@ -18,7 +18,7 @@
 | 1.20.5 이후 아이템 components | custom_name/item_name/lore/book 및 nested item 탐색 구현 | 개별 component와 버전별 표현 차이를 별도로 검증 |
 | 1.21.5 이후 직접 NBT component | compound/list 처리 구현 | 직접 NBT 지원과 명령 문자열 SNBT 지원을 구분 |
 | 명령 속 텍스트 | JSON/SNBT parser·span patch와 선행 `/`·문자열 component, 해석 실패 경고 구현(COMP-01) | 합성 fixture/E2E 기록 있음. 실제 게임 버전 생성/로드와 최신 component는 COMP-02/04 |
-| 최신 component fallback | compound 처리에서는 translate와 문자열 fallback 조합만 수집 | 26.1 object component의 구조화된 fallback을 별도 조사·fixture로 추가 |
+| 최신 component fallback | 2026-10-23 COMP-02: 26.1 object component의 text component fallback, show_item/show_entity hover 이름·lore, selector/nbt separator, mannequin description을 수집·기록(합성 fixture 검증; 게임 로드 미확인, `EXTRACTOR_VERSION` 4). 근거는 [COMP-02 기록](history/comp02-component-shapes-2026-10-23.md) | 실제 게임 버전 생성/로드는 COMP-04. 구형 `filtered_pages`·`attribute_modifiers` display·dialog 텍스트는 근거 미확인으로 미구현 |
 | gzip/zlib/none/LZ4, 외부 .mcc | 처리 코드와 합성 round-trip 기록 있음 | 재구현보다 혼합 압축·대형 외부 청크·장애 복구 증거 보강 |
 | 버전 정보 | level.dat DataVersion 조회; UI는 첫 유효 값 표시. core는 DataVersion으로 미검증/미래 버전을 명시적으로 차단하지 않고 shape로 처리 | 청크별 버전 분포·혼합 여부·unknown 및 근거 표시와 쓰기 허용 정책 추가 |
 | 차원·서버 구조 | vanilla/custom dimension 및 선택한 서버 루트 내부 child world 탐색 | Paper 계열은 서버 루트 선택과 단일 월드 선택을 구분해 검증; 선택 범위 밖 자동 접근 금지 |
@@ -78,7 +78,7 @@ P2-API는 저장된 사용자 key를 읽어 채팅/파일로 복사하지 않는
 | ID / 선행 조건 | 범위와 주요 파일 | 완료 조건 |
 | --- | --- | --- |
 | COMP-01 완료 / Phase2 완료 | `extract.py` command adapter에 JSON/SNBT 구분과 안전한 parse/patch 추가; 필요 모듈은 독립 분리 | tellraw/title 및 execute-run, click embedded command에서 작은따옴표/따옴표 없는 key/list/escape/nesting을 처리. 허용된 visible text만 변경; selector·resource ID·좌표·명령 이름 보존. parse 실패는 원문 유지+미처리 안내. 원래 표현을 유지하고 출력 재파싱 확인 |
-| COMP-02 / COMP-01 | 직접 NBT/JSON의 최신 component adapter와 알려진 필드 보강 | 26.1 object fallback, 최신 hover show_item/show_entity, book filtered/raw, sign 관련 component를 공식 구조별 조사. 실제로 빠지는 형태만 최소 구현하고 각 fixture로 수집/쓰기/복원을 검증. bossbar/team visible text는 별도 command adapter로 추가 |
+| COMP-02 / COMP-01 | 직접 NBT/JSON의 최신 component adapter와 알려진 필드 보강 | 26.1 object fallback, 최신 hover show_item/show_entity, book filtered/raw, sign 관련 component를 공식 구조별 조사. 실제로 빠지는 형태만 최소 구현하고 각 fixture로 수집/쓰기/복원을 검증. bossbar/team visible text는 별도 command adapter로 추가 **2026-10-23 구현(합성 fixture 검증, 게임 로드 미확인):** object fallback·hover item/entity·separator·mannequin description, book/sign filtered는 기존 지원을 fixture로 고정([조사 출처·필드 비교](history/comp02-component-shapes-2026-10-23.md)). 남은 일: bossbar/team command adapter, 위 기록의 미구현 항목, 실제 게임 확인(COMP-04) |
 | COMP-03 / COMP-01과 독립 조사 가능 | chunk DataVersion·shape·compression·layout coverage → JSONL/report/UI | level.dat 버전과 chunk별 관측을 구분. 혼합 버전·미지 버전·부분 미지원·검사하지 않은 파일을 표시. 미검증 버전/구조의 쓰기 허용 정책을 명시하고 기본은 scan/preserve. 후보0은 ‘이 월드에 번역할 글이 없다’는 증거로 사용하지 않음. report와 UI에 processed/skipped/unsupported/unknown 경계가 일치 |
 | COMP-04 / COMP-01–03 안정화 | 버전 manifest와 대표 실제 생성 월드, 기존 compression fixture 보강 | 경계 버전별 scan→결정적 번역→write→reopen→비대상 보존→restore hash 검사. 같은 월드/region에 구형·신형 shape, 서로 다른 DataVersion/압축을 섞어 검증. external .mcc·entity/custom dimensions/Paper 루트·large/corrupt/emoji/NUL 포함; 255-sector 내부 한계 전후와 번역 후 신규 .mcc 생성·백업·복원·중단 복구를 추가 |
 | COMP-05 / 안전한 coverage 계약 | 구형 pack .lang, JSON lang, locale/metadata/overlay 호환성; `desktop_resource_packs.py`와 pack writer | .lang 별도 parser/serializer와 escape/placeholder 보존. 실제 사용하는 overlay/pack metadata 형태를 조사하고 지원 또는 detected로 명시. folder/fill/merge는 아래 CONTENT 과제와 결합하며 ZIP 안전 경계를 유지 |

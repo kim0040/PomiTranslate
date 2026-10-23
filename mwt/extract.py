@@ -17,7 +17,7 @@ from typing import Any, Callable
 from mwt import nbtio as nbt
 
 # Bump when the set of texts a scan finds changes, so saved scan plans stop matching.
-EXTRACTOR_VERSION = 3
+EXTRACTOR_VERSION = 4
 
 # What a text is, in words the interface translates. One string per kind of place.
 CATEGORIES = (
@@ -272,8 +272,25 @@ class TextExtractionMixin:
         elif self._is_prefixed_translate(text):
             on_text(node, "text", self.text_from_translate_key(text["translate"]))
         fallback = node.get("fallback")
-        if "translate" in node and isinstance(fallback, str) and self.should_translate_text(fallback):
-            on_text(node, "fallback", fallback)
+        if "translate" in node:
+            if isinstance(fallback, str) and self.should_translate_text(fallback):
+                on_text(node, "fallback", fallback)
+        elif self._is_object_component(node.get("type"), node):
+            # 26.1+: an object component's fallback is a whole text component, not only a string.
+            if isinstance(fallback, str):
+                if self.should_translate_text(fallback):
+                    on_text(node, "fallback", fallback)
+            elif isinstance(fallback, (dict, list)):
+                self._walk_json(fallback, on_text, patch)
+        handled = {"text", "fallback", "extra", "with", "hoverEvent", "hover_event", "clickEvent", "click_event"}
+        if "selector" in node or "nbt" in node:
+            separator = node.get("separator")
+            if isinstance(separator, str):
+                if self.should_translate_text(separator):
+                    on_text(node, "separator", separator)
+            elif isinstance(separator, (dict, list)):
+                self._walk_json(separator, on_text, patch)
+            handled.add("separator")
         for key in ("extra", "with"):
             if isinstance(node.get(key), list):
                 self._walk_json(node[key], on_text, patch)
@@ -288,13 +305,64 @@ class TextExtractionMixin:
                     for field in ("value", "command"):
                         if isinstance(click.get(field), str):
                             self._walk_command(click, field, on_text, patch)
-        handled = {"text", "fallback", "extra", "with", "hoverEvent", "hover_event", "clickEvent", "click_event"}
         for key, value in node.items():
             if key not in handled and isinstance(value, (dict, list)):
                 self._walk_json(value, on_text, patch)
 
+    @staticmethod
+    def _is_object_component(type_name: Any, node: Any) -> bool:
+        """Whether a component is the 1.21.9+ ``object`` kind (a sprite or a player head).
+
+        ``type`` may be left out when an object-specific key is present, so those keys count too.
+        """
+        return type_name == "object" or "object" in node or "sprite" in node or "player" in node
+
+    def _walk_component_value(self, container: Any, key: Any, on_text: OnText, patch: bool) -> None:
+        """A text component stored under ``container[key]``: a literal, JSON in a string (before
+        1.21.5), a list or a compound."""
+        value = container[key]
+        if isinstance(value, str):
+            parsed = self._json_component(value)
+            if parsed is None:
+                if self.should_translate_text(value):
+                    on_text(container, key, value)
+                return
+            root = self._component_root(parsed)
+            if not patch:
+                self._walk_json(root, on_text, False)
+                return
+            before = self.serialize_text_component(root)
+            self._walk_json(root, on_text, True)
+            after = self.serialize_text_component(root)
+            if after != before:
+                container[key] = self.serialize_text_component(root[0]) if root is not parsed else after
+        elif isinstance(value, (dict, list)):
+            self._walk_json(value, on_text, patch)
+
+    def _walk_item_components(self, components: dict, on_text: OnText, patch: bool) -> None:
+        """The visible text of an item shown in a tooltip: its name and lore, nothing else."""
+        for key in list(components):
+            bare = key[len("minecraft:") :] if key.startswith("minecraft:") else key
+            if bare == "custom_name" and self.scan_config["translate_custom_names"]:
+                self._walk_component_value(components, key, on_text, patch)
+            elif bare == "item_name" and self.scan_config["translate_item_names"]:
+                self._walk_component_value(components, key, on_text, patch)
+            elif bare == "lore" and self.scan_config["translate_lore"] and isinstance(components[key], list):
+                for index in range(len(components[key])):
+                    self._walk_component_value(components[key], index, on_text, patch)
+
     def _walk_hover(self, hover: dict, on_text: OnText, patch: bool) -> None:
         action = hover.get("action")
+        if action in ("show_item", "show_entity"):
+            # 1.21.5+ writes the item or entity fields inline; before that they sit in ``contents``.
+            for holder in (hover, hover.get("contents")):
+                if not isinstance(holder, dict):
+                    continue
+                if action == "show_item" and isinstance(holder.get("components"), dict):
+                    self._walk_item_components(holder["components"], on_text, patch)
+                elif action == "show_entity" and holder.get("name") is not None:
+                    self._walk_component_value(holder, "name", on_text, patch)
+            return
         for key in ("value", "contents", "name"):
             value = hover.get(key)
             if isinstance(value, str):
@@ -441,8 +509,18 @@ class TextExtractionMixin:
         if isinstance(text, nbt.TAG_String) and self.should_translate_text(text.value):
             refs.append(self._ref("plain_tag", f"{path}/text", scope, category, detail, tag=text))
         fallback = comp.get("fallback")
-        if "translate" in comp and isinstance(fallback, nbt.TAG_String) and self.should_translate_text(fallback.value):
-            refs.append(self._ref("plain_tag", f"{path}/fallback", scope, category, detail, tag=fallback))
+        if "translate" in comp:
+            if isinstance(fallback, nbt.TAG_String) and self.should_translate_text(fallback.value):
+                refs.append(self._ref("plain_tag", f"{path}/fallback", scope, category, detail, tag=fallback))
+        elif fallback is not None:
+            type_tag = comp.get("type")
+            type_name = type_tag.value if isinstance(type_tag, nbt.TAG_String) else None
+            if self._is_object_component(type_name, comp):
+                self._collect_component(fallback, refs, f"{path}/fallback", scope, category, detail)
+        if "selector" in comp or "nbt" in comp:
+            separator = comp.get("separator")
+            if separator is not None:
+                self._collect_component(separator, refs, f"{path}/separator", scope, category, detail)
         for key in ("extra", "with"):
             children = comp.get(key)
             if isinstance(children, nbt.TAG_List):
@@ -454,6 +532,9 @@ class TextExtractionMixin:
                 continue
             action = hover.get("action")
             action_name = action.value if isinstance(action, nbt.TAG_String) else ""
+            if action_name in ("show_item", "show_entity"):
+                self._collect_hover_target(hover, action_name, refs, f"{path}/{key}", scope, category, detail)
+                continue
             for field in ("value", "contents", "name"):
                 child = hover.get(field)
                 if isinstance(child, nbt.TAG_String) and action_name != "show_text" and field != "name":
@@ -469,6 +550,42 @@ class TextExtractionMixin:
                     command = click.get(field)
                     if isinstance(command, nbt.TAG_String) and self.extract_command_json(command.value):
                         refs.append(self._ref("command_tag", f"{path}/{key}/{field}", scope, "command", detail, tag=command))
+
+    def _collect_hover_target(
+        self, hover: Any, action: str, refs: list[TextRef], path: str, scope: Scope, category: str, detail: str
+    ) -> None:
+        """A ``show_item`` or ``show_entity`` hover: the item's name and lore, or the entity's name.
+
+        1.21.5+ writes the fields inline; ``contents`` holds them before that.
+        """
+        for holder, base in ((hover, path), (hover.get("contents"), f"{path}/contents")):
+            if not isinstance(holder, nbt.TAG_Compound):
+                continue
+            if action == "show_item":
+                components = holder.get("components")
+                if isinstance(components, nbt.TAG_Compound):
+                    item_scope = replace(scope, in_item=True)
+                    for key, value in components.items():
+                        bare = key[len("minecraft:") :] if key.startswith("minecraft:") else key
+                        self._collect_tooltip_component(bare, value, refs, f"{base}/components/{key}", item_scope)
+            elif holder.get("name") is not None:
+                self._collect_component(holder["name"], refs, f"{base}/name", scope, category, detail)
+
+    def _collect_tooltip_component(self, bare: str, value: Any, refs: list[TextRef], path: str, scope: Scope) -> bool:
+        """The item components whose text an item's tooltip shows. Returns whether ``bare`` is one of them."""
+        if bare == "custom_name":
+            if self.scan_config["translate_custom_names"]:
+                self._collect_component(value, refs, path, scope, "item_name", "custom")
+        elif bare == "item_name":
+            if self.scan_config["translate_item_names"]:
+                self._collect_component(value, refs, path, scope, "item_name", "base")
+        elif bare == "lore":
+            if self.scan_config["translate_lore"] and isinstance(value, nbt.TAG_List):
+                for index, line in enumerate(value):
+                    self._collect_component(line, refs, f"{path}/{index}", scope, "item_lore", f"line:{index + 1}")
+        else:
+            return False
+        return True
 
     def _name_category(self, scope: Scope) -> str:
         if scope.in_item:
@@ -540,17 +657,9 @@ class TextExtractionMixin:
         for key, value in comp.items():
             bare = key[len("minecraft:") :] if key.startswith("minecraft:") else key
             child = f"{path}/{key}"
-            if bare == "custom_name":
-                if self.scan_config["translate_custom_names"]:
-                    self._collect_component(value, refs, child, scope, "item_name", "custom")
-            elif bare == "item_name":
-                if self.scan_config["translate_item_names"]:
-                    self._collect_component(value, refs, child, scope, "item_name", "base")
-            elif bare == "lore":
-                if self.scan_config["translate_lore"] and isinstance(value, nbt.TAG_List):
-                    for index, line in enumerate(value):
-                        self._collect_component(line, refs, f"{child}/{index}", scope, "item_lore", f"line:{index + 1}")
-            elif bare in {"written_book_content", "writable_book_content"} and isinstance(value, nbt.TAG_Compound):
+            if self._collect_tooltip_component(bare, value, refs, child, scope):
+                continue
+            if bare in {"written_book_content", "writable_book_content"} and isinstance(value, nbt.TAG_Compound):
                 self._collect_book(value, refs, child, scope, writable=bare.startswith("writable"))
             elif isinstance(value, (nbt.TAG_Compound, nbt.TAG_List)):
                 # Containers, bundles and other components hold item stacks of their own.
@@ -596,6 +705,9 @@ class TextExtractionMixin:
             elif key == "item_name":
                 if self.scan_config["translate_item_names"]:
                     self._collect_component(value, refs, child, scope, "item_name", "base")
+            elif key == "description" and holder_id.endswith("mannequin"):
+                if self.scan_config["translate_custom_names"]:
+                    self._collect_component(value, refs, child, scope, "entity_name", "description")
             elif key == "text" and holder_id.endswith("text_display"):
                 if self.scan_config["translate_text_displays"]:
                     self._collect_component(value, refs, child, scope, "text_display")

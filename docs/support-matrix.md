@@ -28,6 +28,10 @@ Not scanned: data packs, `data/*.dat` (command storage, scoreboard), `level.dat`
 - text.commands: supported
 - text.snbt_commands: supported
 - text.component_shapes: supported
+- text.object_fallback: supported
+- text.hover_item_entity: supported
+- text.selector_separator: supported
+- text.mannequin_description: supported
 - text.modified_utf8: supported
 - text.resource_pack_lang: supported
 - layout.custom_dimension: supported
