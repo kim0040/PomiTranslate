@@ -1086,6 +1086,8 @@ class BatchTranslator:
         except RequestStopped:
             raise self._stopped() from None
         except Exception as exc:
+            if self._should_stop():  # a failure after the stop is the stop, never one to count
+                raise self._stopped() from None
             self._charge_extra_requests(budget, requests_before)
             if failure_kind(exc) is not None:
                 delay = self._note_failure(exc, attempt=1, max_retries=1, batch_size=1)  # raises when the job must stop
@@ -1239,6 +1241,8 @@ class BatchTranslator:
             except RequestStopped:
                 raise self._stopped() from None
             except Exception as exc:
+                if self._should_stop():  # a failure after the stop is the stop, never one to count
+                    raise self._stopped() from None
                 self._charge_extra_requests(budget, requests_before)
                 # Raw provider text goes to the report file (through the failed-strings table), never to progress events.
                 budget["error"] = self._raw_failure_text(exc)

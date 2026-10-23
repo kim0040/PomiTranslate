@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -73,12 +75,40 @@ def listening(pid: int) -> str:
             for line in completed.stdout.splitlines()
             if "LISTENING" in line and line.split()[-1] == str(pid)
         )
+    if sys.platform.startswith("linux") and shutil.which("lsof") is None:
+        # Positive control first: an empty answer must mean "no listener", not "could not see any".
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            probe.listen(1)
+            assert proc_listening(os.getpid()), "the /proc reader did not see a listener this process opened"
+        return proc_listening(pid)
     completed = subprocess.run(
         ["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN"],
         capture_output=True,
         text=True,
     )
     return "\n".join(line for line in completed.stdout.splitlines() if str(pid) in line)
+
+
+def proc_listening(pid: int) -> str:
+    """The same answer from /proc, for a Linux without lsof: the process's socket inodes in LISTEN (0A)."""
+    inodes = set()
+    for fd in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except FileNotFoundError:  # closed since the listing
+            continue
+        if target.startswith("socket:["):
+            inodes.add(target[len("socket:["):-1])
+    lines = []
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        if not os.path.exists(table):
+            continue
+        for line in Path(table).read_text(encoding="ascii").splitlines()[1:]:
+            fields = line.split()
+            if fields[3] == "0A" and fields[9] in inodes:
+                lines.append(line.strip())
+    return "\n".join(lines)
 
 
 def exchange(proc: subprocess.Popen[str], message: dict | None = None, events: list[dict] | None = None) -> dict:

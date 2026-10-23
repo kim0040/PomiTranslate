@@ -129,6 +129,8 @@ Backups may live in app data or a legacy in-world directory; their verification 
 
 Desktop manages backup/checkpoint locations and provides no backup-off, suffix or arbitrary-path options. Newly created large-chunk files can be removed to restore the previous file layout after taking a recovery snapshot. Restore these new backups with the latest app. Legacy backups remain discoverable/restorable.
 
+Once a translation has been written, the world folder keeps a small `.pomi-translate` folder holding an empty `write.lock`. It is the lock that stops two jobs from writing to the same world at once, and it stays after a restore. Minecraft does not read it: leave it, or delete it while the app is closed.
+
 Do not ignore verification, path or corruption warnings. Backups cannot guarantee recovery from every storage failure or external modification.
 
 ## CLI

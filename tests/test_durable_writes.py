@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -25,9 +26,14 @@ class FsyncWatcher:
     def __init__(self) -> None:
         self.real = os.fsync
         self.read_only: list[int] = []
-        self.calls = 0
+        self.calls = 0  # file handles only
+        self.directories = 0
 
     def __call__(self, descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            # A directory flush (POSIX only) needs a read-only descriptor; it is not a file handle.
+            self.directories += 1
+            return self.real(descriptor)
         self.calls += 1
         try:
             os.write(descriptor, b"")  # Windows: EBADF on a descriptor opened read-only

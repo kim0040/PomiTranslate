@@ -828,6 +828,7 @@ export const en: Record<MessageKey, string> = {
   'world.openOther': "Open another world",
   'status.showTask': "Show progress",
   "error.BUSY": "Another operation is currently in progress. Try again when it has finished.",
+  "error.APP_QUITTING": "PomiTranslate is closing, so nothing new was started.",
   "error.TRANSPORT": "The app could not talk to its translation core. Restart the app and try again.",
   "error.INTERNAL": "Something went wrong inside the app. Try again; if it keeps happening, copy the diagnostics from Settings and report the problem.",
   "error.UNSUPPORTED_REQUEST": "This action is not available in this version of the app. Update the app and try again.",

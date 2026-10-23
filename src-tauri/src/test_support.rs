@@ -298,10 +298,33 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// A zombie (ended, not reaped yet) still answers signal 0, so it counts as gone here: a test that kills a
+/// child whose wait is made to fail keeps it unreaped on purpose, as Windows keeps an ended process's handle.
 #[cfg(unix)]
 pub fn process_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 && !is_zombie(pid) }
+}
+
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    // The state is the field after the command name, which ends at the last ')'.
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| matches!(rest.trim_start().chars().next(), Some('Z' | 'X')))
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_zombie(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim_start()
+                .starts_with('Z')
+        })
 }
 
 /// True once `pid` is gone, waiting up to `limit`.

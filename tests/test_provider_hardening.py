@@ -30,6 +30,7 @@ from llm_backends import (  # noqa: E402
     UNTRUSTED_RECORDS_NOTICE,
     LLMProviderClient,
     ProviderError,
+    RequestStopped,
     infer_provider,
     parse_retry_after,
     resolve_api_key,
@@ -955,6 +956,62 @@ def test_wall_clock_deadline_and_body_limit() -> None:
     finally:
         origin.close()
 
+    # Linux and macOS end a read on the socket the guard shut down with EOF instead of an error. A body
+    # cut off that way is the timeout, not a short answer that then fails as invalid JSON.
+    def cut_off(guard: object, *, expire: bool) -> object:
+        class CutOff:
+            parts = [b'{"choices": ', b""]
+
+            def read1(self, size: int) -> bytes:
+                part = self.parts.pop(0)
+                if not part and expire:
+                    guard.expired = True  # type: ignore[attr-defined]  # the time ran out as the stream ended
+                return part
+
+        return CutOff()
+
+    guard = llm_backends._RequestGuard(60)
+    try:
+        llm_backends._read_limited(cut_off(guard, expire=True), 1000, guard)
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("an EOF after the deadline must be a timeout")
+    guard = llm_backends._RequestGuard(60)
+    assert llm_backends._read_limited(cut_off(guard, expire=False), 1000, guard) == (b'{"choices": ', False)
+
+    # Headers in time, then silence: the per-read socket timeout starts again with every byte, so only the
+    # deadline ends this. On Windows a shutdown from another thread would not wake the read; the read
+    # itself waits in short steps.
+    def stall(handler, body, number) -> None:  # noqa: ANN001
+        time.sleep(1.2)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", "1000")
+        handler.end_headers()
+        try:
+            handler.wfile.write(b"{")
+            handler.wfile.flush()
+        except OSError:
+            pass
+        time.sleep(6)
+
+    origin = Script(stall)
+    try:
+        client = make_client(f"{origin.base}/v1", request_timeout=2)
+        started = time.monotonic()
+        try:
+            client.complete_text(system_prompt="s", user_prompt="u", temperature=0)
+        except ProviderError as exc:
+            assert exc.code == "PROVIDER_TIMEOUT", exc.code
+        else:
+            raise AssertionError("a stalled body must hit the deadline")
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.9, f"took {elapsed:.1f} s with a 2 s request_timeout (the read was not woken)"
+        print(f"      headers then silence, request_timeout=2: gave up after {elapsed:.1f} s")
+    finally:
+        origin.close()
+
     def silent(handler, body, number) -> None:  # noqa: ANN001
         time.sleep(4)
 
@@ -1035,8 +1092,8 @@ def test_deadline_bounds_every_connection_stage() -> None:
         real_guard = llm_backends._RequestGuard
 
         class SpentGuard(real_guard):  # type: ignore[misc, valid-type]
-            def __init__(self, seconds: float) -> None:
-                super().__init__(seconds)
+            def __init__(self, seconds: float, **kwargs: object) -> None:
+                super().__init__(seconds, **kwargs)
                 self.deadline = time.monotonic() - 1
 
         with patch.object(llm_backends, "_RequestGuard", SpentGuard):
@@ -1093,11 +1150,75 @@ def test_deadline_bounds_every_connection_stage() -> None:
             else:
                 raise AssertionError("a proxy that never finishes CONNECT must time out")
             elapsed = time.monotonic() - started
-        assert elapsed < 2.0, f"CONNECT drip: a 1 s deadline took {elapsed:.2f} s"
+        assert elapsed < 1.5, f"CONNECT drip: a 1 s deadline took {elapsed:.2f} s"
         print(f"      proxy CONNECT dripping a byte per 0.3 s, request_timeout=1: gave up after {elapsed:.2f} s")
     finally:
         stop.set()
         listener.close()
+
+    # A proxy that drips its CONNECT reply and then goes silent, and one that answers CONNECT late and then
+    # leaves the TLS handshake hanging: the wait that is under way when the time runs out ends with it.
+    def connect_then(behaviour) -> float:  # noqa: ANN001
+        done = threading.Event()
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(4)
+        held: list[socket.socket] = []
+
+        def serve() -> None:
+            server.settimeout(0.2)
+            while not done.is_set():
+                try:
+                    connection, _ = server.accept()
+                except OSError:
+                    continue
+                held.append(connection)
+                threading.Thread(target=behaviour, args=(connection, done), daemon=True).start()
+
+        threading.Thread(target=serve, daemon=True).start()
+        address = f"http://127.0.0.1:{server.getsockname()[1]}"
+        try:
+            with patch.dict(os.environ, {"https_proxy": address, "HTTPS_PROXY": address, "no_proxy": "", "NO_PROXY": ""}):
+                client = make_client("https://provider.example.invalid/v1", request_timeout=2)
+                started = time.monotonic()
+                try:
+                    client.complete_text(system_prompt="s", user_prompt="u", temperature=0)
+                except ProviderError as exc:
+                    assert exc.kind == "timeout" and exc.code == "PROVIDER_TIMEOUT", (exc.kind, str(exc))
+                else:
+                    raise AssertionError("the request must time out")
+                return time.monotonic() - started
+        finally:
+            done.set()
+            server.close()
+            for connection in held:
+                connection.close()
+
+    def drip_then_stall(connection: socket.socket, done: threading.Event) -> None:
+        try:
+            connection.recv(4096)
+            connection.sendall(b"HTTP/1.1 200 Connection established\r\nX-Slow: ")
+            until = time.monotonic() + 1.4
+            while time.monotonic() < until and not done.is_set():
+                connection.sendall(b"a")
+                time.sleep(0.1)
+            done.wait(8)
+        except OSError:
+            pass
+
+    def late_connect_then_mute(connection: socket.socket, done: threading.Event) -> None:
+        try:
+            connection.recv(4096)
+            time.sleep(1.6)
+            connection.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            done.wait(8)  # the client's TLS hello is never answered
+        except OSError:
+            pass
+
+    for name, behaviour in (("CONNECT drip, then silence", drip_then_stall), ("late CONNECT, then silent TLS", late_connect_then_mute)):
+        elapsed = connect_then(behaviour)
+        assert elapsed < 2.5, f"{name}: a 2 s deadline took {elapsed:.2f} s"
+        print(f"      {name}, request_timeout=2: gave up after {elapsed:.2f} s")
 
     # A TCP server that accepts and never speaks TLS: the handshake runs on the remaining time.
     mute = socket.socket()
@@ -1122,6 +1243,190 @@ def test_deadline_bounds_every_connection_stage() -> None:
     record("provider.deadline_covers_connection_setup")
 
 
+def test_stop_ends_a_request_that_waits_for_its_answer() -> None:
+    """A cancelled job does not wait for the answer of a request it already sent (up to request_timeout),
+    and nothing that goes wrong with that answer afterwards counts as a provider failure."""
+
+    def stopped_by_receipt(behave, *, limit: float = 1.5) -> float:  # noqa: ANN001
+        """Run one request whose job is stopped as soon as the server has it; the seconds from then to the end."""
+        received = threading.Event()
+        at: list[float] = []
+
+        def serve(handler, body, number) -> None:  # noqa: ANN001
+            at.append(time.monotonic())
+            received.set()
+            try:
+                behave(handler)
+            except OSError:
+                pass  # the client hung up on purpose
+
+        origin = Script(serve)
+        try:
+            client = make_client(f"{origin.base}/v1", request_timeout=30)
+            client.stop_guard = received.is_set
+            try:
+                client.complete_text(system_prompt="s", user_prompt="u", temperature=0)
+            except RequestStopped:
+                pass
+            else:
+                raise AssertionError("a stopped job must end as the stop")
+            elapsed = time.monotonic() - at[0]
+            assert elapsed < limit, f"the stop took {elapsed:.2f} s"
+            assert len(origin.requests) == 1  # the request was sent; only the wait for it ended
+            return elapsed
+        finally:
+            origin.close()
+
+    released = threading.Event()
+
+    def silent(handler) -> None:  # noqa: ANN001
+        released.wait(20)
+
+    def drip_headers(handler) -> None:  # noqa: ANN001
+        handler.wfile.write(b"HTTP/1.1 200 OK\r\nX-Slow: ")
+        for _ in range(150):
+            handler.wfile.write(b"a")
+            handler.wfile.flush()
+            time.sleep(0.04)
+
+    def drip_body(handler) -> None:  # noqa: ANN001
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", "10000")
+        handler.end_headers()
+        for _ in range(150):
+            handler.wfile.write(b" ")
+            handler.wfile.flush()
+            time.sleep(0.04)
+
+    def stalled_error(handler) -> None:  # noqa: ANN001
+        handler.send_response(503)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", "1000")
+        handler.end_headers()
+        handler.wfile.write(b'{"error": ')
+        handler.wfile.flush()
+        time.sleep(6)
+
+    def invalid(handler) -> None:  # noqa: ANN001
+        handler.reply(200, b"{")
+
+    def cut_short(handler) -> None:  # noqa: ANN001
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", "1000")
+        handler.end_headers()
+        handler.wfile.write(b"{")
+        handler.wfile.flush()
+        handler.close_connection = True
+
+    def server_error(handler) -> None:  # noqa: ANN001
+        handler.reply(500, {"error": {"message": "overloaded"}})
+
+    def no_choices(handler) -> None:  # noqa: ANN001
+        handler.reply(200, {"object": "chat.completion"})
+
+    try:
+        for name, behave in (
+            ("waiting for its answer", silent), ("headers dripping", drip_headers), ("body dripping", drip_body),
+            ("error body stalled", stalled_error), ("invalid JSON", invalid), ("body cut short", cut_short),
+            ("HTTP 500", server_error), ("answer without choices", no_choices),
+        ):
+            elapsed = stopped_by_receipt(behave)
+            print(f"      stopped while {name}: ended {elapsed:.2f} s after the stop (request_timeout=30)")
+    finally:
+        released.set()
+
+    # A job that is not stopped still gets its answer: the reads only look at the flag.
+    def late(handler, body, number) -> None:  # noqa: ANN001
+        time.sleep(0.5)
+        handler.reply(200, {"choices": [{"message": {"content": "late"}}]})
+
+    origin = Script(late)
+    try:
+        client = make_client(f"{origin.base}/v1", request_timeout=30)
+        client.stop_guard = lambda: False
+        assert client.complete_text(system_prompt="s", user_prompt="u", temperature=0) == "late"
+    finally:
+        origin.close()
+
+    # An answer that has already arrived is kept even when the flag flips right after it was sent.
+    flips = threading.Event()
+
+    def answered(handler, body, number) -> None:  # noqa: ANN001
+        handler.reply(200, {"choices": [{"message": {"content": "kept"}}]})
+        flips.set()
+
+    origin = Script(answered)
+    try:
+        client = make_client(f"{origin.base}/v1", request_timeout=30)
+        client.stop_guard = flips.is_set
+        assert client.complete_text(system_prompt="s", user_prompt="u", temperature=0) == "kept"
+    finally:
+        origin.close()
+
+    # Sending: a peer that stops reading a large body. Windows queues even a large plain body at once, so
+    # a socket whose ``send`` never gets room stands in for that peer (a TLS upload blocks like this).
+    class Jammed(socket.socket):
+        __slots__ = ()
+
+        def send(self, data, flags=0):  # noqa: ANN001, ANN201
+            time.sleep(self.gettimeout() or 0)
+            raise TimeoutError("timed out")
+
+    stop = threading.Event()
+    jammed = Jammed()
+    try:
+        llm_backends._polling(jammed, llm_backends._RequestGuard(30, stop=stop.is_set))
+        timer = threading.Timer(0.3, stop.set)
+        timer.start()
+        try:
+            jammed.sendall(b"x" * 100_000)
+        except ConnectionAbortedError:
+            pass
+        else:
+            raise AssertionError("a stop must end a send that cannot go on")
+        finally:
+            timer.join()
+        assert stop.is_set()
+    finally:
+        jammed.close()
+    jammed = Jammed()
+    try:
+        guard = llm_backends._RequestGuard(1)
+        llm_backends._polling(jammed, guard)
+        started = time.monotonic()
+        try:
+            jammed.sendall(b"x" * 100_000)
+        except TimeoutError:
+            assert guard.expired
+        else:
+            raise AssertionError("a send that cannot go on must end at the deadline")
+        assert time.monotonic() - started < 1.5
+    finally:
+        jammed.close()
+
+    # A send that takes a few bytes at a time still delivers every byte, in order.
+    class Trickle(socket.socket):
+        __slots__ = ()
+        taken: list[bytes] = []
+
+        def send(self, data, flags=0):  # noqa: ANN001, ANN201
+            piece = bytes(data[:7])
+            Trickle.taken.append(piece)
+            return len(piece)
+
+    trickle = Trickle()
+    try:
+        llm_backends._polling(trickle, llm_backends._RequestGuard(30, stop=lambda: False))
+        payload = bytes(range(256)) * 4
+        trickle.sendall(payload)
+        assert b"".join(Trickle.taken) == payload
+    finally:
+        trickle.close()
+    record("provider.stop_ends_a_waiting_request")
+
+
 def run_all() -> list[str]:
     RESULTS.clear()
     test_redirects_never_carry_credentials()
@@ -1140,6 +1445,7 @@ def run_all() -> list[str]:
     test_retry_after_forms_and_cap()
     test_wall_clock_deadline_and_body_limit()
     test_deadline_bounds_every_connection_stage()
+    test_stop_ends_a_request_that_waits_for_its_answer()
     return list(RESULTS)
 
 

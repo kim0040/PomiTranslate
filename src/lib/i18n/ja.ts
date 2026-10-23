@@ -828,6 +828,7 @@ export const ja: Record<MessageKey, string> = {
   'world.openOther': "別のワールドを開く",
   'status.showTask': "進行状況を表示",
   "error.BUSY": "別の処理が実行中です。終了してからもう一度お試しください。",
+  "error.APP_QUITTING": "PomiTranslate を終了しているため、新しい処理は開始しませんでした。",
   "error.TRANSPORT": "アプリが翻訳コアと通信できませんでした。アプリを再起動してからもう一度お試しください。",
   "error.INTERNAL": "アプリ内部で問題が発生しました。もう一度お試しください。続く場合は設定で診断情報をコピーして報告してください。",
   "error.UNSUPPORTED_REQUEST": "このバージョンでは対応していない操作です。アプリを更新してからもう一度お試しください。",

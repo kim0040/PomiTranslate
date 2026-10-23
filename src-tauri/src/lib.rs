@@ -373,6 +373,12 @@ async fn handle_request(
         return Err(invalid("Unsupported protocol version"));
     }
 
+    if exit_gate::quitting(app) {
+        return Err(IpcError::new(
+            code::APP_QUITTING,
+            "PomiTranslate is quitting",
+        ));
+    }
     let _request_guard = state.request_gate.try_lock().map_err(|_| {
         IpcError::new(
             code::BUSY,

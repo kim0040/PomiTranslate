@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import types
@@ -323,8 +322,11 @@ def test_overflow_keeps_flags_and_ranges_exact(tmp: Path) -> None:
 
 
 def earlier_reader() -> types.ModuleType:
-    """mwt/coverage.py as 9add4d8 had it: it knows only ``counts``, folds an overflow into the unobserved key."""
-    source = subprocess.check_output(["git", "show", "9add4d8:mwt/coverage.py"], cwd=ROOT).decode("utf-8")
+    """mwt/coverage.py as 9add4d8 had it: it knows only ``counts``, folds an overflow into the unobserved key.
+
+    The source is kept as a fixture (``git show 9add4d8:mwt/coverage.py``) so the test also runs in a
+    shallow clone or a source archive, which have no history to read it from."""
+    source = (ROOT / "tests" / "fixtures" / "coverage_9add4d8.py.txt").read_text(encoding="utf-8")
     module = types.ModuleType("earlier_coverage")
     sys.modules[module.__name__] = module
     exec(compile(source, "9add4d8:mwt/coverage.py", "exec"), module.__dict__)

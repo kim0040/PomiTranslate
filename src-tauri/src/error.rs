@@ -43,6 +43,8 @@ impl std::error::Error for IpcError {}
 pub mod code {
     pub const INTERNAL: &str = "INTERNAL";
     pub const BUSY: &str = "BUSY";
+    /// The person chose to quit and the app is waiting for the job to stop: nothing new starts.
+    pub const APP_QUITTING: &str = "APP_QUITTING";
     pub const INVALID_REQUEST: &str = "INVALID_REQUEST";
     pub const UNSUPPORTED_REQUEST: &str = "UNSUPPORTED_REQUEST";
 
@@ -115,6 +117,7 @@ pub mod code {
 pub const ERROR_CODES: &[&str] = &[
     code::INTERNAL,
     code::BUSY,
+    code::APP_QUITTING,
     code::INVALID_REQUEST,
     code::UNSUPPORTED_REQUEST,
     code::CORE_SPAWN_FAILED,

@@ -829,6 +829,7 @@ export const ko = {
   'world.openOther': "다른 월드 열기",
   'status.showTask': "작업 화면 보기",
   "error.BUSY": "다른 작업이 진행 중입니다. 끝난 뒤 다시 시도해 주세요.",
+  "error.APP_QUITTING": "PomiTranslate를 종료하는 중이라 새 작업을 시작하지 않았습니다.",
   "error.TRANSPORT": "앱이 번역 코어와 통신하지 못했습니다. 앱을 다시 시작한 뒤 시도해 주세요.",
   "error.INTERNAL": "앱 내부에서 문제가 생겼습니다. 다시 시도해 보고, 계속되면 설정에서 진단 정보를 복사해 문제를 알려 주세요.",
   "error.UNSUPPORTED_REQUEST": "이 버전에서는 지원하지 않는 동작입니다. 앱을 업데이트한 뒤 다시 시도해 주세요.",

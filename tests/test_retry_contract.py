@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 
 from llm_backends import ProviderError  # noqa: E402
 from mc_world_translator import (  # noqa: E402
-    DEFAULT_CONFIG, MAX_CONSECUTIVE_REQUEST_FAILURES, BatchTranslator, ProviderUnavailable, classify_failure, merge_nested,
+    DEFAULT_CONFIG, MAX_CONSECUTIVE_REQUEST_FAILURES, BatchTranslator, ProviderUnavailable, TranslationCancelled,
+    classify_failure, merge_nested,
 )
 
 HAS_KIND = hasattr(ProviderError, "kind")
@@ -243,12 +244,39 @@ def test_adaptation_retries_are_charged_to_the_batch_budget() -> None:
     assert budget["left"] <= 10 - 3 * 2, budget  # each failed attempt cost 3 HTTP calls, not 1
 
 
+def test_a_failure_after_the_stop_is_the_stop() -> None:
+    """The job was cancelled while the request was out, then the answer failed (invalid, cut off, 5xx): that is
+    the cancellation, never a failure that is counted, charged, reported or retried."""
+    for kind in ("transient", "unknown", "rate_limit"):
+        cancelled = threading.Event()
+
+        def fail_after_cancel(_texts, kind=kind, cancelled=cancelled):  # noqa: ANN001, ANN202
+            cancelled.set()
+            return KindError(kind, 503 if kind == "transient" else None)
+
+        batch, fake = with_fake(fail_after_cancel, 2, retries=3)
+        events: list[dict] = []
+        batch.progress_callback = events.append
+        batch.cancel_check = cancelled.is_set
+        budget = {"left": 5, "error": "", "code": "other"}
+        try:
+            batch._translate_batch(["a", "b"], 2, budget)
+        except TranslationCancelled:
+            pass
+        else:
+            raise AssertionError(f"{kind}: a failure after the stop must end as the cancellation")
+        assert fake.calls == [2], (kind, fake.calls)  # no retry
+        assert batch.consecutive_failures == 0 and batch.consecutive_rejections == 0, kind
+        assert budget == {"left": 4, "error": "", "code": "other"}, (kind, budget)  # the one request that was sent
+        assert not [event for event in events if event.get("event") == "translation_batch_error"], (kind, events)
+
+
 def main() -> None:
     tests = [
         test_persistent_400_costs_three_calls, test_413_at_batch_200_completes_through_singletons,
         test_one_filtered_string_among_40, test_persistent_408_is_an_outage_not_a_rejection,
         test_deadline_timeout_is_classified_by_kind, test_fatal_kinds_stop_at_once_and_progress_carries_no_provider_text,
-        test_adaptation_retries_are_charged_to_the_batch_budget,
+        test_adaptation_retries_are_charged_to_the_batch_budget, test_a_failure_after_the_stop_is_the_stop,
     ]
     for test in tests:
         test()

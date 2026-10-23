@@ -244,6 +244,12 @@ pub fn prompt_for(job: bool, dirty: bool) -> Option<Prompt> {
     })
 }
 
+/// True while a confirmed quit waits for the job to stop. No new core request starts then: the page
+/// refreshes itself when the job ends, and every such request would hold the quit up a little longer.
+pub fn quitting<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.state::<ExitControl>().waiting.load(Ordering::SeqCst)
+}
+
 fn job_running<R: Runtime>(app: &AppHandle<R>) -> bool {
     app.state::<ActiveSidecar>().busy() || app.state::<UpdateControl>().active()
 }

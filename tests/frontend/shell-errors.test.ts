@@ -124,6 +124,23 @@ describe('the exit and reset flows', () => {
     expect(invokeMock).toHaveBeenCalledWith('exit_confirm', { intent: 9 });
   });
 
+  it('stays quiet about refused refreshes while a confirmed quit waits for the job', () => {
+    const app = new AppState();
+    app.exitPrompt = { ...ask, phase: 'waiting' };
+    app.registerDialog();
+    const quitting = new BackendError('PomiTranslate is quitting', 'APP_QUITTING', '', 'shell');
+    app.fail(quitting);
+    app.notify(app.describe(quitting), 'error');
+    expect(app.dialogError).toBe('');
+    expect(app.banner).toBeNull();
+    expect(app.toasts).toHaveLength(0);
+    // Outside that phase the same error is reported as usual.
+    app.exitPrompt = null;
+    app.fail(quitting);
+    expect(app.dialogError).toBe(app.describe(quitting));
+    expect(app.dialogError).not.toBe('');
+  });
+
   it('quit now asks the shell to end the core', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();

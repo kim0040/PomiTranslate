@@ -654,25 +654,43 @@ class _DeadlineExceeded(TimeoutError):
     """The total request time ran out before the named stage could finish."""
 
 
-class _RequestGuard:
-    """Ends a request once its total time is spent, however slowly the server answers or trickles bytes.
+# The longest single wait of a socket operation once connected: between waits it looks at the stop flag
+# and the deadline.
+_POLL_SECONDS = 0.2
+# A stopped request whose answer is still arriving gets this long to finish it: an answer that is already
+# in is kept, a server that keeps sending bytes does not hold the cancellation up.
+_STOP_GRACE_SECONDS = 0.5
 
-    The socket timeout only limits each single wait. The guard bounds the whole request: name resolution,
-    TCP connect, a proxy's CONNECT and the TLS handshake run on the time that is left, and once connected a
-    timer shuts the socket down, which also wakes a read that is blocked.
+
+class _RequestGuard:
+    """Ends a request once its total time is spent, however slowly the server answers or trickles bytes,
+    and soon after the job's stop flag (``stop``) is set.
+
+    The socket timeout only limits each single wait. Name resolution and TCP connect run on the time that
+    is left; everything after that (the proxy's CONNECT, the TLS handshake, sending the request and reading
+    the answer) waits at most ``_POLL_SECONDS`` at a time (``_polling``, ``handshake``) and looks at the
+    deadline and the flag between the waits. Each
+    of those runs on the thread that owns the socket: nothing reaches the socket from another thread (on
+    Windows a shutdown from there does not wake a blocked read, and closing the handle there would let a new
+    socket get its number while the read still uses it). ``stopped`` says that the flag was seen.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, stop: Callable[[], bool] | None = None) -> None:
         self.seconds = seconds
         self.deadline = time.monotonic() + seconds
         self.expired = False
-        self._timer: threading.Timer | None = None
+        self.stop = stop
+        self.stopped = False
+        self._next_look = 0.0
+        self._finish_by: float | None = None
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
 
     def check(self, stage: str) -> None:
-        """Stop before starting ``stage`` when no time is left."""
+        """Stop before starting ``stage`` when no time is left or the job was stopped."""
+        if self.stop_seen():
+            raise RequestStopped(f"The job was stopped before {stage}.")
         if self.remaining() <= 0:
             self.expired = True
             raise _DeadlineExceeded(f"the request time limit ran out before {stage}")
@@ -682,25 +700,72 @@ class _RequestGuard:
         left = max(0.001, self.remaining())
         return left if not timeout else max(0.001, min(float(timeout), left))
 
-    def attach(self, sock: socket.socket) -> None:
-        """(Re)start the timer for ``sock``; a socket that replaced an earlier one takes over its timer."""
-        if self._timer is not None:
-            self._timer.cancel()
-        timer = threading.Timer(max(0.0, self.remaining()), self._expire, args=(sock,))
-        timer.daemon = True
-        self._timer = timer
-        timer.start()
-
-    def _expire(self, sock: socket.socket) -> None:
-        self.expired = True
+    def stop_seen(self) -> bool:
+        """True once the job's stop flag was seen; it is looked at again on every call until then."""
+        if self.stopped or self.stop is None:
+            return self.stopped
         try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+            self.stopped = bool(self.stop())
+        except Exception:  # noqa: BLE001 - a failing flag check must not end a request
+            return False
+        return self.stopped
 
-    def close(self) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
+    def wait_read(self, read: Callable[[], Any], sock: socket.socket) -> Any:
+        """Run ``read`` in waits of at most ``_POLL_SECONDS`` until it returns, the time is spent or the job
+        is stopped. A TLS read that timed out resumes where it stopped.
+
+        A wait that brings nothing after the flag was seen ends the request; bytes that keep coming get
+        ``_STOP_GRACE_SECONDS``, so an answer that has already arrived is still read in full."""
+        while True:
+            now = time.monotonic()
+            if self._finish_by is None and now >= self._next_look:
+                self._next_look = now + _POLL_SECONDS
+                if self.stop_seen():
+                    self._finish_by = now + _STOP_GRACE_SECONDS
+                now = time.monotonic()  # the flag check itself can take a moment
+            left = self.deadline - now
+            if left <= 0:
+                self.expired = True
+                raise TimeoutError("the response was not finished within the request time limit")
+            wait = min(_POLL_SECONDS, left)
+            if self._finish_by is not None:
+                if now >= self._finish_by:
+                    raise ConnectionAbortedError("the request was stopped with its job")
+                wait = min(wait, self._finish_by - now)
+            socket.socket.settimeout(sock, wait)
+            try:
+                return read()
+            except TimeoutError:
+                if self.stop_seen():
+                    raise ConnectionAbortedError("the request was stopped with its job") from None
+
+    def wait_send(self, send: Callable[[], int], sock: socket.socket) -> int:
+        """Run one ``send`` in waits of at most ``_POLL_SECONDS``; a stop ends it at once (a request that is
+        only partly sent has nothing worth keeping). The same bytes are offered again after a timeout, as a
+        TLS write that did not finish requires."""
+        while True:
+            if self.stop_seen():
+                raise ConnectionAbortedError("the request was stopped with its job")
+            left = self.remaining()
+            if left <= 0:
+                self.expired = True
+                raise TimeoutError("the request was not sent within the request time limit")
+            socket.socket.settimeout(sock, min(_POLL_SECONDS, left))
+            try:
+                return send()
+            except TimeoutError:
+                continue
+
+    def handshake(self, sock: ssl.SSLSocket) -> None:
+        """The TLS handshake in waits of at most ``_POLL_SECONDS``; one that timed out resumes."""
+        while True:
+            self.check("the TLS handshake finished")
+            socket.socket.settimeout(sock, min(_POLL_SECONDS, max(0.001, self.remaining())))
+            try:
+                sock.do_handshake()
+                return
+            except TimeoutError:
+                continue
 
     def _resolve(self, host: str, port: int) -> list[tuple]:
         """``getaddrinfo`` that gives up when the request time runs out; it cannot be interrupted, so it
@@ -743,7 +808,7 @@ class _RequestGuard:
                 if source_address:
                     sock.bind(source_address)
                 sock.connect(target)
-                self.attach(sock)  # from here on the timer can end a stalled CONNECT / TLS / read
+                _polling(sock, self)  # a proxy's CONNECT reply is read on the deadline too
                 return sock
             except OSError as exc:
                 failure = exc
@@ -754,11 +819,67 @@ class _RequestGuard:
         raise failure or OSError("name resolution returned no address")
 
 
+def _polling(sock: socket.socket, guard: _RequestGuard) -> None:
+    """Make every read and send of the connected ``sock`` (plain or TLS) wait through the guard.
+
+    The request goes out through ``sendall`` and the response reads through ``sock.makefile``, which calls
+    ``recv_into``; the class of the socket is
+    swapped for a subclass that adds no fields, so the object http.client already holds is the one that
+    changes. A socket that already polls is left as it is.
+    """
+    base = type(sock)
+    if getattr(base, "_pomi_polling", False):
+        return
+
+    class Polling(base):  # type: ignore[misc, valid-type]
+        __slots__ = ()
+        _pomi_polling = True
+
+        # The arguments pass through as given: the TLS socket's defaults differ from the plain one's.
+        def recv_into(self, *args: Any) -> int:
+            return guard.wait_read(lambda: base.recv_into(self, *args), self)
+
+        def recv(self, *args: Any) -> bytes:
+            return guard.wait_read(lambda: base.recv(self, *args), self)
+
+        def sendall(self, data: Any, *args: Any) -> None:
+            view = memoryview(data).cast("B")
+            sent = 0
+            while sent < len(view):
+                rest = view[sent:]
+                sent += guard.wait_send(lambda: base.send(self, rest, *args), self)
+
+    sock.__class__ = Polling
+
+
+class _HandshakeOnTime:
+    """The connection's TLS context, whose ``wrap_socket`` runs the handshake through ``guard.handshake``."""
+
+    def __init__(self, context: ssl.SSLContext, guard: _RequestGuard) -> None:
+        self._context = context
+        self._guard = guard
+
+    def wrap_socket(self, sock: socket.socket, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+        kwargs["do_handshake_on_connect"] = False
+        tls = self._context.wrap_socket(sock, *args, **kwargs)
+        try:
+            self._guard.handshake(tls)
+        except BaseException:
+            tls.close()  # the plain socket was handed over to ``tls``
+            raise
+        return tls
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._context, name)
+
+
 def _guarded(base: type, guard: _RequestGuard) -> type:
     class Guarded(base):  # type: ignore[misc, valid-type]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self._create_connection = guard.create_connection
+            if getattr(self, "_context", None) is not None:  # HTTPS: this connection's own context
+                self._context = _HandshakeOnTime(self._context, guard)
 
         def connect(self) -> None:
             guard.check("connecting")
@@ -771,8 +892,8 @@ def _guarded(base: type, guard: _RequestGuard) -> type:
             if guard.remaining() <= 0:
                 self.close()  # a late connection is disposed of, never used
                 guard.check("sending the request")
-            guard.attach(self.sock)  # the TLS wrapper replaced the socket the timer knew
-            self.sock.settimeout(self.timeout)
+            _polling(self.sock, guard)  # the TLS wrapper replaced the socket that polled
+            guard.check("sending the request")
 
     return Guarded
 
@@ -804,6 +925,11 @@ def _read_limited(response: Any, limit: int, guard: _RequestGuard | None = None)
             raise TimeoutError("the response was not finished within the request time limit")
         chunk = response.read1(_READ_CHUNK) if hasattr(response, "read1") else response.read(_READ_CHUNK)
         if not chunk:
+            # Linux and macOS end a read on a socket that was shut down like a finished body. Nothing shuts
+            # it down any more (reads end themselves at the deadline), but an EOF once the time was spent
+            # is still the timeout, not a short answer that then fails as invalid JSON.
+            if guard is not None and guard.expired:
+                raise TimeoutError("the response was cut off at the request time limit")
             return b"".join(chunks), False
         total += len(chunk)
         if total > limit:
@@ -849,6 +975,12 @@ class LLMProviderClient(metaclass=_ClientMeta):
         # The model a person already chose. Lists keep it (marked when unsuitable) whatever ``model`` is:
         # a list request leaves ``model`` blank so that the saved one is not validated against the list.
         self.keep_model = ""
+
+    def _stop_requested(self) -> bool:
+        try:
+            return bool(self.stop_guard is not None and self.stop_guard())
+        except Exception:  # noqa: BLE001 - a failing flag check leaves the failure as it was
+            return False
 
     def _check_stop(self) -> None:
         if self.stop_guard is not None and self.stop_guard():
@@ -956,29 +1088,35 @@ class LLMProviderClient(metaclass=_ClientMeta):
         self.ensure_ready(require_model=True)
         self.try_refresh_text_models()
         cap = _positive_int(max_output_tokens) or self.max_output_tokens
-        if self.family == "openai_compatible":
-            return self._complete_openai_compatible(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=temperature,
-                expect_json=expect_json,
-                max_output_tokens=cap,
-            )
-        if self.family == "gemini":
-            return self._complete_gemini(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=temperature,
-                expect_json=expect_json,
-                max_output_tokens=cap or DEFAULT_OUTPUT_TOKENS,
-            )
-        if self.family == "anthropic":
-            return self._complete_anthropic(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=temperature,
-                max_output_tokens=cap or DEFAULT_OUTPUT_TOKENS,
-            )
+        try:
+            if self.family == "openai_compatible":
+                return self._complete_openai_compatible(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    expect_json=expect_json,
+                    max_output_tokens=cap,
+                )
+            if self.family == "gemini":
+                return self._complete_gemini(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    expect_json=expect_json,
+                    max_output_tokens=cap or DEFAULT_OUTPUT_TOKENS,
+                )
+            if self.family == "anthropic":
+                return self._complete_anthropic(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=temperature,
+                    max_output_tokens=cap or DEFAULT_OUTPUT_TOKENS,
+                )
+        except Exception:
+            # An answer that cannot be used, after the job was stopped, is the stop: never a failure to count.
+            if self._stop_requested():
+                raise RequestStopped("The job was stopped while this request was waiting for its answer.") from None
+            raise
         raise RuntimeError(f"Unsupported provider family: {self.family}")
 
     def translate_mapping(self, payload: dict[str, str], *, system_prompt: str, temperature: float) -> dict[str, str]:
@@ -1003,7 +1141,7 @@ class LLMProviderClient(metaclass=_ClientMeta):
     def _public_text(self, text: str, limit: int = MAX_PUBLIC_MESSAGE) -> str:
         return bounded_public_text(text, self.api_key, limit)
 
-    def _http_error(self, exc: error.HTTPError) -> ProviderError:
+    def _http_error(self, exc: error.HTTPError, guard: _RequestGuard | None = None) -> ProviderError:
         """Turn an error reply into a classified error with a short message and the redacted answer as ``detail``.
 
         The whole body (up to a size limit) is redacted before any of it is cut, so a key that
@@ -1020,7 +1158,7 @@ class LLMProviderClient(metaclass=_ClientMeta):
                 kind="redirect",
             )
         try:
-            raw, _ = _read_limited(exc, MAX_ERROR_BODY_BYTES)
+            raw, _ = _read_limited(exc, MAX_ERROR_BODY_BYTES, guard)
         except (OSError, http.client.HTTPException, TimeoutError):
             raw = b""
         finally:
@@ -1110,29 +1248,33 @@ class LLMProviderClient(metaclass=_ClientMeta):
                 self._accounting.request_count += 1
         req = request.Request(url=url, data=body, headers=headers, method=method)
         label = self._label()
-        guard = _RequestGuard(float(max(1, self.timeout)))
+        guard = _RequestGuard(float(max(1, self.timeout)), stop=self.stop_guard if method == "POST" else None)
         opener = request.build_opener(_GuardedHTTPHandler(guard), _GuardedHTTPSHandler(guard), _RefuseRedirect())
+        failure: Exception | None = None
         try:
+            with opener.open(req, timeout=self.timeout) as response:
+                raw, truncated = _read_limited(response, MAX_RESPONSE_BYTES, guard)
+            if truncated:
+                raise ProviderError(
+                    f"{label} sent a response larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB.",
+                    error_code="PROVIDER_ERROR",
+                )
+            text = raw.decode("utf-8")
             try:
-                with opener.open(req, timeout=self.timeout) as response:
-                    raw, truncated = _read_limited(response, MAX_RESPONSE_BYTES, guard)
-                if truncated:
-                    raise ProviderError(
-                        f"{label} sent a response larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB.",
-                        error_code="PROVIDER_ERROR",
-                    )
-                text = raw.decode("utf-8")
-            except error.HTTPError as exc:
-                raise self._http_error(exc) from None
-            except (error.URLError, TimeoutError, OSError, http.client.HTTPException, UnicodeDecodeError) as exc:
-                raise self._transport_error(exc, guard) from None
-        finally:
-            guard.close()
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ProviderError(f"{label} returned invalid JSON.") from exc
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ProviderError(f"{label} returned invalid JSON.") from exc
+        except error.HTTPError as exc:
+            failure = self._http_error(exc, guard)
+        except (error.URLError, TimeoutError, OSError, http.client.HTTPException, UnicodeDecodeError, ProviderError) as exc:
+            failure = exc
+        if failure is not None:
+            if guard.stop_seen():
+                # The job ended while this request waited: the caller treats it like a request never sent.
+                raise RequestStopped("The job was stopped while this request was waiting for its answer.") from None
+            if isinstance(failure, ProviderError):
+                raise failure from None
+            raise self._transport_error(failure, guard) from None
         if method == "POST":
             self.record_usage(parsed, self._accounting)
         return parsed

@@ -149,9 +149,18 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 4. `codesign --verify --deep --strict`와 `spctl --assess`로 중첩 파일의 서명자가 모두 같은지 확인합니다.
 5. notarize 후 staple하고, 격리 속성이 붙은 clean machine에서 실행해 확인합니다.
 
-실제 OS 자격 증명 저장소 확인은 기본 테스트에서 건너뛰는 `cargo test --lib os_keychain_round_trip -- --ignored --nocapture`로 OS마다 따로 실행한다(앱 이름 공간의 임시 provider 이름에 더미 값을 쓰고 지움). 2026-10-23 Windows PASS.
+실제 OS 자격 증명 저장소 확인은 기본 테스트에서 건너뛰는 `cargo test --lib os_keychain_round_trip -- --ignored --nocapture`로 OS마다 따로 실행한다(앱 이름 공간의 임시 provider 이름에 더미 값을 쓰고 지움). 2026-10-23 Windows(자격 증명 관리자)와 Linux 컨테이너(Secret Service: `dbus-run-session` 안에서 gnome-keyring을 비밀번호로 잠금 해제한 login keyring) PASS. login keyring이 없으면 `KEYCHAIN_FAILED`, D-Bus 세션이 없으면 `KEYCHAIN_UNAVAILABLE`이 나온다.
 
-macOS와 Linux 경로(`core_process_unix.rs`, 0755, `killpg`, `PDEATHSIG`)는 Windows 개발 머신에서 실제로 실행하지 못했습니다. 각 OS의 native gate에서 확인해야 합니다.
+### Windows에서 Linux 검사 돌리기 (Docker)
+
+Docker Desktop이 있으면 Linux에서 Python core와 Rust 단위 테스트를 돌릴 수 있습니다. 저장소를 mount하지 말고 `git archive`(또는 작업 트리 파일 목록을 `tar --force-local`로 묶은 것)를 읽기 전용으로 넘겨 컨테이너 안에서 풉니다.
+
+- Python: `python:3.12-slim`에서 `pip install -r requirements.txt` 뒤 `scripts/verify-local.mjs`의 Python 테스트 목록을 차례로 실행합니다. 이 이미지에는 `lsof`와 git 기록이 없어도 됩니다.
+- Rust: Ubuntu 24.04에 Tauri 시스템 패키지(`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`, `libxdo-dev`, `pkg-config`, `build-essential`)와 `rust-toolchain.toml`의 toolchain을 넣고 `src-tauri`에서 `cargo test --lib`, `cargo clippy --lib --tests -- -D warnings`. build script가 `../dist`와 `../build/sidecar/dist/pomi-sidecar/`를 요구하므로 컨테이너 안에서 빈 placeholder를 만듭니다. cargo registry와 target을 이름 있는 volume에 두면 다시 돌릴 때 빠릅니다.
+
+이것은 Linux 단위·fixture 검사이며 GTK 창, `tauri build`, packaged core smoke를 대신하지 않습니다.
+
+macOS 경로와 Linux의 실제 창·설치는 Windows 개발 머신에서 실행하지 못했습니다. 각 OS의 native gate에서 확인해야 합니다.
 
 ## 로컬 gate
 

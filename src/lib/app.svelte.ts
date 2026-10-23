@@ -357,6 +357,9 @@ export class AppState {
    * (components/Toasts.svelte) holds that timer while the pointer or focus is on a toast.
    */
   notify(message: string, tone: Tone = 'info', ms = 5200): void {
+    // While a confirmed quit waits for the job to stop, the app is on its way out: the refreshes the
+    // end of the job sets off are refused (APP_QUITTING) and nothing reported then can be acted on.
+    if (tone === 'error' && this.exitPrompt?.phase === 'waiting') return;
     // Behind an open dialog a toast cannot be reached, so an error raised meanwhile is shown inside
     // the dialog instead (one place, announced once) and not queued as a second copy.
     if (tone === 'error' && this.dialogDepth > 0) {
@@ -458,6 +461,7 @@ export class AppState {
   }
 
   fail(cause: unknown): void {
+    if (this.exitPrompt?.phase === 'waiting') return; // see notify
     const message = this.describe(cause);
     this.banner = { tone: 'error', message, ...(cause instanceof BackendError && cause.code === 'CREDENTIAL_ENDPOINT_UNBOUND' ? { action: 'enter-key' as const } : {}) };
     if (this.dialogDepth > 0) this.dialogError = message;
