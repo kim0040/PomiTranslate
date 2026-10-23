@@ -267,6 +267,7 @@ test.describe('notifications (FL-05)', () => {
     expect(JSON.stringify(sent)).not.toMatch(/Roguefire|Welcome|\/private\//);
 
     await page.getByRole('navigation', { name: '주 메뉴' }).getByRole('button', { name: '환경 설정' }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     const toggle = page.getByRole('checkbox', { name: '작업이 끝나면 알림 받기' });
     await expect(toggle).toBeChecked();
     await toggle.uncheck();
@@ -283,12 +284,14 @@ test.describe('notifications (FL-05)', () => {
     await expect.poll(() => page.evaluate(() => (window as any).__pomiPrefs?.notify_on_finish)).toBe(false);
     expect(await page.evaluate(() => localStorage.getItem('pomi.local-prefs.v1'))).toBeNull();
     await page.getByRole('navigation', { name: '주 메뉴' }).getByRole('button', { name: '환경 설정' }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     await expect(page.getByRole('checkbox', { name: '작업이 끝나면 알림 받기' })).not.toBeChecked();
   });
 
   test('without the plugin the option is hidden', async ({ page }) => {
     await open(page, 'scenario=selected&notify=missing');
     await page.getByRole('navigation', { name: '주 메뉴' }).getByRole('button', { name: '환경 설정' }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     await expect(page.getByRole('checkbox', { name: '작업이 끝나면 알림 받기' })).toHaveCount(0);
   });
 });

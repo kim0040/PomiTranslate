@@ -16,13 +16,18 @@ const calls = (page: Page): Promise<{ command: string; args: { intent: number } 
 const requests = (page: Page, type: string): Promise<number> => page.evaluate((t) => (window as any).__pomiRequests.filter((r: { type: string }) => r.type === t).length, type);
 const toRun = (page: Page) => page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
 const openSettings = (page: Page) => page.getByRole('button', { name: '환경 설정', exact: true }).click();
+// Updates, data and reset live in the "App" part, which applies at once and has nothing unsaved.
+const openAppSettings = async (page: Page) => {
+  await openSettings(page);
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
+};
 async function axe(page: Page) {
   const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
   expect(results.violations.map((item) => `${item.id}: ${item.nodes.map((node) => node.target.join(' ')).join(' | ')}`)).toEqual([]);
 }
 
 async function toResetConfirm(page: Page) {
-  await openSettings(page);
+  await openAppSettings(page);
   await page.getByRole('button', { name: '초기화…' }).click();
   await page.getByRole('dialog', { name: '앱을 초기화할까요?' }).getByRole('button', { name: '초기화 계속', exact: true }).click();
   return page.getByRole('dialog', { name: '정말 초기화할까요?' });
@@ -62,8 +67,8 @@ test.describe('reset that stops half way (2, 8)', () => {
 test.describe('the update question (3, 4, 8)', () => {
   async function askToInstall(page: Page, query: string) {
     await boot(page, `scenario=selected&update=available&${query}`);
-    await openSettings(page);
-    await page.locator('#target-language').fill('English');
+    // The fixture plays the shell: it asks the question as if settings were unsaved.
+    await openAppSettings(page);
     await page.getByRole('button', { name: '지금 확인' }).click();
     await page.getByRole('button', { name: '설치하고 다시 시작' }).click();
     return page.getByRole('dialog', { name: '업데이트를 설치할까요?' });
@@ -128,7 +133,7 @@ test.describe('the update question (3, 4, 8)', () => {
   ] as const) {
     test(`install refused with ${mode} is explained and the person stays in Settings`, async ({ page }) => {
       await boot(page, `scenario=selected&update=available&install=${mode}`);
-      await openSettings(page);
+      await openAppSettings(page);
       await page.getByRole('button', { name: '지금 확인' }).click();
       await page.getByRole('button', { name: '설치하고 다시 시작' }).click();
       await expect(page.locator('#updates .status')).toContainText(text);

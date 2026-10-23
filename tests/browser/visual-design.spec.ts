@@ -83,7 +83,12 @@ test('at the narrowest window the stepper reads "n/5단계 · name" and the page
   await page.setViewportSize({ width: 840, height: 620 });
   await boot(page, 'scenario=review');
   await step(page, '후보 검토');
-  await expect(page.getByRole('navigation', { name: '작업 단계' })).toContainText('3/5단계 · 후보 검토');
+  const steps = page.getByRole('navigation', { name: '작업 단계' });
+  await expect(steps).toContainText('3/5단계 · 후보 검토');
+  // The names of the other steps are hidden by width but every step keeps its accessible name.
+  await expect(steps.getByRole('button')).toHaveCount(5);
+  for (const name of ['월드 선택', '월드 스캔', '후보 검토', '번역 진행', '완료 결과']) await expect(steps.getByRole('button', { name: new RegExp(`^${name}`) })).toHaveCount(1);
+  await expect(steps.getByRole('button', { name: /^후보 검토 \(/ })).toHaveAttribute('aria-current', 'step');
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
 });
 

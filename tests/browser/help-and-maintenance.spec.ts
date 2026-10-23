@@ -45,8 +45,15 @@ test('the Help menu opens help, shortcuts, the tour, licenses and a problem repo
   await expect(page.getByRole('heading', { name: '단축키' })).toBeInViewport();
 
   await emit(page, 'pomi-menu', 'tour');
-  await expect(page.getByRole('dialog', { name: '시작 안내' })).toBeVisible();
+  const tour = page.getByRole('dialog', { name: '시작 안내' });
+  await expect(tour).toBeVisible();
+  // "Skip" is the way out, so there is no second corner X; Escape does the same as Skip.
+  await expect(tour.getByRole('button', { name: '닫기', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(tour).toHaveCount(0);
+  await emit(page, 'pomi-menu', 'tour');
   await page.getByRole('button', { name: '건너뛰기' }).click();
+  await expect(tour).toHaveCount(0);
 
   await emit(page, 'pomi-menu', 'licenses');
   const licenses = page.getByRole('dialog', { name: '오픈소스 라이선스' });
@@ -86,6 +93,7 @@ test('a signed update installs from settings with progress', async ({ page }) =>
 test('an unsigned build never installs and offers the download page; offline reads as offline', async ({ page }) => {
   await boot(page, 'scenario=selected&update=unsigned');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
   await page.getByRole('button', { name: '지금 확인' }).click();
   await expect(page.getByText('새 버전 0.2.0을 사용할 수 있습니다.')).toBeVisible();
   await expect(page.getByRole('button', { name: '설치하고 다시 시작' })).toHaveCount(0);
@@ -97,6 +105,7 @@ test('an unsigned build never installs and offers the download page; offline rea
 
   await boot(page, 'scenario=selected&update=offline');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
   await page.getByRole('button', { name: '지금 확인' }).click();
   await expect(page.getByText('업데이트 서버에 연결하지 못했습니다.', { exact: false })).toBeVisible();
 });
@@ -112,6 +121,7 @@ test('an automatic check runs once a day after start and shows a quiet badge', a
 test('the data folder is shown and can be revealed', async ({ page }) => {
   await boot(page, 'scenario=selected');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
   await expect(page.getByText('/Users/fixture/Library/Application Support/PomiTranslate', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '폴더 열기' }).click();
   expect(await page.evaluate(() => (window as any).__pomiRevealed)).toBe(1);
@@ -121,6 +131,7 @@ test('the data folder is shown and can be revealed', async ({ page }) => {
 test('reset asks twice, keeps backups, can keep keys, and restarts at first launch', async ({ page }) => {
   await boot(page, 'scenario=selected');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
   await page.getByRole('button', { name: '초기화…' }).click();
   let dialog = page.getByRole('dialog', { name: '앱을 초기화할까요?' });
   await expect(dialog).toContainText('월드 백업');
@@ -143,6 +154,7 @@ test('reset asks twice, keeps backups, can keep keys, and restarts at first laun
 test('reset with keys deletes every provider key', async ({ page }) => {
   await boot(page, 'scenario=selected');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await page.getByRole('tab', { name: '앱', exact: true }).click();
   await page.getByRole('button', { name: '초기화…' }).click();
   await page.getByRole('dialog').getByRole('button', { name: '초기화 계속', exact: true }).click();
   const confirm = page.getByRole('dialog', { name: '정말 초기화할까요?' });
@@ -156,6 +168,7 @@ test.describe('diagnostics export', () => {
   test('saving the diagnostics asks the shell for a file and says so', async ({ page }) => {
     await boot(page, 'scenario=selected');
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     await page.getByRole('button', { name: '진단 정보를 파일로 저장' }).click();
     await expect(page.getByText('진단 정보를 파일로 저장했습니다')).toBeVisible();
     expect(await page.evaluate(() => (window as any).__pomiShell)).toContain('diagnostics_export');
@@ -164,6 +177,7 @@ test.describe('diagnostics export', () => {
   test('a dismissed save dialog says nothing', async ({ page }) => {
     await boot(page, 'scenario=selected&diagnostics=cancel');
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     await page.getByRole('button', { name: '진단 정보를 파일로 저장' }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__pomiShell)).toContain('diagnostics_export');
     await expect(page.getByText('진단 정보를 파일로 저장했습니다')).toHaveCount(0);

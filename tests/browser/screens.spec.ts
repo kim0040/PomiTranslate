@@ -202,6 +202,7 @@ for (const width of [1440, 840, 320]) {
     await page.setViewportSize({ width, height: 620 });
     await boot(page, 'selected');
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
     const sidebar = page.locator('.sidebar');
     const before = await sidebar.boundingBox();
     await page.locator('.danger-zone').scrollIntoViewIfNeeded();

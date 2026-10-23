@@ -110,7 +110,7 @@
   let styleBrief = $state('');
   let showStyleConfirm = $state(false);
   let styleError = $state('');
-  let importInput: HTMLInputElement;
+  let importInput: HTMLInputElement | undefined = $state();
   let importingSettings = $state(false);
   let overridesInvalid = $state(false);
   let packInvalid = $state(false);
@@ -120,6 +120,19 @@
   let modelErrorSelection = $state('');
   let lastAutoLookup = '';
   let saveBarHeight = $state(0);
+  let autoListing = $state(false);
+
+  // Two parts. "Translation" is what a translation run needs and is committed with the save bar; "App" is the
+  // application's own settings, which apply the moment they are changed. The Help menu's update check opens
+  // the app part; everything else (the menu, "change model", a credential error) opens translation.
+  type SettingsTab = 'translation' | 'app';
+  const tabs: { key: SettingsTab; label: MessageKey }[] = [
+    { key: 'translation', label: 'settings.tab.translation' },
+    { key: 'app', label: 'settings.tab.app' }
+  ];
+  let tab = $state<SettingsTab>(app.helpSection === 'updates' ? 'app' : 'translation');
+  // The part the person asked for while the translation draft has unsaved changes (answered in the dialog).
+  let pendingTab = $state<SettingsTab | null>(null);
 
   async function importDraft(event: Event): Promise<void> {
     const input = event.currentTarget as HTMLInputElement;
@@ -192,6 +205,7 @@
   $effect(() => {
     if (!app.focusKeyField) return;
     app.focusKeyField = false;
+    if (untrack(() => tab) !== 'translation') void showTab('translation', false);
     if (draft.provider !== 'custom') return;
     editingKey = true;
     void tick().then(() => {
@@ -336,11 +350,20 @@
     return true;
   }
 
+  // A key that was just saved is the first moment the provider's model list can be read, so it is read once,
+  // without the person having to find the button. Only the saved key is used, and a failure blocks nothing.
+  async function saveAndList(): Promise<boolean> {
+    const hadKey = !!apiKey.trim();
+    const saved = await saveSettings();
+    if (saved && hadKey && draft.provider !== 'openrouter') void loadModels(true, true);
+    return saved;
+  }
+
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     // Nothing to save means no save bar; an Enter key must not write the settings anyway.
-    if (!dirty) return;
-    if (await saveSettings()) {
+    if (!dirty || tab !== 'translation') return;
+    if (await saveAndList()) {
       if (app.returnStep) app.returnFromSettings();
       else void focusNav();
     }
@@ -381,14 +404,62 @@
     app.pendingLeave = null;
   });
 
+  // One dialog guards both ways out of unsaved translation settings: another page (AppState holds that
+  // move) and the "App" part of this page.
   async function saveAndLeave(): Promise<void> {
-    app.resolveLeave(await saveSettings());
+    const saved = await saveAndList();
+    if (pendingTab) { if (saved) void showTab(pendingTab, true); }
+    else app.resolveLeave(saved);
   }
 
   function leaveWithoutSaving(): void {
     discardDraft();
-    app.resolveLeave(true);
+    if (pendingTab) void showTab(pendingTab, true);
+    else app.resolveLeave(true);
   }
+
+  function stayHere(): void {
+    if (pendingTab) {
+      pendingTab = null;
+      if (app.helpSection === 'updates') app.helpSection = '';
+    } else app.resolveLeave(false);
+  }
+
+  function selectTab(next: SettingsTab): void {
+    if (next === tab || pendingTab === next) return;
+    if (tab === 'translation' && dirty) { pendingTab = next; return; }
+    void showTab(next, false);
+  }
+
+  async function showTab(next: SettingsTab, focus: boolean): Promise<void> {
+    tab = next;
+    pendingTab = null;
+    current = sections.find((section) => section.tab === next)!.key;
+    pinned = null;
+    await tick();
+    paneEl?.scrollTo({ top: 0 });
+    if (focus) document.getElementById(`settings-tab-${next}`)?.focus();
+  }
+
+  function tabKeys(event: KeyboardEvent): void {
+    const at = tabs.findIndex((item) => item.key === (event.target as HTMLElement).dataset.tab);
+    if (at < 0) return;
+    const to = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? (at + 1) % tabs.length
+      : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? (at + tabs.length - 1) % tabs.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+    if (to < 0) return;
+    event.preventDefault();
+    const next = tabs[to].key;
+    // With changes to answer for, the dialog opens and focus stays on the tab it is returned to.
+    if (tab === 'translation' && dirty && next !== tab) pendingTab = next;
+    else void showTab(next, true);
+  }
+
+  // The Help menu's "Check for Updates…" arrives while this page may already be open.
+  $effect(() => {
+    if (app.helpSection !== 'updates') return;
+    untrack(() => selectTab('app'));
+  });
 
   async function changeLanguage(select: HTMLSelectElement): Promise<void> {
     const locale = select.value as 'ko' | 'en' | 'ja';
@@ -400,7 +471,7 @@
     }
   }
 
-  async function loadModels(force = true): Promise<void> {
+  async function loadModels(force = true, auto = false): Promise<void> {
     // A running scan or translation holds the core; the list would only queue behind it.
     if (!snapshot || app.isBusy || app.busy === 'settings' || baseUrlInvalid) return;
     const selection = copySettings(draft);
@@ -411,12 +482,13 @@
       return;
     }
     modelError = '';
+    autoListing = auto;
     try {
       await app.loadModels(selection, force);
     } catch {
       modelError = t('settings.model.failed');
       modelErrorSelection = key;
-    }
+    } finally { autoListing = false; }
   }
 
   function chooseReasoning(next: 'default' | 'disabled' | 'custom'): void {
@@ -492,20 +564,22 @@
   // The section list: it follows the scroll (aria-current marks where the reader is) and moves the
   // page when used. The ids that menu commands and tests rely on stay on the sections themselves.
   const sections = [
-    { key: 'provider', id: 'provider-settings', label: 'settings.nav.provider' },
-    { key: 'translation', id: 'translation-settings', label: 'settings.nav.translation' },
-    { key: 'scope', id: 'scope-section', label: 'settings.nav.scope' },
-    { key: 'speed', id: 'speed-settings', label: 'settings.nav.speed' },
-    { key: 'app', id: 'application-settings', label: 'settings.nav.app' },
-    { key: 'manage', id: 'manage-section', label: 'settings.nav.manage' },
-    { key: 'updates', id: 'updates', label: 'settings.nav.updates' },
-    { key: 'data', id: 'data-settings', label: 'settings.nav.data' },
-    { key: 'reset', id: 'reset-section', label: 'settings.nav.reset' }
-  ] as const satisfies readonly { key: string; id: string; label: MessageKey }[];
+    { key: 'provider', tab: 'translation', id: 'provider-settings', label: 'settings.nav.provider' },
+    { key: 'translation', tab: 'translation', id: 'translation-settings', label: 'settings.nav.translation' },
+    { key: 'scope', tab: 'translation', id: 'scope-section', label: 'settings.nav.scope' },
+    { key: 'speed', tab: 'translation', id: 'speed-settings', label: 'settings.nav.speed' },
+    { key: 'manage', tab: 'translation', id: 'manage-section', label: 'settings.nav.manage' },
+    { key: 'app', tab: 'app', id: 'application-settings', label: 'settings.nav.app' },
+    { key: 'updates', tab: 'app', id: 'updates', label: 'settings.nav.updates' },
+    { key: 'data', tab: 'app', id: 'data-settings', label: 'settings.nav.data' },
+    { key: 'reset', tab: 'app', id: 'reset-section', label: 'settings.nav.reset' }
+  ] as const satisfies readonly { key: string; tab: SettingsTab; id: string; label: MessageKey }[];
   type SectionKey = (typeof sections)[number]['key'];
+  // The sections of the part on screen: the list beside the page names only those.
+  const tabSections = $derived(sections.filter((section) => section.tab === tab));
 
   let navEl: HTMLElement | undefined = $state();
-  let current = $state<SectionKey>('provider');
+  let current = $state<SectionKey>(sections.find((section) => section.tab === tab)!.key);
   let wide = $state(typeof matchMedia === 'function' && matchMedia('(min-width: 900px)').matches);
   let spyLocked = false;
   let spyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -518,14 +592,15 @@
   // Which section the reader is in: the last one whose top has passed a line a little below the top
   // of the pane. At the very bottom the last section wins, since a short one can never reach the line.
   function sectionInView(scroller: HTMLElement): SectionKey {
-    const stripHeight = !wide && navEl ? navEl.offsetHeight : 0;
+    const stripHeight = !wide && navEl?.parentElement ? navEl.parentElement.offsetHeight : 0;
     const line = scroller.getBoundingClientRect().top + stripHeight + Math.min(96, scroller.clientHeight * 0.25);
-    let found: SectionKey = sections[0].key;
-    for (const section of sections) {
+    const list = tabSections;
+    let found: SectionKey = list[0].key;
+    for (const section of list) {
       const element = document.getElementById(section.id);
       if (element && element.getBoundingClientRect().top <= line) found = section.key;
     }
-    if (scroller.scrollTop > 0 && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) found = sections[sections.length - 1].key;
+    if (scroller.scrollTop > 0 && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) found = list[list.length - 1].key;
     return found;
   }
 
@@ -595,18 +670,19 @@
   }
 </script>
 
-<div class="page settings" style:--settings-save-height={`${dirty ? saveBarHeight : 0}px`}>
+<div class="page settings" style:--settings-save-height={`${dirty && tab === 'translation' ? saveBarHeight : 0}px`}>
   <PageHeader title={t('settings.title')} lead={t('settings.lead')}>
     {#snippet actions()}
-      {#if app.returnStep && !dirty}
+      {#if app.returnStep && !(dirty && tab === 'translation')}
         <!-- Settings were opened to fix something a step needs: with nothing to save, the way back is the next move. -->
         <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={() => app.returnFromSettings()}>
           <Icon name="chevron-left" size={15} /> {t('settings.returnTo', { step: t(`step.${app.returnStep}` as MessageKey) })}
         </button>
       {/if}
       <!-- Always present, so a change of state is announced; the save bar itself only exists while there is something to save. -->
-      <span class="state" class:dirty role="status" aria-live="polite">
-        {#if app.busy === 'settings'}{t('settings.saving')}
+      <span class="state" class:dirty={dirty && tab === 'translation'} role="status" aria-live="polite">
+        {#if tab === 'app'}<Icon name="check" size={14} />{t('settings.tab.appStatus')}
+        {:else if app.busy === 'settings'}{t('settings.saving')}
         {:else if dirty}<span class="state-dot" aria-hidden="true"></span>{t('settings.dirty')}
         {:else}<Icon name="check" size={14} />{t('settings.savedState')}{/if}
       </span>
@@ -614,16 +690,29 @@
   </PageHeader>
 
   <div class="layout">
-    <nav class="section-nav" aria-label={t('settings.nav.label')} bind:this={navEl}>
-      <ul>
-        {#each sections as section (section.key)}
-          <li><a href={`#${section.id}`} aria-current={current === section.key ? 'true' : undefined} onclick={(event) => goToSection(event, section)}>{t(section.label)}</a></li>
+    <div class="nav-column">
+      <!-- Arrow keys move between the two parts and select as they go; with unsaved changes the dialog answers first. -->
+      <div class="tabs" role="tablist" aria-label={t('settings.tab.label')} tabindex="-1" onkeydown={tabKeys}>
+        {#each tabs as item (item.key)}
+          <button type="button" role="tab" class="tab" id={`settings-tab-${item.key}`} data-tab={item.key}
+            aria-selected={tab === item.key} aria-controls={tab === item.key ? `settings-panel-${item.key}` : undefined}
+            tabindex={tab === item.key ? 0 : -1} onclick={() => selectTab(item.key)}>{t(item.label)}</button>
         {/each}
-      </ul>
-    </nav>
+      </div>
+      <nav class="section-nav" aria-label={t('settings.nav.label')} bind:this={navEl}>
+        <ul>
+          {#each tabSections as section (section.key)}
+            <li><a href={`#${section.id}`} aria-current={current === section.key ? 'true' : undefined} onclick={(event) => goToSection(event, section)}>{t(section.label)}</a></li>
+          {/each}
+        </ul>
+      </nav>
+    </div>
 
   <form class="settings-form" id="settings-form" onsubmit={submit} novalidate>
     <fieldset disabled={!!app.busy} aria-busy={app.busy === 'settings'}>
+    {#if tab === 'translation'}
+    <div class="panel" role="tabpanel" id="settings-panel-translation" aria-labelledby="settings-tab-translation">
+    <p class="panel-lead">{t('settings.tab.translationLead')}</p>
     <section class="card settings-section" id="provider-settings" tabindex="-1" aria-labelledby="provider-title">
       <div class="section-head">
         <div class="section-icon" aria-hidden="true"><Icon name="shield" size={18} /></div>
@@ -655,9 +744,10 @@
           </div>
           <div class="hint" role="status" aria-live="polite">
             {#if visibleModelError}<span class="field-error">{visibleModelError}</span>
-            {:else if app.modelsLoading}{t('settings.model.listing')}
-            {:else if draft.model.trim() && models.length && !reasoningModel}{t('settings.model.notFound')}
-            {:else if reasoningModel}{t('settings.model.verified')}{#if app.modelsCached} · {t('settings.model.cached')}{/if}{/if}
+            {:else if app.modelsLoading}{t(autoListing ? 'settings.model.autoListing' : 'settings.model.listing')}
+            {:else if draft.model.trim() && models.length && !reasoningModel}<span class="model-warning"><Icon name="alert-triangle" size={14} />{t('settings.model.notFound')}</span>
+            {:else if reasoningModel}{t('settings.model.verified')}{#if app.modelsCached} · {t('settings.model.cached')}{/if}
+            {:else if draft.provider !== 'openrouter' && stored === false && !models.length}{t('settings.model.needKey')}{/if}
           </div>
           {#if modelPrice}<p class="hint num">{modelPrice}</p>{/if}
           {#if !models.length && recommended}
@@ -921,6 +1011,31 @@
       </details>
     </section>
 
+    <section class="card settings-section" id="manage-section" tabindex="-1" aria-labelledby="manage-title">
+      <details class="advanced" id="settings-management">
+        <summary>
+          <span class="section-head compact">
+            <span class="section-icon" aria-hidden="true"><Icon name="archive" size={18} /></span>
+            <span><strong id="manage-title">{t('settings.manage')}</strong></span>
+          </span>
+          <Icon name="chevron-down" size={18} />
+        </summary>
+        <div class="manage-body">
+          <div class="actions">
+            <input type="file" accept="application/json,.json,.py" bind:this={importInput} onchange={importDraft} hidden />
+            <button type="button" class="btn btn-secondary" disabled={!!app.busy || importingSettings} onclick={() => importInput?.click()}>{t('settings.import.action')}</button>
+            <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={exportDraft}>{t('settings.export')}</button>
+            <button type="button" class="btn btn-quiet" disabled={!!app.busy} onclick={resetDraft}>{t('settings.resetDraft')}</button>
+          </div>
+          <SettingsHint text={t('settings.import.help')} />
+        </div>
+      </details>
+    </section>
+
+    </div>
+    {:else}
+    <div class="panel" role="tabpanel" id="settings-panel-app" aria-labelledby="settings-tab-app">
+    <p class="panel-lead">{t('settings.tab.appLead')}</p>
     <section class="card settings-section" id="application-settings" tabindex="-1" aria-labelledby="app-title">
       <div class="section-head">
         <span class="section-icon" aria-hidden="true"><Icon name="sliders" size={18} /></span>
@@ -966,34 +1081,15 @@
       </div>
     </section>
 
-    <section class="card settings-section" id="manage-section" tabindex="-1" aria-labelledby="manage-title">
-      <details class="advanced" id="settings-management">
-        <summary>
-          <span class="section-head compact">
-            <span class="section-icon" aria-hidden="true"><Icon name="archive" size={18} /></span>
-            <span><strong id="manage-title">{t('settings.manage')}</strong></span>
-          </span>
-          <Icon name="chevron-down" size={18} />
-        </summary>
-        <div class="manage-body">
-          <div class="actions">
-            <input type="file" accept="application/json,.json,.py" bind:this={importInput} onchange={importDraft} hidden />
-            <button type="button" class="btn btn-secondary" disabled={!!app.busy || importingSettings} onclick={() => importInput.click()}>{t('settings.import.action')}</button>
-            <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={exportDraft}>{t('settings.export')}</button>
-            <button type="button" class="btn btn-quiet" disabled={!!app.busy} onclick={resetDraft}>{t('settings.resetDraft')}</button>
-          </div>
-          <SettingsHint text={t('settings.import.help')} />
-        </div>
-      </details>
-    </section>
-
     <AppMaintenance />
+    </div>
+    {/if}
     </fieldset>
   </form>
   </div>
 
   <!-- Only while there is something to save: a disabled Save button on a clean page says nothing. -->
-  {#if dirty}
+  {#if dirty && tab === 'translation'}
     <div class="action-bar" bind:clientHeight={saveBarHeight}>
       <div class="note">
         <span>{t('settings.barHint')}</span>
@@ -1009,12 +1105,12 @@
   {/if}
 </div>
 
-{#if app.pendingLeave}
-  <Dialog showClose={false} title={t('settings.leave.title')} onClose={() => app.resolveLeave(false)}>
+{#if app.pendingLeave || pendingTab}
+  <Dialog showClose={false} title={t('settings.leave.title')} onClose={stayHere}>
     <p>{t('settings.leave.body')}</p>
     {#if hasBlockingError}<p class="field-error" role="alert">{t('settings.fixErrors')}</p>{/if}
     {#snippet actions()}
-      <button type="button" class="btn btn-quiet leave-stay" disabled={!!app.busy} onclick={() => app.resolveLeave(false)}>{t('settings.leave.stay')}</button>
+      <button type="button" class="btn btn-quiet leave-stay" disabled={!!app.busy} onclick={stayHere}>{t('settings.leave.stay')}</button>
       <button type="button" class="btn btn-secondary" disabled={!!app.busy} onclick={leaveWithoutSaving}>{t('settings.leave.discard')}</button>
       <button type="button" class="btn btn-primary" data-autofocus disabled={!!app.busy || hasBlockingError} onclick={saveAndLeave}>
         {t(app.busy === 'settings' ? 'settings.saving' : 'settings.leave.save')}
@@ -1059,12 +1155,23 @@
   .settings { --pad-top: var(--space-5); }
   @media (max-width: 640px) { .settings { --pad-top: var(--space-4); } }
   .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; min-width: 0; }
-  .section-nav {
-    position: sticky; top: calc(-1 * var(--pad-top)); z-index: 12; min-width: 0; overflow-x: auto; scrollbar-width: none;
+  /* The two parts and the sections of the one on screen share the pinned strip. */
+  .nav-column {
+    position: sticky; top: calc(-1 * var(--pad-top)); z-index: 12; min-width: 0; display: flex; align-items: center; gap: var(--space-3);
     margin-inline: calc(-1 * var(--pane-pad-x, 0px)); padding: 6px var(--pane-pad-x, 0px);
     background: var(--bg-toolbar); border-block-end: 1px solid var(--border);
     backdrop-filter: saturate(1.6) blur(16px); -webkit-backdrop-filter: saturate(1.6) blur(16px);
   }
+  .tabs { flex: none; display: flex; gap: 2px; padding: 2px; border-radius: var(--radius-lg); background: var(--bg-sunken); border: 1px solid var(--border); }
+  .tab {
+    display: inline-flex; align-items: center; justify-content: center; flex: 1 1 auto; min-height: 30px; padding: 0 var(--space-3);
+    border: 0; border-radius: var(--radius-md); background: transparent; color: var(--text-secondary);
+    font-size: var(--text-sm); font-weight: 500; white-space: nowrap;
+  }
+  /* The chosen part is raised and bold, so it is not colour alone. */
+  .tab[aria-selected='true'] { background: var(--bg-surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow-control), 0 0 0 1px var(--border-strong); }
+  @media (hover: hover) { .tab[aria-selected='false']:hover { color: var(--text); background: var(--bg-hover); } }
+  .section-nav { flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
   .section-nav::-webkit-scrollbar { display: none; }
   .section-nav ul { list-style: none; margin: 0; padding: 0; display: flex; gap: 2px; width: max-content; }
   .section-nav a {
@@ -1080,19 +1187,24 @@
     .preview { forced-color-adjust: none; }
   }
   /* A window this short has no room to spare for a pinned strip. */
-  @media (max-height: 520px) and (max-width: 899.98px) { .section-nav { position: static; margin-inline: 0; padding-inline: 0; } }
+  @media (max-height: 520px) and (max-width: 899.98px) { .nav-column { position: static; margin-inline: 0; padding-inline: 0; } }
 
   @media (min-width: 900px) {
     .layout { grid-template-columns: clamp(152px, 17vw, 184px) minmax(0, 720px); column-gap: var(--space-6); }
-    .section-nav {
-      top: calc(var(--space-4) - var(--pad-top)); z-index: auto; overflow: visible; margin: 0; padding: 0; background: none; border: 0;
-      backdrop-filter: none; -webkit-backdrop-filter: none;
+    .nav-column {
+      top: calc(var(--space-4) - var(--pad-top)); z-index: auto; flex-direction: column; align-items: stretch; gap: var(--space-3);
+      margin: 0; padding: 0; background: none; border: 0; backdrop-filter: none; -webkit-backdrop-filter: none;
     }
+    .section-nav { flex: none; overflow: visible; }
     .section-nav ul { flex-direction: column; width: auto; gap: 1px; }
     .section-nav a { padding: 0 var(--space-3); }
     .section-nav a[aria-current='true']::after { inset-inline: auto; inset-inline-start: 0; inset-block: 7px; width: 2px; height: auto; }
   }
 
+  .panel { display: grid; gap: var(--space-4); min-width: 0; }
+  .panel-lead { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; max-width: 64ch; }
+  .model-warning { display: inline-flex; align-items: flex-start; gap: 6px; color: var(--warning-text); }
+  .model-warning :global(.icon) { flex: none; margin-top: 3px; }
   .settings-form { min-width: 0; container-type: inline-size; container-name: settings-pane; }
   .settings-form > fieldset { display: grid; gap: var(--space-4); min-width: 0; margin: 0; padding: 0; border: 0; }
   .settings-form > fieldset :global(input), .settings-form > fieldset :global(select), .settings-form > fieldset :global(textarea), .settings-form > fieldset :global(button), .settings-form > fieldset :global(summary) { scroll-margin-block-end: calc(var(--settings-save-height) + var(--space-4)); }

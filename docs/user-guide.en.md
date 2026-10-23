@@ -12,6 +12,8 @@ Close Minecraft or the server and make an **independent copy of your world**. Au
 
 ## 1. Settings
 
+Settings has two parts. The **Translation** tab (provider, key, model, languages, scope, performance, settings import/export) needs Save, and the bottom save bar appears on this tab only. The **App** tab (appearance, display language, notifications, updates, data, diagnostics, reset) applies the moment you change something and has no Save button. Moving to the App tab with unsaved translation settings first asks whether to save, discard or keep editing. The arrow keys (←→, Home, End) switch tabs.
+
 ### Provider, model and key
 
 ![Selected source text and instructions go to your chosen provider and may incur charges](../assets/illustrations/docs/doc_api_notice_en_v1.png)
@@ -45,7 +47,7 @@ Configure concurrency, sentences per batch, requests per minute (RPM), tokens pe
 
 - **Saved manual translations:** register exact source-to-translation pairs as JSON for every world. No API is called, and translations entered in Review take priority. Limits: 5,000 pairs, 32,000 characters each, 1 MB total.
 - **Import/export:** import PomiTranslate or legacy Web UI JSON, or public string constants from `translate.py`. Python files are never executed. Keys, world paths, UI language and external ZIP paths are omitted.
-- **Save bar:** the pinned bottom bar shows whether changes are saved. Save or discard the draft. Public settings exports do not contain keys.
+- **Save bar (Translation tab):** the pinned bottom bar shows whether changes are saved. Save or discard the draft. Public settings exports do not contain keys.
 
 ### Interface and app information
 

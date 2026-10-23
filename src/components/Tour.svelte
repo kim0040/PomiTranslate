@@ -22,7 +22,7 @@
   }
 </script>
 
-<Dialog title={t('tour.title')} onClose={() => finish()}>
+<Dialog showClose={false} title={t('tour.title')} onClose={() => finish()}>
   <div class="tour">
     <div class="art" aria-hidden="true">
       {#if step.icon}<span class="ico"><Icon name={step.icon} size={30} /></span>
