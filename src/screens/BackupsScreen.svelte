@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SvelteSet } from 'svelte/reactivity';
   import { app } from '../lib/app.svelte';
   import type { BackupSummary } from '../lib/api';
   import { t } from '../lib/i18n/index.svelte';
@@ -8,7 +9,6 @@
   import Icon from '../components/Icon.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
   import PageHeader from '../components/PageHeader.svelte';
-  import WorldCard from '../components/WorldCard.svelte';
   import StatusScreen from '../components/StatusScreen.svelte';
   import ListRow from '../components/ListRow.svelte';
   import Pill from '../components/Pill.svelte';
@@ -16,6 +16,12 @@
 
   let selectedBackup = $state<BackupSummary | null>(null);
   let confirmRestore = $state(false);
+  // Rows whose id line is open: it is one click away instead of a third line on every row.
+  const expanded = new SvelteSet<string>();
+  function toggleDetails(id: string): void {
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
+  }
 
   const hasWorld = $derived(!!app.worldDir);
   const restoring = $derived(app.busy === 'restore');
@@ -114,12 +120,6 @@
       {/snippet}
     </StatusScreen>
   {:else}
-    <WorldCard compact name={worldName} path={app.worldDir} eyebrow={t('world.selected')}>
-      {#snippet actions()}
-        <Pill tone="accent"><span class="num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}</span></Pill>
-      {/snippet}
-    </WorldCard>
-
     {#if restoring}
       <section class="card restoring" role="status" aria-live="polite" aria-label={t('status.restoring')}>
         <div class="restoring-head">
@@ -142,22 +142,18 @@
       </Callout>
     {/if}
 
-    {#if backups.length === 0}
-      <StatusScreen icon="archive" title={t('backups.empty')}>
-        <p>{t('backups.emptyHelp')}</p>
-        {#snippet actions()}
-          <button type="button" class="btn btn-secondary" disabled={actionBusy} onclick={() => app.goto('workspace')}>
-            {t('nav.workspace')} <Icon name="chevron-right" size={16} />
-          </button>
-        {/snippet}
-      </StatusScreen>
-    {:else}
-      <section aria-labelledby="backup-list-title">
-        <!-- The world card above names the world and counts its backups; this heading is for screen readers. -->
-        <h2 id="backup-list-title" class="sr-only">{t('backups.world', { name: worldName })}</h2>
-        {#if app.backupUsage || (admin && appSets.length > 1)}
-        <div class="list-heading">
-          <!-- The count is on the world card above; this line is only the disk use. -->
+    <section class="card list-card" aria-labelledby="backup-list-title">
+      <!-- The world and its backups are one thing: the heading names the world, the rows below are its backups. -->
+      <header class="list-head">
+        <span class="thumb" aria-hidden="true"><Icon name="folder" size={20} /></span>
+        <div class="who">
+          <h2 id="backup-list-title" class="name truncate" title={worldName}>{worldName}</h2>
+          <p class="path mono truncate" title={app.worldDir}>{middleEllipsis(app.worldDir, 64)}</p>
+        </div>
+        <Pill tone="accent"><span class="num">{t('world.backupsCount', { count: formatNumber(backups.length, app.locale) })}</span></Pill>
+      </header>
+      {#if backups.length && (app.backupUsage || (admin && appSets.length > 1))}
+        <div class="list-tools">
           {#if app.backupUsage}
             <p class="muted num">{t('backups.usage', {
               world: formatBytes(app.backupUsage.worldBytes, app.locale),
@@ -174,14 +170,21 @@
             </div>
           {/if}
         </div>
-        {/if}
-        <ul class="list backup-list">
+      {/if}
+      {#if backups.length}
+        <ul class="rows backup-list">
           {#each backups as backup (backup.backupSetId)}
             <ListRow>
               {#snippet leading()}<Icon name={backup.kind === 'recovery' ? 'undo' : 'archive'} size={16} />{/snippet}
               <div class="stack">
                 <span class="title"><strong class="kind">{kindLabel(backup.kind)}</strong> <span class="date num">{dateLabel(backup.createdAt)}</span></span>
-                <span class="row-facts num">{factsText(backup)}</span>
+                <span class="row-facts num">{factsText(backup)}<button type="button" class="more" aria-expanded={expanded.has(backup.backupSetId)} aria-controls={`backup-more-${backup.backupSetId}`} onclick={() => toggleDetails(backup.backupSetId)}>{t('backups.details')}</button></span>
+                {#if expanded.has(backup.backupSetId)}
+                  <span id={`backup-more-${backup.backupSetId}`} class="more-body">
+                    <code class="backup-id" title={backup.backupSetId}>{t('backups.id')}: {backup.backupSetId}</code>
+                    {#if backup.externalTargets?.length}<span class="muted">{t('backups.externalCount', { count: backup.externalTargets.length })}</span>{/if}
+                  </span>
+                {/if}
               </div>
               {#snippet trailing()}
                 <span class="row-pills">
@@ -207,17 +210,21 @@
                   </button>
                 {/if}
               {/snippet}
-              {#snippet detail()}
-                <details class="row-details">
-                  <summary>{t('backups.details')}</summary>
-                  <code class="backup-id" title={backup.backupSetId}>{t('backups.id')}: {backup.backupSetId}</code>
-                  {#if backup.externalTargets?.length}<p class="muted">{t('backups.externalCount', { count: backup.externalTargets.length })}</p>{/if}
-                </details>
-              {/snippet}
             </ListRow>
           {/each}
         </ul>
-      </section>
+      {/if}
+    </section>
+
+    {#if backups.length === 0}
+      <StatusScreen icon="archive" title={t('backups.empty')}>
+        <p>{t('backups.emptyHelp')}</p>
+        {#snippet actions()}
+          <button type="button" class="btn btn-secondary" disabled={actionBusy} onclick={() => app.goto('workspace')}>
+            {t('nav.workspace')} <Icon name="chevron-right" size={16} />
+          </button>
+        {/snippet}
+      </StatusScreen>
     {/if}
   {/if}
 </div>
@@ -297,8 +304,16 @@
   .restoring-head :global(.icon) { animation: pomi-spin 0.9s linear infinite; }
   .restoring p { font-size: var(--text-sm); }
 
-  .list-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-3); }
-  .list-heading > p { margin: 0; font-size: var(--text-sm); }
+  .list-card { padding: 0; overflow: hidden; }
+  .list-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; padding: var(--space-3) var(--space-4); }
+  .thumb { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--accent-text); }
+  .who { min-width: 0; flex: 1; }
+  .name { font-size: var(--text-lg); font-weight: 600; }
+  .path { margin: 0; font-size: var(--text-xs); color: var(--text-secondary); }
+  .list-tools { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2) var(--space-4); padding: var(--space-2) var(--space-4); border-top: 1px solid var(--border); background: var(--bg-sunken); }
+  .list-tools > p { margin: 0; font-size: var(--text-sm); }
+  .rows { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
+  .rows > :global(li + li) { border-top: 1px solid var(--border); }
   .stack { display: grid; gap: 1px; min-width: 0; }
   .title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-3); }
   .kind { font-weight: 600; }
@@ -307,8 +322,8 @@
   .row-pills { display: inline-flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
   .delete { color: var(--danger-text); }
   @media (hover: hover) { .delete:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger-text); } }
-  .row-details summary { cursor: pointer; font-size: var(--text-xs); color: var(--text-secondary); }
-  .row-details[open] { padding-block-end: var(--space-1); }
+  .more { margin-inline-start: var(--space-2); padding: 0; border: 0; background: none; color: var(--accent-text); font: inherit; font-size: var(--text-xs); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .more-body { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); padding-block: 2px; }
   .prune { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); font-size: var(--text-sm); }
   .prune .input { width: 80px; min-height: 30px; }
   .understand { margin-top: var(--space-2); }

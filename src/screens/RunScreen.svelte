@@ -11,7 +11,7 @@
   import WorldCard from '../components/WorldCard.svelte';
   import { REASONING_PROVIDERS, reasoningSummary, supportsReasoning } from '../lib/reasoning';
   import { clock, holdClock } from '../lib/clock.svelte';
-  import { milestone, percentDone, remainingSeconds } from '../lib/workflow';
+  import { milestone, percentDone, remainingSeconds, roundEta } from '../lib/workflow';
   import { failureKey } from '../lib/failures';
   import { warningRows, warningTotal } from '../lib/glossary';
 
@@ -148,7 +148,7 @@
           </div>
           <!-- Always one line tall, so the rows below do not move when an estimate appears. -->
           <p class="num muted detail-line">
-            {#if eta !== null}{t('run.progress.eta', { time: formatDuration(eta, app.locale) })}{:else}&nbsp;{/if}
+            {#if eta !== null}{t('run.progress.eta', { time: formatDuration(roundEta(eta), app.locale) })}{:else}&nbsp;{/if}
             {#if p.currentFile && p.phase !== 'translate'}<span class="file mono" title={p.currentFile}>{middleEllipsis(p.currentFile, 56)}</span>{/if}
           </p>
         </div>

@@ -5,6 +5,7 @@ export const SAMPLE_LIMIT = 5;
 /** What one progress event may add, and how long each side of a sample may be (the core cuts them the same way). */
 export const EVENT_SAMPLE_LIMIT = 3;
 export const SAMPLE_CHARS = 160;
+export const PACE_SAMPLE_LIMIT = 12;
 export type ProgressSample = { source: string; translated: string };
 
 export type JobProgress = {
@@ -22,6 +23,8 @@ export type JobProgress = {
   startedAt: number;
   /** When sentences started going to the provider; the ETA is measured from here. */
   translateStartedAt: number;
+  /** [time, sentences done] at each progress event that moved the count; the ETA reads its pace from these. */
+  paceSamples: [number, number][];
   /** The file being read or written right now, as the core named it. */
   currentFile: string;
   samples: ProgressSample[];
@@ -47,7 +50,7 @@ export function emptyProgress(): JobProgress {
   return {
     phase: 'idle', fileIndex: 0, fileTotal: 0, done: 0, total: 0, failed: 0, batch: 0, batches: 0,
     requests: 0, requestsEstimate: 0, retry: null, startedAt: 0,
-    translateStartedAt: 0, currentFile: '', samples: [], cost: null, warnings: {}, glossaryDropped: null
+    translateStartedAt: 0, paceSamples: [], currentFile: '', samples: [], cost: null, warnings: {}, glossaryDropped: null
   };
 }
 
@@ -78,6 +81,7 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
       if (event.phase === 'translate') {
         next.phase = 'translate';
         next.translateStartedAt = now;
+        next.paceSamples = [];
         next.total = event.total ?? 0;
         next.done = 0;
         next.requestsEstimate = event.requests_estimate ?? 0;
@@ -90,6 +94,7 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
     case 'translation_progress':
       next.phase = 'translate';
       next.done = event.completed ?? next.done;
+      if (next.done > current.done) next.paceSamples = [...current.paceSamples, [now, next.done] as [number, number]].slice(-PACE_SAMPLE_LIMIT);
       next.total = event.total ?? next.total;
       next.failed = event.failed ?? next.failed;
       next.batch = event.batch ?? next.batch;
@@ -154,19 +159,43 @@ export function percentDone(progress: JobProgress): number | null {
   return progress.fileTotal > 0 ? (progress.fileIndex / progress.fileTotal) * 100 : null;
 }
 
+/** The estimate stays hidden until this much is done and this long has passed: the first requests only measure latency. */
+export const ETA_MIN_FRACTION = 0.1;
+export const ETA_MIN_ELAPSED_SECONDS = 20;
+/** Fewest progress events (three gaps) before the pace is trusted, and how far the recent pace may stray from the overall one. */
+export const ETA_MIN_SAMPLES = 4;
+export const ETA_STABLE_RATIO = 2;
+
 /**
- * Seconds left, from the pace of the sentences finished so far. Silent until 5% is done: before
- * that the pace is mostly the first request's latency and the guess would swing wildly.
+ * Seconds left, from the pace of the sentences finished so far, or null while there is no honest
+ * number: before 10% is done and 20 s have passed, while the pace is still swinging (the recent
+ * pace is more than twice faster or slower than the overall one), or when the run is overdue.
+ * The estimate counts down between events instead of being recomputed from a longer elapsed time.
  */
 export function remainingSeconds(progress: JobProgress, now: number): number | null {
   if (progress.phase !== 'translate' || progress.total <= 0 || !progress.translateStartedAt) return null;
-  if (progress.done / progress.total <= 0.05 || progress.done >= progress.total) return null;
-  const elapsed = (now - progress.translateStartedAt) / 1000;
-  if (elapsed <= 0) return null;
-  return (elapsed / progress.done) * (progress.total - progress.done);
+  if (progress.done / progress.total < ETA_MIN_FRACTION || progress.done >= progress.total) return null;
+  if ((now - progress.translateStartedAt) / 1000 < ETA_MIN_ELAPSED_SECONDS) return null;
+  const samples = progress.paceSamples;
+  if (samples.length < ETA_MIN_SAMPLES) return null;
+  const [lastAt, lastDone] = samples[samples.length - 1];
+  const [firstAt, firstDone] = samples[samples.length - ETA_MIN_SAMPLES];
+  const overall = lastDone / ((lastAt - progress.translateStartedAt) / 1000);
+  const recent = (lastDone - firstDone) / ((lastAt - firstAt) / 1000);
+  if (!Number.isFinite(overall) || !Number.isFinite(recent) || overall <= 0 || recent <= 0) return null;
+  const ratio = recent / overall;
+  if (ratio > ETA_STABLE_RATIO || ratio < 1 / ETA_STABLE_RATIO) return null;
+  const left = (progress.total - lastDone) / overall - (now - lastAt) / 1000;
+  return left > 0 ? left : null;
 }
 
 /** The announcement tier: 0, 10, 20 ... so a screen reader hears milestones, not every sentence. */
 export function milestone(percent: number | null): number | null {
   return percent === null ? null : Math.min(100, Math.floor(percent / 10) * 10);
+}
+
+/** An estimate shown as a round number (10 s steps, then whole minutes), so it does not flicker like a stopwatch. */
+export function roundEta(seconds: number): number {
+  if (seconds < 600) return Math.max(10, Math.ceil(seconds / 10) * 10);
+  return Math.ceil(seconds / 60) * 60;
 }

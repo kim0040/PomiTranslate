@@ -51,6 +51,8 @@
   }
   // ?scenario=backups-last-copy: a single app set that cannot be replaced.
   if (new URLSearchParams(location.search).get('scenario') === 'backups-last-copy') backups.splice(1, 1);
+  // ?backups=none: a world that was never translated.
+  if (new URLSearchParams(location.search).get('backups') === 'none') backups.length = 0;
   const lastCopyIds = () => (backups.filter((item) => !item.inWorldFolder).length === 1 ? [backups.find((item) => !item.inWorldFolder).backupSetId] : []);
   const backupUsage = () => ({
     worldBytes: backups.reduce((sum, item) => sum + (item.sizeBytes || 0), 0), worldCount: backups.length,
@@ -143,6 +145,10 @@
     const offset = Number(body.offset || 0);
     const limit = Number(body.limit || 200);
     return { candidates: rows.slice(offset, offset + limit), offset, total: rows.length, hasMore: offset + limit < rows.length, kinds: scan.kinds };
+  }
+  // result-<status>[-resume|-bare]: -resume keeps a checkpoint after the run, the others leave none (see resume.status).
+  function resultStatus(current) {
+    return current.startsWith('result-') ? current.slice('result-'.length).split('-')[0] : 'completed';
   }
   function resultPayload(status) {
     if (status === 'quality') return {
@@ -291,7 +297,7 @@
       if (current === 'startup-delay') await new Promise((resolve) => setTimeout(resolve, 500));
       const empty = current === 'empty';
       const resumed = ['scanned', 'review', 'run', 'run-progress', 'recovery-required', 'translate-fails', 'result-success', 'result-failed', 'dark-review'].includes(current);
-      const resultScenarios = ['result-quality', 'result-codes', 'result-partial', 'result-failed', 'result-needs_retry', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
+      const resultScenarios = ['result-quality', 'result-codes', 'result-partial', 'result-failed', 'result-failed-resume', 'result-needs_retry', 'result-needs_retry-bare', 'result-cancelled', 'result-invalidated', 'result-unsupported'];
       return ok(request, {
         notices: { firstLaunch: '', about: '', backupWarning: '', apiWarning: '' },
         settings: { ...settings, last_world_dir: empty ? '' : worldDir, ...(current === 'first-run' ? { app_prefs: {} } : {}) },
@@ -339,7 +345,7 @@
     }
     if (type === 'worlds.remember') return ok(request, { worlds: [{ path: worldDir, name: 'Roguefire', lastOpened: 1790672400, available: true }] });
     if (type === 'worlds.forget') return ok(request, { worlds: [] });
-    if (type === 'resume.status') return ok(request, current === 'interrupted-partial' ? { ...resumePayload(), status: 'partial' } : ['result-cancelled', 'result-needs_retry'].includes(current) ? { ...resumePayload(), status: current.slice(7) } : { available: false });
+    if (type === 'resume.status') return ok(request, current === 'interrupted-partial' ? { ...resumePayload(), status: 'partial' } : ['result-cancelled', 'result-needs_retry', 'result-failed-resume'].includes(current) ? { ...resumePayload(), status: resultStatus(current) } : { available: false });
     if (type === 'backups.list') return ok(request, { backups: [...backups], usage: backupUsage() });
     if (type === 'backups.delete') {
       const index = backups.findIndex((item) => item.backupSetId === body.backupSetId);
@@ -428,9 +434,18 @@
     if (type === 'translate.start' || type === 'translate.resume') {
       if (keyUnbound()) throw { code: 'CREDENTIAL_ENDPOINT_UNBOUND', message: 'raw shell text that must not be shown' };
       if (current === 'run-progress') {
-        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'phase_start', phase: 'translate', total: 6, requests_estimate: 1 } }), 50);
         // ?progress=nocost: the provider reports no cost (null). ?progress=many: more samples than the list keeps.
+        // ?progress=eta / eta-wobble: 100 sentences with an event every few seconds (run under page.clock) for the remaining-time estimate.
         const progressMode = new URLSearchParams(location.search).get('progress');
+        setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'phase_start', phase: 'translate', total: String(progressMode).startsWith('eta') ? 100 : 6, requests_estimate: 1 } }), 50);
+        if (String(progressMode).startsWith('eta')) {
+          // [seconds after the start, sentences done]: a steady pace, or one that jumps about.
+          const points = progressMode === 'eta' ? [[5, 6], [10, 12], [15, 18], [20, 24], [25, 30], [30, 36]] : [[5, 1], [10, 2], [15, 3], [20, 4], [25, 5], [28, 60], [30, 90]];
+          for (const [seconds, completed] of points) {
+            setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed, total: 100, failed: 0, batch: 1, batches: 10, requests: 1, cost: 0.0001 } }), seconds * 1000 + 100);
+          }
+          return new Promise((resolve) => setTimeout(() => resolve(ok(request, resultPayload('completed'))), 600000));
+        }
         const sentence = (n) => ({ source: `Sentence ${n} ${'x'.repeat(200)}`, translated: `문장 ${n}` });
         if (progressMode === 'many') {
           for (let round = 0; round < 3; round++) {
@@ -453,7 +468,7 @@
         return { v: 1, id: request.id, type: 'response.error', error: { code: 'RECOVERY_REQUIRED', recoverable: true, message: 'raw core text' } };
       }
       if (current === 'translate-fails') return { v: 1, id: request.id, type: 'response.error', error: { code: 'AUTH_FAILED', message: 'RAW provider text 401' } };
-      return ok(request, resultPayload(current.startsWith('result-') ? current.slice('result-'.length) : 'completed'));
+      return ok(request, resultPayload(resultStatus(current)));
     }
     if (type === 'restore.start') return ok(request, { status: 'restored', recoverySetId: 'recovery-before-restore' });
     if (type.startsWith('glossary.')) {
