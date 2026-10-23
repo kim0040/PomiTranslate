@@ -916,12 +916,11 @@ impl Credentials {
                 }
             }
         }
-        // The app's own keychain entry (`PomiTranslate/<provider>`) is removed when the key moves to
-        // another store (CR-5); one that is already missing counts as removed. The OS store is only
-        // reached when the vault's row says Keychain mode now or that a key was ever stored there
-        // (`known_keychain`): someone who never used the keychain makes no OS call.
-        let leaving_keychain =
-            !import && mode != Mode::Keychain && (previous == Mode::Keychain || was_known_keychain);
+        // The app's own keychain entry (`PomiTranslate/<provider>`) is removed when the key moves out
+        // of Keychain mode (CR-5); one that is already missing counts as removed. Only leaving
+        // Keychain mode reaches the OS store: a Local <-> Session switch never does, and keeps a
+        // `known_keychain` note so that an explicit delete or reset still removes the entry.
+        let leaving_keychain = mode != Mode::Keychain && previous == Mode::Keychain;
         let known = if (mode == Mode::Keychain && secret.is_some()) || import {
             true
         } else if leaving_keychain {

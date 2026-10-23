@@ -952,7 +952,7 @@ fn a_mode_switch_of_someone_who_never_used_the_keychain_makes_no_os_call() {
 }
 
 #[test]
-fn a_switch_away_from_a_mode_with_the_keychain_note_deletes_the_entry_and_clears_the_note() {
+fn a_local_session_switch_with_the_keychain_note_makes_no_os_call_and_keeps_the_note() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
     vault
@@ -963,18 +963,53 @@ fn a_switch_away_from_a_mode_with_the_keychain_note_deletes_the_entry_and_clears
     vault
         .save(dir.path(), "openai", Mode::Session, "", None)
         .unwrap();
+    vault
+        .save(
+            dir.path(),
+            "openai",
+            Mode::Local,
+            "second-fixture-secret",
+            None,
+        )
+        .unwrap();
+    assert!(calls(&fake).is_empty(), "{:?}", calls(&fake));
+    assert!(has_entry(&fake, "openai"));
+    // The note is kept, so an explicit delete still removes the entry.
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
     assert!(!has_entry(&fake, "openai"));
-    let after = calls(&fake);
-    assert!(after.contains(&"delete:openai".to_string()), "{after:?}");
+}
+
+#[test]
+fn after_an_import_a_local_session_switch_leaves_the_original_and_a_delete_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    put_entry(&fake, "openai", "keychain-fixture");
+    vault.import_keychain(dir.path(), "openai", None).unwrap();
     fake.log.lock().unwrap().clear();
     vault
-        .save(dir.path(), "openai", Mode::Local, "", None)
+        .save(dir.path(), "openai", Mode::Session, "", None)
         .unwrap();
-    assert!(
-        calls(&fake).is_empty(),
-        "the note is cleared: {:?}",
-        calls(&fake)
-    );
+    vault
+        .save(
+            dir.path(),
+            "openai",
+            Mode::Local,
+            "local-again-fixture",
+            None,
+        )
+        .unwrap();
+    assert!(calls(&fake).is_empty(), "{:?}", calls(&fake));
+    assert!(has_entry(&fake, "openai"), "the original is kept");
+    let (known, _) = account_flags(
+        &Vault::new(dir.path()).connection(false).unwrap().unwrap().0,
+        "openai",
+    )
+    .unwrap();
+    assert!(known, "the flag is kept");
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
+    assert!(!has_entry(&fake, "openai"));
 }
 
 #[test]

@@ -30,7 +30,7 @@ DB와 암호화 key 파일을 모두 읽는 같은 사용자 권한의 프로세
 
 CLI·legacy UI는 기존 OS keyring/환경변수 호환을 사용하며 desktop vault와 자동 공유되지 않습니다. `.env.example`은 비밀 없는 형식 예시이고 실제 키를 평문 `.env`로 보관하는 사용법을 권장하지 않습니다.
 
-키를 변경·삭제하려면 환경 설정을 사용합니다. Local → Session/Keychain 전환은 앱에 남은 Local ciphertext를 제거합니다. 기존 OS keychain 키 가져오기는 복사일 뿐 원본 항목을 남기지만, 앱이 그 항목이 있다고 기록하므로 키 삭제·저장 방식 전환·"키 삭제"를 선택한 앱 초기화 때 그 항목도 삭제합니다. 키 파일 분실·암호문 손상 시 재입력이 필요할 수 있습니다. 앱의 OS keychain 항목은 서비스 이름 `PomiTranslate`에 계정 이름이 provider 이름(예: `openai`)인 것뿐이며, 이 이름 공간에는 PomiTranslate만 씁니다. 앱은 keychain을 나열하지 않고 다른 항목에는 손대지 않습니다. 이 항목은 사용자가 직접 요청할 때만 삭제합니다: 한 provider의 키 삭제, 그 provider를 Keychain에서 다른 저장 방식으로 전환, 또는 "키 삭제"를 선택한 앱 초기화(모든 provider)입니다. 이미 없는 항목은 삭제된 것으로 봅니다. 설정에 Keychain을 쓴 기록이 없으면(Keychain 방식을 고른 적이 없으면) 앱은 키체인에 접근하지 않습니다. 운영체제가 삭제를 거부하면 앱은 항목을 삭제하지 못했다고(`KEYCHAIN_UNCONFIRMED`) 알리며, 다시 시도하면 다시 삭제를 요청합니다.
+키를 변경·삭제하려면 환경 설정을 사용합니다. Local → Session/Keychain 전환은 앱에 남은 Local ciphertext를 제거합니다. 기존 OS keychain 키 가져오기는 복사일 뿐 원본 항목을 남기지만, 앱이 그 항목이 있다고 기록하므로 키 삭제나 "키 삭제"를 선택한 앱 초기화 때 그 항목도 삭제합니다. Local과 Session 사이의 전환은 키체인에 손대지 않습니다. 키 파일 분실·암호문 손상 시 재입력이 필요할 수 있습니다. 앱의 OS keychain 항목은 서비스 이름 `PomiTranslate`에 계정 이름이 provider 이름(예: `openai`)인 것뿐이며, 이 이름 공간에는 PomiTranslate만 씁니다. 앱은 keychain을 나열하지 않고 다른 항목에는 손대지 않습니다. 이 항목은 사용자가 직접 요청할 때만 삭제합니다: 한 provider의 키 삭제, 그 provider를 Keychain에서 다른 저장 방식으로 전환, 또는 "키 삭제"를 선택한 앱 초기화(모든 provider)입니다. 이미 없는 항목은 삭제된 것으로 봅니다. 설정에 Keychain을 쓴 기록이 없으면(Keychain 방식을 고른 적이 없으면) 앱은 키체인에 접근하지 않습니다. 운영체제가 삭제를 거부하면 앱은 항목을 삭제하지 못했다고(`KEYCHAIN_UNCONFIRMED`) 알리며, 다시 시도하면 다시 삭제를 요청합니다.
 
 ## 비용과 문의
 
