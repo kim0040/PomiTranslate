@@ -6,8 +6,8 @@
   import { baseName, formatNumber } from '../lib/format';
   import { exportDocument } from '../lib/document-export';
   import {
-    blankDraft, exportFileName, exportGlossary, filterDrafts, fromDraft, GLOSSARY_LIMIT, loadGlossary, MAX_NOTE_CHARS, MAX_SOURCE_CHARS,
-    MAX_TARGET_CHARS, parseInvalidPath, saveGlossary, savableDrafts, snapshot, toDraft, validateDrafts,
+    blankDraft, DraftTracker, exportFileName, exportGlossary, filterDrafts, fromDraft, GLOSSARY_LIMIT, loadGlossary, matchesQuery, matchingKeys,
+    MAX_NOTE_CHARS, MAX_SOURCE_CHARS, MAX_TARGET_CHARS, parseInvalidPath, saveGlossary, savableDrafts, toDraft, validateDrafts,
     type DraftEntry, type EntryProblem, type FieldName
   } from '../lib/glossary';
   import Callout from '../components/Callout.svelte';
@@ -29,7 +29,11 @@
   let loadError = $state('');
   let revision = $state(0);
   let drafts = $state<DraftEntry[]>([]);
-  let base = $state(snapshot([]));
+  // "Unsaved" and the saved-row count are kept up to date row by row (see DraftTracker), so a keystroke
+  // does not walk the whole list. Every change to `drafts` is reported to it.
+  const tracker = new DraftTracker();
+  let dirty = $state(false);
+  let count = $state(0);
   let query = $state('');
   // Rows added in this visit stay visible while a search is active, even before they match it.
   let pinned = $state<string[]>([]);
@@ -48,20 +52,34 @@
   let mounted = true;
   onDestroy(() => { mounted = false; });
 
-  const dirty = $derived(snapshot(drafts) !== base);
-  const count = $derived(savableDrafts(drafts).length);
   const full = $derived(count >= GLOSSARY_LIMIT);
   const problems = $derived<EntryProblem[]>(showProblems ? validateDrafts(drafts) : []);
-  const visible = $derived(filterDrafts(drafts, query, pinned));
+  const filtering = $derived(query.trim().length > 0);
+  // The rows a search keeps. Typing in a row must not read every other row, so the matches are worked out
+  // when the list or the search changes; an edit only asks for that again (`matchRev`) when the edited
+  // row itself starts or stops matching.
+  let matchRev = $state(0);
+  const matching = $derived.by(() => {
+    const list = drafts;
+    const text = query;
+    void matchRev;
+    return untrack(() => matchingKeys(list, text));
+  });
+  const visible = $derived(filtering ? drafts.filter((draft) => pinned.includes(draft.key) || matching.has(draft.key)) : drafts);
   const shown = $derived(visible.slice(0, renderLimit));
   const numbers = $derived(new Map(drafts.map((draft, index) => [draft.key, index + 1])));
-  const filtering = $derived(query.trim().length > 0);
   const worldName = $derived(app.worldDir ? baseName(app.worldDir) : '');
+
+  function track(): void {
+    dirty = tracker.dirty;
+    count = tracker.count;
+  }
 
   function applyDocument(document: GlossaryDocument): void {
     revision = document.revision;
     drafts = document.entries.map(toDraft);
-    base = snapshot(drafts);
+    tracker.reset(drafts);
+    track();
     pinned = [];
     renderLimit = PAGE_SIZE;
     conflict = false;
@@ -129,6 +147,8 @@
     const row = blankDraft();
     const at = after ? drafts.findIndex((draft) => draft.key === after) + 1 : 0;
     drafts = [...drafts.slice(0, at), row, ...drafts.slice(at)];
+    tracker.structure(drafts);
+    track();
     pinned = [...pinned, row.key];
     // A row added past the rendered page must be rendered to be focused.
     const position = filterDrafts(drafts, query, pinned).findIndex((draft) => draft.key === row.key);
@@ -139,7 +159,13 @@
   function update(key: string, patch: Partial<DraftEntry>): void {
     // While a save is on its way the list stays as it was sent: the answer replaces the drafts.
     if (saving) return;
-    drafts = drafts.map((draft) => (draft.key === key ? { ...draft, ...patch } : draft));
+    // The row is changed in place: only what shows it is updated, not the other rows.
+    const draft = tracker.draft(key);
+    if (!draft) return;
+    Object.assign(draft, patch);
+    tracker.edit(key);
+    track();
+    if (filtering && matchesQuery(draft, query.trim().toLocaleLowerCase()) !== matching.has(key)) matchRev += 1;
     if (serverProblem?.key === key) serverProblem = null;
   }
 
@@ -157,6 +183,8 @@
     const index = visible.findIndex((draft) => draft.key === key);
     const neighbour = visible[index + 1] ?? visible[index - 1];
     drafts = drafts.filter((draft) => draft.key !== key);
+    tracker.structure(drafts);
+    track();
     pinned = pinned.filter((item) => item !== key);
     confirmDelete = null;
     if (neighbour) await focusField(neighbour.key);
@@ -257,7 +285,7 @@
   }
 
   function discard(): void {
-    applyDocument({ scope: activeScope, revision, updatedAt: null, entries: JSON.parse(base) });
+    applyDocument({ scope: activeScope, revision, updatedAt: null, entries: tracker.savedEntries() });
   }
 
   // The saved version is fetched again; the person's edits are dropped (reload) or kept (keep).
@@ -446,7 +474,7 @@
       {#if visible.length === 0}
         <p class="muted none" role="status">{t('glossary.noMatch')}</p>
       {:else}
-        <ul class="entries" aria-label={t('glossary.list')} aria-busy={saving ? 'true' : undefined}>
+        <ul class="entries" class:long={shown.length > PAGE_SIZE} aria-label={t('glossary.list')} aria-busy={saving ? 'true' : undefined}>
           {#each shown as draft (draft.key)}
             {@const n = numbers.get(draft.key) ?? 0}
             {@const sourceError = problemFor(draft.key, 'source')}
@@ -555,12 +583,18 @@
   }
   .head { padding: 0 var(--space-3); font-size: var(--text-overline); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary); }
   .head span:nth-child(4) { text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .entries { list-style: none; margin: 0; padding: 0; display: grid; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-card); overflow: hidden; }
+  .entries { list-style: none; margin: 0; padding: 0; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-card); overflow: hidden; }
   .entry { padding: var(--space-2) var(--space-3); }
+  /* Past the first page (up to 2,000 rows) the rows far off screen are not laid out or painted until they
+     come near, and the size they had is remembered. Up to one page every row stays laid out, so assistive
+     technology sees the whole list; browsers without content-visibility just lay everything out. */
+  .entries.long .entry { content-visibility: auto; contain-intrinsic-size: auto 34px; }
   .entry + .entry { border-top: 1px solid var(--border); }
   .entry.invalid { background: var(--danger-soft); }
   .entry .input[aria-invalid='true'] { border-color: var(--danger-solid); }
   .cell { min-width: 0; }
+  /* A text field of a fixed size and its own layout: typing in it lays out that field, not the whole list. */
+  .entry input.input { height: var(--control-height); contain: size layout; }
   /* A note is a field that grows with its lines; with one line it looks like the other fields. */
   .note { display: block; resize: none; overflow: hidden; padding-block: 7px; line-height: 1.4; field-sizing: content; white-space: pre-wrap; overflow-wrap: anywhere; }
   .case { display: grid; place-items: center; gap: 2px; cursor: pointer; }
@@ -575,6 +609,7 @@
   /* A narrow list: each entry becomes a small card instead of a row of cramped columns. */
   @container glossary-list (max-width: 860px) {
     .head { display: none; }
+    .entries.long .entry { contain-intrinsic-size: auto 220px; }
     .entry { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     .c-source { grid-column: 1 / -1; }
     .c-note { grid-column: 1 / -1; }
