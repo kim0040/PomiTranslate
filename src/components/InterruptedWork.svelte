@@ -103,7 +103,7 @@
             <p class="muted">{t('interrupted.newerLead')}</p>
             <NewerVersionNotice confirm />
             <div class="newer-actions">
-              <button type="button" class="btn btn-primary" disabled={!app.newerAccepted || app.isBusy} onclick={() => app.confirmContinuation()}>
+              <button type="button" class="btn btn-primary" disabled={!app.newerAccepted || app.isBusy || app.starting} onclick={() => app.confirmContinuation()}>
                 <Icon name="refresh" size={16} /> {t('interrupted.continue')}
               </button>
               <button type="button" class="btn btn-secondary" disabled={app.isBusy} onclick={() => app.cancelContinuation()}>{t('common.cancel')}</button>
@@ -113,7 +113,7 @@
           <div class="choices">
             {#if partial}
               <div class="choice">
-                <button type="button" class="btn btn-primary" disabled={app.isBusy} onclick={() => app.continueInterrupted(job)}>
+                <button type="button" class="btn btn-primary" disabled={app.isBusy || app.starting} onclick={() => app.continueInterrupted(job)}>
                   <Icon name="refresh" size={16} /> {t('interrupted.continue')}
                 </button>
                 <p class="muted">{t('interrupted.continueHelp')}</p>

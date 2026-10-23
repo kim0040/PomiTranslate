@@ -245,6 +245,8 @@ def _parse_json_spans(source: str) -> _JsonDocument | None:
 # The 1.21.9+ object component keeps its payload (an atlas sprite, a player's name, id and skin
 # properties) under these keys. None of it is text, whatever fields it nests.
 _OBJECT_PAYLOAD_KEYS = ("object", "player", "sprite")
+# The component types an explicit ``type`` can name (1.20.3+).
+_COMPONENT_TYPES = ("text", "translatable", "score", "selector", "keybind", "nbt", "object")
 
 
 class TextExtractionMixin:
@@ -440,10 +442,11 @@ class TextExtractionMixin:
         elif self._is_prefixed_translate(text):
             on_text(node, "text", self.text_from_translate_key(text["translate"]))
         fallback = node.get("fallback")
-        if "translate" in node:
+        kind = self._component_kind(node.get("type"), node)  # type None: left out (or null)
+        if kind == "translatable":
             if isinstance(fallback, str) and self.should_translate_text(fallback):
                 on_text(node, "fallback", fallback)
-        elif self._is_object_component(node.get("type"), node):  # type None: left out (or null)
+        elif kind == "object":
             # 26.1+: an object component's fallback is a whole text component, not only a string.
             if isinstance(fallback, str):
                 if self.should_translate_text(fallback):
@@ -478,15 +481,25 @@ class TextExtractionMixin:
                 self._walk_json(value, on_text, patch)
 
     @staticmethod
-    def _is_object_component(type_name: Any, node: Any) -> bool:
-        """Whether a component is the 1.21.9+ ``object`` kind (a sprite or a player head).
+    def _component_kind(type_name: Any, node: Any) -> str:
+        """The kind of a component that decides whose ``fallback`` is read: ``translatable``, ``object`` or ``other``.
 
-        An explicit ``type`` decides, whatever else the compound holds. Only when ``type`` is left
-        out does the shape (an ``object``, ``sprite`` or ``player`` key) stand in for it.
+        Decided once, before any fallback is dispatched. A recognised explicit ``type`` wins, whatever
+        other fields the compound holds. Only when ``type`` is left out does a key stand in for it:
+        ``translate`` for a translatable component, ``object``, ``sprite`` or ``player`` for an
+        object one. A ``type`` that is not recognised (another namespace, not a string) keeps the
+        reading from before: ``translate`` still marks a translatable component, nothing else counts.
+        A translatable component has its fallback only beside its ``translate`` key.
         """
         if type_name is None:
-            return any(key in node for key in _OBJECT_PAYLOAD_KEYS)
-        return type_name == "object"
+            if "translate" in node:
+                return "translatable"
+            return "object" if any(key in node for key in _OBJECT_PAYLOAD_KEYS) else "other"
+        if type_name == "object":
+            return "object"
+        if type_name == "translatable" or type_name not in _COMPONENT_TYPES:
+            return "translatable" if "translate" in node else "other"
+        return "other"
 
     def _walk_component_value(self, container: Any, key: Any, on_text: OnText, patch: bool) -> None:
         """A text component stored under ``container[key]``: a literal, JSON in a string (before
@@ -713,15 +726,15 @@ class TextExtractionMixin:
         if isinstance(text, nbt.TAG_String) and self.should_translate_text(text.value):
             refs.append(self._ref("plain_tag", f"{path}/text", scope, category, detail, tag=text))
         fallback = comp.get("fallback")
-        if "translate" in comp:
+        type_tag = comp.get("type")
+        # A type that is not a string is still an explicit (and not a recognised) type.
+        type_name = None if type_tag is None else type_tag.value if isinstance(type_tag, nbt.TAG_String) else ""
+        kind = self._component_kind(type_name, comp)
+        if kind == "translatable":
             if isinstance(fallback, nbt.TAG_String) and self.should_translate_text(fallback.value):
                 refs.append(self._ref("plain_tag", f"{path}/fallback", scope, category, detail, tag=fallback))
-        elif fallback is not None:
-            type_tag = comp.get("type")
-            # A type that is not a string is still an explicit (and not an object) type.
-            type_name = None if type_tag is None else type_tag.value if isinstance(type_tag, nbt.TAG_String) else ""
-            if self._is_object_component(type_name, comp):
-                self._collect_component(fallback, refs, f"{path}/fallback", scope, category, detail)
+        elif kind == "object" and fallback is not None:
+            self._collect_component(fallback, refs, f"{path}/fallback", scope, category, detail)
         if "selector" in comp or "nbt" in comp:
             separator = comp.get("separator")
             if separator is not None:

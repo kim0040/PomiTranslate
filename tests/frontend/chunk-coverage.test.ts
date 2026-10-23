@@ -261,3 +261,161 @@ describe('continuing an interrupted job of a newer world', () => {
     expect(sent.find((item) => item.type === 'translate.resume')?.payload.acceptNewerVersion).toBe(true);
   });
 });
+
+describe('one recovery action at a time, bound to the context it was asked in', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    setLocale('en');
+  });
+
+  const newer = coverage({ flags: { mixed: true, newer: true, missing: false }, chunkVersions: { min: 4189, max: 4800, distribution: [] } });
+  const job = {
+    jobId: 'job-A', kind: 'translate', worldPath: '/worlds/A', worldName: 'A', createdAt: '2026-09-30T09:12:00+09:00',
+    unitsTotal: 10, unitsVerified: 4, unitsUnknown: 0, needsAttention: true, legacy: false, state: 'partial', blocking: true
+  } as any;
+  const saved = { available: true, scanPlanId: 'plan-A', fingerprint: 'fingerprint-A', candidateCount: 1, candidates: [], chunkCoverage: newer, status: 'partial', savedAt: 1 };
+
+  /** A core whose draft save and recovery lookup can be held back; everything else answers at once. */
+  function gatedCore() {
+    const sent: { type: string; payload: Record<string, any> }[] = [];
+    const held: { draft?: () => void; status?: () => void } = {};
+    const gates = { draft: false, status: false };
+    invokeMock.mockImplementation(async (command: string, args: any) => {
+      if (command !== 'sidecar_request') return undefined;
+      const { type, payload, id } = args.request;
+      sent.push({ type, payload });
+      const ok = (body: unknown) => ({ v: 1, id, type: 'response.ok', payload: body });
+      if (type === 'review.draft.set' && gates.draft) {
+        gates.draft = false;
+        return new Promise((resolve) => { held.draft = () => resolve(ok({})); });
+      }
+      if (type === 'resume.status') {
+        if (gates.status) {
+          gates.status = false;
+          return new Promise((resolve) => { held.status = () => resolve(ok(saved)); });
+        }
+        return ok(saved);
+      }
+      if (type === 'translate.resume') return ok({ status: 'completed', candidateCount: 1, changedFileCount: 1 });
+      if (type === 'scan.start') {
+        return ok({
+          status: 'completed', scanPlanId: 'plan-new', fingerprint: 'fingerprint-new', candidateCount: 1, candidates: [], providerRequests: 0,
+          dryRun: true, chunkCoverage: coverage()
+        });
+      }
+      if (type === 'settings.set') return ok({ settings: { provider: 'openai', model: 'fixture' }, apiKeyStored: true });
+      if (type === 'world.inspect') return ok({ validJavaWorld: true });
+      if (type === 'worlds.remember') return ok({ worlds: [] });
+      if (type === 'app.bootstrap') return ok({ interruptedJobs: [] });
+      return ok({ available: false, backups: [], usage: null });
+    });
+    return { sent, held, gates };
+  }
+
+  function opened() {
+    const app = new AppState();
+    app.worldDir = '/worlds/A';
+    app.interruptedJobs = [job];
+    app.step = 'world';
+    return app;
+  }
+
+  it('sends one resume when Continue is clicked twice while the review is being stored', async () => {
+    const { sent, held, gates } = gatedCore();
+    const app = opened();
+    await app.continueInterrupted(job);
+    expect(app.continuation?.jobId).toBe('job-A');
+    app.newerAccepted = true;
+    app.draftDirty = true;
+    gates.draft = true;
+    const first = app.confirmContinuation();
+    await vi.waitFor(() => expect(held.draft).toBeTypeOf('function'));
+    // The review is still being stored: the job has not taken the core, yet the button is already off and a second click is ignored.
+    expect(app.isBusy).toBe(false);
+    expect(app.starting).toBe(true);
+    await app.confirmContinuation();
+    await app.continueInterrupted(job);
+    held.draft!();
+    await first;
+    expect(sent.filter((item) => item.type === 'review.draft.set')).toHaveLength(1);
+    expect(sent.filter((item) => item.type === 'translate.resume')).toHaveLength(1);
+    expect(app.starting).toBe(false);
+  });
+
+  it('releases the guard when the start fails', async () => {
+    gatedCore();
+    const app = opened();
+    await app.continueInterrupted(job);
+    app.newerAccepted = true;
+    invokeMock.mockImplementation(async (command: string, args: any) => {
+      if (command !== 'sidecar_request') return undefined;
+      const { type, id } = args.request;
+      if (type === 'translate.resume') return { v: 1, id, type: 'response.error', error: { code: 'INTERNAL', message: 'x', recoverable: true } };
+      return { v: 1, id, type: 'response.ok', payload: { settings: { provider: 'openai', model: 'fixture' }, apiKeyStored: true, available: false, backups: [], usage: null } };
+    });
+    await app.confirmContinuation();
+    expect(app.starting).toBe(false);
+  });
+
+  it('drops a recovery lookup that a new scan has outlived', async () => {
+    const { sent, held, gates } = gatedCore();
+    const app = opened();
+    gates.status = true;
+    const pending = app.continueInterrupted(job);
+    await vi.waitFor(() => expect(held.status).toBeTypeOf('function'));
+    // The core answers in order: the scan queues behind the held lookup, so the lookup is released first.
+    const scanning = app.startScan();
+    held.status!();
+    await pending;
+    await scanning;
+    // The fresh scan stays alone: the old checkpoint, job and confirmation do not come back.
+    expect(app.scan?.scanPlanId).toBe('plan-new');
+    expect(app.resume).toBeNull();
+    expect(app.continuation).toBeNull();
+    expect(app.newerAccepted).toBe(false);
+    expect(app.starting).toBe(false);
+    expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+  });
+
+  it('drops a recovery lookup that a world switch or a cancel has outlived', async () => {
+    const { sent, held, gates } = gatedCore();
+    const app = opened();
+    gates.status = true;
+    const pending = app.continueInterrupted(job);
+    await vi.waitFor(() => expect(held.status).toBeTypeOf('function'));
+    app.cancelContinuation();
+    held.status!();
+    await pending;
+    expect(app.scan).toBeNull();
+    expect(app.continuation).toBeNull();
+    expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+
+    held.status = undefined;
+    gates.status = true;
+    const again = app.continueInterrupted(job);
+    await vi.waitFor(() => expect(held.status).toBeTypeOf('function'));
+    const switching = app.useWorld('/worlds/B');
+    held.status!();
+    await again;
+    await switching;
+    expect(app.worldDir).toBe('/worlds/B');
+    expect(app.continuation).toBeNull();
+    expect(app.newerAccepted).toBe(false);
+    expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+  });
+
+  it('does not send a confirmation whose scan no longer matches the one it was asked for', async () => {
+    const { sent } = gatedCore();
+    const app = opened();
+    await app.continueInterrupted(job);
+    expect(app.continuation?.jobId).toBe('job-A');
+    app.newerAccepted = true;
+    // Another scan replaced the one the question was about while the panel stayed open.
+    app.scan = { ...app.scan!, scanPlanId: 'plan-other' };
+    await app.confirmContinuation();
+    expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+    expect(app.continuation).toBeNull();
+    expect(app.newerAccepted).toBe(false);
+    expect(app.starting).toBe(false);
+  });
+});

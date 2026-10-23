@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +17,16 @@ from nbt import nbt  # noqa: E402
 
 from mc_world_translator import WorldTranslator  # noqa: E402
 from mwt import desktop_entry  # noqa: E402
-from mwt.coverage import ChunkCoverage, chunk_data_version, needs_newer_version_confirmation, public_summary  # noqa: E402
+from mwt.coverage import (  # noqa: E402
+    MISSING,
+    PROCESSED,
+    SKIPPED_UNSUPPORTED,
+    UNOBSERVED,
+    ChunkCoverage,
+    chunk_data_version,
+    needs_newer_version_confirmation,
+    public_summary,
+)
 from mwt.layout import region_dir_identity  # noqa: E402
 from mwt.region import RegionFile, external_chunk_path  # noqa: E402
 from mwt.support_matrix import NEWEST_COVERED_DATA_VERSION  # noqa: E402
@@ -311,6 +322,64 @@ def test_overflow_keeps_flags_and_ranges_exact(tmp: Path) -> None:
     assert not ChunkCoverage().restore(broken)
 
 
+def earlier_reader() -> types.ModuleType:
+    """mwt/coverage.py as 9add4d8 had it: it knows only ``counts``, folds an overflow into the unobserved key."""
+    source = subprocess.check_output(["git", "show", "9add4d8:mwt/coverage.py"], cwd=ROOT).decode("utf-8")
+    module = types.ModuleType("earlier_coverage")
+    sys.modules[module.__name__] = module
+    exec(compile(source, "9add4d8:mwt/coverage.py", "exec"), module.__dict__)
+    return module
+
+
+def test_checkpoint_counts_survive_an_earlier_reader() -> None:
+    """New writer -> earlier reader -> new reader: the totals stay, and the new reader never double counts."""
+    earlier = earlier_reader()
+    current = ChunkCoverage()
+    record = current.file("region/r.0.0.mca", "overworld", "region")
+    for index in range(64):
+        record.add(PROCESSED, compression=2, state="known", data_version=4000 + index)
+    record.add(PROCESSED, compression=2, state=MISSING, count=5)  # no room left: overflow
+    record.add(SKIPPED_UNSUPPORTED, compression=99, state="known", data_version=4005, count=2)
+    record.add(PROCESSED, compression=2, state=UNOBSERVED, count=3)  # overflow too, beside the folded key of its status
+    other = current.file("entities/r.0.0.mca", "overworld", "entities")
+    other.add(PROCESSED, compression=2, state="known", data_version=4100, count=4)
+    current.partial = True
+    summary = current.summary()
+    assert summary["counts"]["processed"] == 64 + 5 + 3 + 4 and summary["counts"]["skipped_unsupported"] == 2
+    assert summary["counts"]["total"] == 78
+    exported = json.loads(json.dumps(current.export()))
+
+    # The new reader takes its own export back unchanged: the folded row is not a second observation.
+    restored = ChunkCoverage()
+    assert restored.restore(exported)
+    assert restored.summary() == summary
+    assert restored.files["region/r.0.0.mca"].overflow == {PROCESSED: 8, SKIPPED_UNSUPPORTED: 2}
+    assert json.loads(json.dumps(restored.export())) == exported
+
+    # The earlier reader accepts it and counts every chunk, with the overflow in the unobserved row as it always did.
+    reader = earlier.ChunkCoverage()
+    assert reader.restore(exported)
+    seen = reader.summary()
+    assert seen["counts"]["total"] == 78 and seen["counts"]["processed"] == 76 and seen["counts"]["skipped_unsupported"] == 2
+    assert seen["flags"]["newer"] == summary["flags"]["newer"]
+
+    # What the earlier reader writes back still holds every chunk when the new reader loads it again.
+    again = ChunkCoverage()
+    assert again.restore(json.loads(json.dumps(reader.export())))
+    assert again.summary()["counts"] == summary["counts"]
+    # (The earlier reader does not carry the additive partial marker; that is its format, not a count.)
+
+    # A folded row that is larger than the counts it should sit in is not a checkpoint this reader wrote.
+    broken = json.loads(json.dumps(exported))
+    item = broken["files"]["region/r.0.0.mca"]
+    item["counts"] = [entry for entry in item["counts"] if entry[0] != "unobserved"]
+    assert not ChunkCoverage().restore(broken)
+    # Without the marker (a record from before the fold existed) nothing is taken out of the counts.
+    unmarked = json.loads(json.dumps(exported))
+    unmarked["files"]["region/r.0.0.mca"].pop("overflow_folded")
+    assert ChunkCoverage().restore(unmarked)
+
+
 def test_readable_chunks_of_a_locked_file_are_processed(tmp: Path) -> None:
     world = tmp / "locked-world"
     write_level(world)
@@ -536,6 +605,7 @@ def main() -> None:
             test_external_chunk_counts_its_own_compression(root / "f")
             test_rescanning_a_file_replaces_its_counts_and_checkpoint_round_trips(root / "g")
             test_overflow_keeps_flags_and_ranges_exact(root / "l")
+            test_checkpoint_counts_survive_an_earlier_reader()
             test_readable_chunks_of_a_locked_file_are_processed(root / "m")
             test_partial_marker_survives_repeated_resumes_of_an_old_checkpoint(root / "n")
             test_damaged_level_dat_does_not_stop_the_scan(root / "k")
