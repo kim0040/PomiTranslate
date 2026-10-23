@@ -562,7 +562,17 @@ fn operation_active(state: State<'_, ActiveSidecar>) -> bool {
 
 #[tauri::command]
 async fn update_check(app: tauri::AppHandle) -> Result<updates::UpdateInfo, IpcError> {
-    logged("update_check", updates::check(&app).await)
+    let result = updates::check(&app).await;
+    match &result {
+        // No release feed yet is the normal state of a build made before its first release, and the
+        // automatic start-up check meets it every time: a note in the log, not one of the errors a
+        // diagnostics copy lists. The page still gets the code.
+        Err(error) if error.code == code::UPDATE_NOT_PUBLISHED => {
+            diagnostics::global().log("INFO", "update_check", "no release feed is published");
+            result
+        }
+        _ => logged("update_check", result),
+    }
 }
 
 #[tauri::command]

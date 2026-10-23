@@ -59,6 +59,16 @@ macOS 코드서명·공증과 Windows 코드서명은 updater 서명과 별개�
 
 초기화 후 앱이 다시 시작되고 첫 실행 안내가 나온다. 코어는 `confirm: "reset"` 없는 요청을 거부하고, 데이터 폴더 밖이나 링크 대상은 따라가지 않는다(링크 자체만 지운다). 스캔·번역·복원 중에는 버튼이 꺼지고 실행 잠금도 거부한다. **월드 백업은 지우지 않는다.** 백업까지 지우려면 데이터 폴더를 직접 지워야 하며, 도움말의 "앱을 완전히 지우려면"에 적었다.
 
+## 앱 제거 (Windows)
+
+설치 폴더(기본 `%LOCALAPPDATA%\PomiTranslate`)와 바로가기·제거 정보는 항상 지운다. "애플리케이션 데이터 삭제하기"(기본 해제)를 고르면 추가로:
+
+- `%APPDATA%\app.pomitranslate.desktop`(암호화된 키 DB·설치별 키 파일·실행 보고서)과 `%LOCALAPPDATA%\app.pomitranslate.desktop`(로그·WebView 저장소)을 지운다(Tauri 기본 동작).
+- `%APPDATA%\PomiTranslate`에서 초기화와 같은 항목(설정과 그 사본, 모델 목록, 스캔 결과, 이어서 할 작업, 검토 초안)을 지운다(`src-tauri/windows/hooks.nsh`, 목록은 `mwt/userdata.py`의 `RESET_FILES`/`RESET_DIRS`와 테스트로 맞춘다). 링크는 따라가지 않고 링크만 지운다.
+- **월드 백업**, 월드별 세대 카운터, 손상된 설정 사본, 잠금 파일은 남긴다. 제거 프로그램은 OS 키체인에 접근하지 않으므로 키체인에 저장한 키는 앱 안의 키 삭제나 초기화(키 삭제)로 지운다.
+
+업데이트(`/UPDATE`)는 이 상자와 관계없이 아무 데이터도 지우지 않는다.
+
 ## 검증 (2026-10-02, Linux)
 
 - Python `tests/test_user_data_durability.py`: 손상·삭제된 설정 복구와 손상본 보존, `app_prefs` 검증·유지, 확인 없는 초기화 거부, 초기화 후 백업·링크 대상 유지.

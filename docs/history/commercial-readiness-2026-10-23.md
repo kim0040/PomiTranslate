@@ -156,6 +156,14 @@ Sol 후속 검토는 세 결과의 수정을 확인했고(Python 3.11/3.12/3.13,
 
 세 번째 묶음의 최종 소스(취소·`APP_QUITTING`·Linux 이식성 수정 포함)에서 `pnpm verify:local` 60/60 PASS(656초).
 
+### 설치·제거 화면과 메뉴 종료 (Windows, UI Automation)
+
+- **설치 화면**: 설치 파일을 대화형으로 실행해 시작 → 사용권(앱의 MIT License) → 설치 위치(기본 `%LOCALAPPDATA%\PomiTranslate`, 48 MB) → 설치 → 완료(“PomiTranslate 실행하기”·“바탕화면 바로가기 만들기” 기본 선택)를 한국어로 진행했다. 마침을 누르자 설치된 앱이 실행돼 설치 폴더의 core로 `app.bootstrap`·`worlds.discover`에 답했고, 바탕화면·시작 메뉴 바로가기와 제거 정보(0.1.0, 게시자 PomiTranslate contributors)가 생겼다. 한글·공백이 있는 경로(`…\설치 테스트\Pomi 앱`, `/S /D=`)에서도 설치·실행·core 응답이 정상이었다.
+- **제거 시 언어 질문 (수정)**: `displayLanguageSelector: false`인 설치는 언어를 저장하지 않아, 제거 프로그램이 매번 영어로 “Please select a language”를 먼저 물었다(처음 확인 때는 예전 설치가 남긴 registry 값 때문에 보이지 않았다). `src-tauri/windows/hooks.nsh`의 설치 후 hook이 고른 언어를 저장한다. 다시 빌드한 설치 파일로 조용히 설치하자 값 1042(한국어)가 기록되고 제거 프로그램이 바로 한국어 제거 화면을 띄웠다.
+- **“애플리케이션 데이터 삭제하기” (수정)**: 기본 해제. 선택하면 Tauri 기본 동작은 shell 폴더(`%APPDATA%`/`%LOCALAPPDATA%\app.pomitranslate.desktop`: 키 DB·키 파일·보고서·로그·WebView)만 지워, core 폴더의 설정·이어서 할 작업·스캔이 남았다(수정 전 build에서 확인). 제거 hook이 이제 앱 안 초기화와 같은 항목(`RESET_FILES`/`RESET_DIRS`)을 지운다. 확인: 설정·사본·`jobs`·`scans`·`models` 삭제, `review-drafts`로 둔 junction은 링크만 지우고 대상 폴더의 파일은 유지, 월드 백업·세대 카운터·손상 사본·잠금 파일 유지, 프로그램·제거 정보·바로가기·제조사 registry 키 삭제. hook의 목록과 core 목록이 다르면 `tests/test_user_data_durability.py`가 실패한다(이름 하나를 바꿔 실패 확인). 업데이트(`/UPDATE`)에서는 지우지 않는다(템플릿과 같은 조건).
+- **메뉴 종료**: Windows 메뉴 막대의 파일 → “PomiTranslate 종료 Ctrl+Q”(id 1050)와 “창 닫기 Alt+F4”(1049)를 메뉴가 보내는 `WM_COMMAND`로 실행했다(잠긴 화면이라 실제 키 입력은 보내지 못했다). 저장하지 않은 설정이 있으면 둘 다 확인 창을 띄우고, 취소는 앱과 입력값을 유지, “저장하지 않고 종료”는 core 잔류 없이 종료하고 값을 쓰지 않았다. 아무 것도 없으면 0.16초에 종료 코드 0. 메뉴 종료는 창 닫기와 같은 `allow_close`를 거치므로 작업 중 확인은 위 창 닫기 확인과 같은 경로다.
+- **업데이트 확인 로그**: 공개 피드가 없는 build는 시작할 때마다 `ERROR update_check UPDATE_NOT_PUBLISHED`를 남겨 진단 복사의 최근 오류에 들어갔다. 이제 INFO(“no release feed is published”)로 남기고 화면에는 같은 코드를 준다.
+
 ### Linux 실행 (Docker, 처음)
 
 - **Python core 51개 파일**: `python:3.12-slim`에서 `git archive` 소스로 실행. 처음 47 PASS·4 FAIL이었고 원인은 다음과 같다.
@@ -174,7 +182,7 @@ Sol 후속 검토는 세 결과의 수정을 확인했고(Python 3.11/3.12/3.13,
 
 7e·7f에서 Windows의 설치·실행·제거, 창 닫기 확인 창(접근성 API 조작), 번역·복원 흐름, 자격 증명 관리자, Linux 컨테이너의 Python·Rust 단위 검사와 Secret Service는 확인했다. 남은 것:
 
-- 사람의 실제 마우스·키보드 조작과 화면 낭독기(U23), 설치 프로그램 화면, 이전 버전 위 업데이트 설치, Ctrl+Q 메뉴 종료.
+- 사람의 실제 마우스·키보드 조작(Ctrl+Q 실제 키 입력 포함)과 화면 낭독기(U23), 이전 버전 위 업데이트 설치.
 - macOS 전체, Linux 실제 창·`tauri build`·packaged core: `lockf`·F_FULLFSYNC, 키 폴더 권한, 프로세스 그룹 종료의 실제 실행, Java/Minecraft 실행 중 잠금 상호 작용.
 - 서명된 업데이트·설치, clean machine(승인 경계).
 - 실제 제공사로 용어집·서식 잔여 재시도 확인(유료 호출).

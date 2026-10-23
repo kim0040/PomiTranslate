@@ -710,7 +710,7 @@ export const en: Record<MessageKey, string> = {
   'help.faq.update.q': "How do I update?",
   'help.faq.update.a': "Check for a new version in Settings > Updates. Updating keeps your settings, saved keys and backups.",
   'help.faq.uninstall.q': "How do I remove the app completely?",
-  'help.faq.uninstall.a': "Use Settings > Reset to remove saved keys and settings, then delete the app. To remove world backups too, delete the data folder yourself. Your worlds are separate and are not deleted.",
+  'help.faq.uninstall.a': "Use Settings > Reset to remove saved keys and settings, then delete the app. To remove world backups too, delete the data folder yourself. Your worlds are separate and are not deleted. On Windows, ticking “Delete the application data” in the uninstaller also removes the key file and settings, but world backups and keys saved in the OS keychain stay.",
   'help.shortcuts.title': "Keyboard shortcuts",
   'help.shortcut.open': "Open a world",
   'help.shortcut.settings': "Settings",

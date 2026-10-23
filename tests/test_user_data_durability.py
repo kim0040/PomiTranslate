@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -15,6 +16,8 @@ sys.path.insert(0, str(ROOT))
 from mwt.desktop_entry import handle  # noqa: E402
 from mwt.userdata import (  # noqa: E402
     APP_PREF_DEFAULTS,
+    RESET_DIRS,
+    RESET_FILES,
     load_app_prefs,
     load_user_settings,
     remember_app_prefs,
@@ -98,7 +101,20 @@ def main() -> None:
         assert backup.read_bytes() == b"backup bytes", "world backups survive a reset"
         assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep", "a link is removed, never followed"
         assert list(root.glob("settings.damaged-*.json")), "the damaged copy stays for the person to inspect"
+    uninstaller_clears_what_the_reset_clears()
     print("USER_DATA_DURABILITY_PASSED")
+
+
+def uninstaller_clears_what_the_reset_clears() -> None:
+    """The Windows uninstaller's "delete the application data" clears the same names as the reset."""
+    hooks = (ROOT / "src-tauri" / "windows" / "hooks.nsh").read_text(encoding="utf-8")
+    files = set(re.findall(r'^\s*Delete "\$APPDATA\\PomiTranslate\\([^"\\]+)"', hooks, re.M))
+    dirs = set(re.findall(r'^\s*!insertmacro POMI_REMOVE_CORE_DIR "([^"]+)"', hooks, re.M))
+    assert files == set(RESET_FILES), (files, RESET_FILES)
+    assert dirs == set(RESET_DIRS), (dirs, RESET_DIRS)
+    assert "backups" not in files | dirs, "world backups are never removed by the uninstaller"
+    config = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+    assert config["bundle"]["windows"]["nsis"]["installerHooks"] == "./windows/hooks.nsh"
 
 
 if __name__ == "__main__":

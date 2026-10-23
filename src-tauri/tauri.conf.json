@@ -78,7 +78,8 @@
           "English",
           "Japanese"
         ],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "./windows/hooks.nsh"
       }
     },
     "macOS": {
