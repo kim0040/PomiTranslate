@@ -821,6 +821,20 @@ impl Credentials {
         supplied: &str,
         endpoint: Option<&str>,
     ) -> Result<Status, SaveError> {
+        self.save_locked(root, provider, mode, supplied, endpoint, false)
+    }
+
+    /// `import` copies a key that is already in the OS store into Local mode: the OS entry stays, and
+    /// the row records (`known_keychain`) that it exists, so a later delete or reset still reaches it.
+    fn save_locked(
+        &self,
+        root: &Path,
+        provider: &str,
+        mode: Mode,
+        supplied: &str,
+        endpoint: Option<&str>,
+        import: bool,
+    ) -> Result<Status, SaveError> {
         validate_provider(provider)?;
         let mut sessions = lock_wait(&self.sessions)?;
         let vault = Vault::new(root);
@@ -828,6 +842,9 @@ impl Credentials {
             .connection(true)?
             .ok_or_else(|| io_error("Cannot initialize credential storage"))?;
         let previous = mode_of(&conn, provider)?;
+        if import && previous == Mode::Keychain {
+            return Err(already_in_keychain().into());
+        }
         let (was_known_keychain, existing_hash) = account_flags(&conn, provider)?;
         let secret = if !supplied.is_empty() {
             Some(Zeroizing::new(supplied.to_owned()))
@@ -842,6 +859,18 @@ impl Credentials {
                 Mode::Keychain => self.keychain.get(provider)?,
             }
         };
+        // Before the OS store is written, the vault durably records (`known_keychain`, in a
+        // transaction of its own) that this provider used the keychain. A crash between the OS write
+        // and the mode commit then still leaves the note that makes a later delete or reset reach the
+        // entry. If the note cannot be made durable the OS store is not touched. The note is cleared
+        // only together with a confirmed OS delete.
+        if mode == Mode::Keychain && secret.is_some() && !was_known_keychain {
+            conn.execute(
+                "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,?2,1,NULL) ON CONFLICT(provider) DO UPDATE SET known_keychain=1",
+                params![provider, previous.label()],
+            )
+            .map_err(|error| sql(error, code::VAULT_IO, "Cannot save credential mode"))?;
+        }
         let tx = conn
             .transaction()
             .map_err(|error| sql(error, code::VAULT_IO, "Cannot begin credential transaction"))?;
@@ -892,8 +921,8 @@ impl Credentials {
         // reached when the vault's row says Keychain mode now or that a key was ever stored there
         // (`known_keychain`): someone who never used the keychain makes no OS call.
         let leaving_keychain =
-            mode != Mode::Keychain && (previous == Mode::Keychain || was_known_keychain);
-        let known = if mode == Mode::Keychain && secret.is_some() {
+            !import && mode != Mode::Keychain && (previous == Mode::Keychain || was_known_keychain);
+        let known = if (mode == Mode::Keychain && secret.is_some()) || import {
             true
         } else if leaving_keychain {
             false
@@ -931,7 +960,7 @@ impl Credentials {
         };
         if let Some(action) = keychain_action {
             let previous_key = self.keychain.get(provider)?;
-            let result = keychain_transaction::commit(
+            keychain_transaction::commit(
                 || match action {
                     Some(value) => self.keychain.set(provider, value),
                     None => self.keychain.delete(provider),
@@ -945,17 +974,7 @@ impl Credentials {
                     Some(previous) => self.keychain.set(provider, previous),
                     None => self.keychain.delete(provider),
                 },
-            );
-            if result.as_ref().is_err_and(|error| error.uncertain) {
-                // The save was rolled back but the OS entry may hold the new value. Note that the
-                // keychain was used, so the delete the error asks for reaches it (best effort: the
-                // uncertain answer is the one reported either way).
-                let _ = conn.execute(
-                    "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,?2,1,NULL) ON CONFLICT(provider) DO UPDATE SET known_keychain=1",
-                    params![provider, previous.label()],
-                );
-            }
-            result?;
+            )?;
         } else {
             tx.commit().map_err(|error| {
                 sql(
@@ -976,6 +995,9 @@ impl Credentials {
         Ok(Status { mode, stored })
     }
 
+    /// Copy the key that is in the OS store into Local mode. It is a copy: the OS entry is not
+    /// deleted, and the row records that the keychain holds a key, so a later delete or reset still
+    /// removes it. A provider that is already in Keychain mode has nothing to import.
     pub fn import_keychain(
         &self,
         root: &Path,
@@ -983,13 +1005,16 @@ impl Credentials {
         endpoint: Option<&str>,
     ) -> Result<Status, IpcError> {
         validate_provider(provider)?;
+        if self.status(root, provider)?.mode == Mode::Keychain {
+            return Err(already_in_keychain());
+        }
         let secret = self.keychain.get(provider)?.ok_or_else(|| {
             IpcError::new(
                 code::KEYCHAIN_EMPTY,
                 "No existing API key was found in the OS credential store",
             )
         })?;
-        self.save(root, provider, Mode::Local, &secret, endpoint)
+        self.save_locked(root, provider, Mode::Local, &secret, endpoint, true)
             .map_err(|error| error.error)
     }
 
@@ -1022,9 +1047,18 @@ impl Credentials {
                     code::VAULT_PERMISSIONS | code::VAULT_SCHEMA | code::VAULT_CORRUPT
                 ) =>
             {
-                // The vault cannot say, and it is set aside either way.
+                // The vault cannot say, so the entry is tried. A refused delete is owed a retry: the
+                // damaged vault is replaced only by one that records the keychain for this provider
+                // (otherwise it stays, and the retry meets the same unreadable vault).
                 let entry = self.delete_entry(provider, EntryPlan::BestEffort);
-                self.reset_locked(&mut sessions, root)?;
+                if entry.is_ok() {
+                    self.reset_locked(&mut sessions, root)?;
+                } else if self
+                    .reset_recording_keychain(&mut sessions, root, provider)
+                    .is_err()
+                {
+                    sessions.remove(provider);
+                }
                 return entry;
             }
             Err(error) => return Err(error),
@@ -1076,6 +1110,74 @@ impl Credentials {
     pub fn reset_storage(&self, root: &Path) -> Result<(), IpcError> {
         let mut sessions = lock_wait(&self.sessions)?;
         self.reset_locked(&mut sessions, root)
+    }
+
+    /// Like `reset_locked`, for a delete the OS store refused while the vault was unreadable: the new
+    /// vault holds `known_keychain=1` for `provider`, so deleting again reaches the entry. All or
+    /// nothing: if that vault cannot be made, whatever was set aside is moved back.
+    fn reset_recording_keychain(
+        &self,
+        sessions: &mut HashMap<String, Zeroizing<String>>,
+        root: &Path,
+        provider: &str,
+    ) -> Result<(), IpcError> {
+        let vault = Vault::new(root);
+        let stamp = now_millis();
+        // `moved`: set-aside copies to put back. `ours`: places that no longer hold the original.
+        let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut ours: Vec<PathBuf> = Vec::new();
+        let replace = |moved: &mut Vec<(PathBuf, PathBuf)>,
+                       ours: &mut Vec<PathBuf>|
+         -> Result<(), IpcError> {
+            for dir in [&vault.root, &vault.key_dir] {
+                match fs::symlink_metadata(dir) {
+                    Ok(_) => {
+                        moved.push((dir.clone(), set_aside(dir, stamp)?));
+                        ours.push(dir.clone());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        ours.push(dir.clone());
+                    }
+                    Err(_) => return Err(io_error("Cannot inspect credential storage")),
+                }
+            }
+            #[cfg(test)]
+            if tests_hook::FAIL_NEW_VAULT.with(|flag| flag.get()) {
+                return Err(io_error("Fixture: the replacement vault cannot be made"));
+            }
+            private_fs::directory(&vault.key_dir)?;
+            let (conn, _held) = vault
+                .connection(true)?
+                .ok_or_else(|| io_error("Cannot initialize credential storage"))?;
+            conn.execute(
+                "INSERT INTO accounts(provider,mode,known_keychain,endpoint_hash) VALUES (?1,'local',1,NULL) ON CONFLICT(provider) DO UPDATE SET known_keychain=1",
+                [provider],
+            )
+            .map_err(|error| sql(error, code::VAULT_IO, "Cannot save credential mode"))?;
+            Ok(())
+        };
+        if let Err(error) = replace(&mut moved, &mut ours) {
+            // Whatever stands in the old places was made by this attempt: remove it, then put the
+            // original back. A step that fails here leaves the set-aside copy where it is.
+            let cleared = ours.iter().all(|path| remove_path(path).is_ok());
+            let restored = cleared
+                && moved
+                    .iter()
+                    .rev()
+                    .all(|(original, aside)| private_fs::rename(aside, original).is_ok());
+            if !restored {
+                crate::diagnostics::global().log_error(
+                    "credentials",
+                    &io_error("Cannot restore the previous credential storage"),
+                );
+            }
+            return Err(error);
+        }
+        sessions.clear();
+        if let Ok(mut known) = lock_wait(&self.known_modes) {
+            known.clear();
+        }
+        Ok(())
     }
 
     fn reset_locked(
@@ -1196,13 +1298,16 @@ impl Purged {
 
 /// The ownership record of earlier builds, which inferred ownership instead of reading the app's own
 /// namespace. Nothing consults it any more; it holds no secret, and leaving it behind would only
-/// look like a state that matters. It and its set-aside or half-written copies are deleted (links are
-/// removed as links, never followed). A failure is logged, not reported: the file has no effect.
+/// look like a state that matters. Only the names the retired code produced are deleted:
+/// `keychain-ledger.json`, its `.new` side file and its `.broken-<ms>[-<n>]` set-aside copies, and
+/// only regular files (a link or folder is left alone). The application data folder is validated first
+/// like the vault does (a real folder, not a link, the user's own) and checked again right before each
+/// delete; a folder that cannot be trusted is skipped. A failure is logged, not reported: the file has
+/// no effect.
 pub fn remove_legacy_ledger(root: &Path) {
-    const NAME: &str = "keychain-ledger.json";
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+    match root.try_exists() {
+        Ok(false) => return,
+        Ok(true) => {}
         Err(_) => {
             crate::diagnostics::global().log_error(
                 "credentials",
@@ -1210,23 +1315,66 @@ pub fn remove_legacy_ledger(root: &Path) {
             );
             return;
         }
+    }
+    if private_fs::check_root(root).is_err() {
+        crate::diagnostics::global().log_error(
+            "credentials",
+            &IpcError::new(
+                code::VAULT_PERMISSIONS,
+                "The application data folder cannot be trusted; the unused ownership record was not cleaned",
+            ),
+        );
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        crate::diagnostics::global().log_error(
+            "credentials",
+            &io_error("Cannot list the application data folder"),
+        );
+        return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name != NAME && !name.starts_with("keychain-ledger.json.") {
+        if !is_legacy_ledger_name(&name.to_string_lossy()) {
             continue;
         }
-        if fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()) {
+        let path = entry.path();
+        if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
             continue;
         }
-        if fs::remove_file(entry.path()).is_err() {
+        if private_fs::check_root(root).is_err() || fs::remove_file(&path).is_err() {
             crate::diagnostics::global().log_error(
                 "credentials",
                 &io_error("Cannot remove an unused ownership record"),
             );
         }
     }
+}
+
+/// The file names the retired ownership record used: the record, its side file, and its set-aside
+/// copies (`.broken-<ms>`, with `-<n>` when the name was taken).
+fn is_legacy_ledger_name(name: &str) -> bool {
+    const FILE: &str = "keychain-ledger.json";
+    let Some(suffix) = name.strip_prefix(FILE) else {
+        return false;
+    };
+    match suffix {
+        "" | ".new" => true,
+        _ => suffix.strip_prefix(".broken-").is_some_and(|stamp| {
+            let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+            match stamp.split_once('-') {
+                Some((first, second)) => digits(first) && digits(second),
+                None => digits(stamp),
+            }
+        }),
+    }
+}
+
+fn already_in_keychain() -> IpcError {
+    IpcError::new(
+        code::INVALID_REQUEST,
+        "This provider already uses the OS credential store; there is nothing to import",
+    )
 }
 
 fn unconfirmed() -> IpcError {
@@ -1256,6 +1404,15 @@ pub(crate) fn with_fake_keychain() -> (Credentials, std::sync::Arc<keychain::fak
         Credentials::with_keychain(Box::new(Shared(fake.clone()))),
         fake,
     )
+}
+
+/// Test-only switch: the replacement vault of `reset_recording_keychain` cannot be made.
+#[cfg(test)]
+mod tests_hook {
+    use std::cell::Cell;
+    thread_local! {
+        pub static FAIL_NEW_VAULT: Cell<bool> = const { Cell::new(false) };
+    }
 }
 
 #[cfg(test)]
