@@ -229,6 +229,83 @@ def load_model_catalog(provider: str, root: Path | None = None) -> list[dict]:
     return [item for item in models if isinstance(item, dict) and "api_key" not in item]
 
 
+GEMINI_FLOOR_TTL_SECONDS = 30 * 24 * 3600
+_GEMINI_FLOOR_LEVELS = ("minimal", "low", "medium", "high")
+# A clock that jumped forward must not pin a floor for longer than the expiry promises.
+_GEMINI_FLOOR_FUTURE_SLACK_SECONDS = 24 * 3600
+
+
+def _gemini_floor_path(root: Path | None = None) -> Path:
+    return user_data_dir(root) / "models" / "gemini-thinking-floors.json"
+
+
+def gemini_floor_endpoint(base_url: str) -> str:
+    """A short digest of the endpoint, so a proxy URL with a token in it never reaches the file."""
+    return hashlib.sha256(str(base_url).rstrip("/").encode("utf-8")).hexdigest()[:16]
+
+
+def _read_gemini_floors(path: Path) -> list[dict]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    entries = loaded.get("floors") if isinstance(loaded, dict) else None
+    return [item for item in entries if isinstance(item, dict)] if isinstance(entries, list) else []
+
+
+def _live_gemini_floor(item: dict, now: float) -> tuple[tuple[str, str, str], str, float] | None:
+    """((provider, endpoint, model), level, learned_at) of a usable entry, else None."""
+    provider, endpoint, model, level = (item.get(key) for key in ("provider", "endpoint", "model", "level"))
+    learned = item.get("learned_at")
+    if not (isinstance(provider, str) and isinstance(endpoint, str) and isinstance(model, str)):
+        return None
+    if not (provider and endpoint and model) or level not in _GEMINI_FLOOR_LEVELS:
+        return None
+    if isinstance(learned, bool) or not isinstance(learned, (int, float)):
+        return None
+    age = now - float(learned)
+    if age > GEMINI_FLOOR_TTL_SECONDS or age < -_GEMINI_FLOOR_FUTURE_SLACK_SECONDS:
+        return None
+    return (provider, endpoint, model), str(level), float(learned)
+
+
+def load_gemini_level_floors(root: Path | None = None, now: float | None = None) -> dict[tuple[str, str, str], str]:
+    """Lowest thinking level each (provider, endpoint digest, model) accepted. Expired or damaged entries are skipped."""
+    path = _gemini_floor_path(root)
+    if not path.is_file():
+        return {}
+    moment = time.time() if now is None else now
+    floors: dict[tuple[str, str, str], str] = {}
+    for item in _read_gemini_floors(path):
+        live = _live_gemini_floor(item, moment)
+        if live is not None:
+            floors[live[0]] = live[1]
+    return floors
+
+
+def remember_gemini_level_floor(
+    provider: str, base_url: str, model: str, level: str, root: Path | None = None, now: float | None = None
+) -> None:
+    """Keep the lowest thinking level a model accepted, so the next process does not ask for a refused one.
+
+    Only the provider, a digest of the endpoint, the model, the level and the time are stored: no keys, no prompts.
+    """
+    if level not in _GEMINI_FLOOR_LEVELS:
+        raise ValueError(f"Unknown thinking level: {level}")
+    moment = time.time() if now is None else now
+    key = (provider, gemini_floor_endpoint(base_url), model)
+    with _settings_lock(root):
+        path = _gemini_floor_path(root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        kept = []
+        for item in _read_gemini_floors(path) if path.is_file() else []:
+            live = _live_gemini_floor(item, moment)
+            if live is not None and live[0] != key:
+                kept.append({"provider": live[0][0], "endpoint": live[0][1], "model": live[0][2], "level": live[1], "learned_at": live[2]})
+        kept.append({"provider": key[0], "endpoint": key[1], "model": key[2], "level": level, "learned_at": moment})
+        durable_write_text(path, json.dumps({"schema": SCHEMA, "floors": kept}, ensure_ascii=False, indent=2))
+
+
 def public_settings_from_config(config: dict) -> dict:
     from mwt.desktop_settings import (
         DEFAULT_CONTINUE_ON_FILE_ERROR,

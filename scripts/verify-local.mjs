@@ -50,6 +50,8 @@ const PYTHON_TESTS = [
   ['Batch request budget, failure codes and untrusted-data prompt', 'tests/test_batch_budget.py'],
   ['JSONL channel is UTF-8, protocol-only and crash-proof', 'tests/test_jsonl_channel.py'],
   ['Provider redirects, own-key routing, redaction, request budgets', 'tests/test_provider_hardening.py'],
+  ['Gemini thinking floor is kept across jobs and concurrent batches', 'tests/test_gemini_floor.py'],
+  ['Model lists offer only models that can translate text', 'tests/test_model_filter.py'],
   ['Formatter and Minecraft placeholder preservation', 'tests/test_text_tokens.py'],
   ['Legacy web UI token, Host, Origin and JSON checks', 'tests/test_webui_security.py'],
   ['Write journal, staged transaction and fault-injection matrix', 'tests/test_journal.py'],
