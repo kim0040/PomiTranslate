@@ -448,6 +448,9 @@
       apiKey = '';
       showApiKey = false;
       editingKey = false;
+    } else {
+      // A failed delete can still have removed the app's own copy; show what is really stored.
+      void refreshCredential(draft.provider);
     }
   }
 

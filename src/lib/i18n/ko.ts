@@ -1240,6 +1240,15 @@ export const ko = {
   "glossary.import.noFile": "먼저 파일을 골라 주세요.",
   "glossary.unsupported": "이 버전의 번역 코어에서는 용어집을 사용할 수 없습니다. 앱을 최신 버전으로 업데이트해 주세요.",
   "glossary.retry": "다시 불러오기",
+  "keychain.ack.title": "시스템 키체인을 직접 확인해 주세요",
+  "keychain.ack.body": "앱이 시스템 키체인에 만든 항목이 무엇인지 확인하지 못했습니다. 확인하지 못한 항목을 앱이 추측해서 지우지는 않습니다.",
+  "keychain.ack.steps": "시스템의 키체인(Windows 자격 증명 관리자, macOS 키체인 접근, Linux 암호 및 키·Secret Service)을 열어 서비스 이름 PomiTranslate로 검색하고, 보이는 항목을 직접 삭제해 주세요.",
+  "keychain.ack.check": "시스템 키체인에서 PomiTranslate 항목을 직접 삭제했습니다",
+  "keychain.ack.note": "확인해도 앱은 시스템 키체인에서 아무것도 삭제하지 않습니다. 확인되지 않은 항목의 기록만 지워, 이어서 초기화나 키 삭제를 끝낼 수 있게 합니다.",
+  "keychain.ack.confirm": "확인",
+  "keychain.ack.working": "확인 중…",
+  "keychain.ack.failed": "확인을 기록하지 못했습니다. 다시 시도해 주세요.",
+  "scan.warn.glossary_truncated": "한 번에 보낼 수 있는 용어는 80개라, 넘는 용어는 일부 묶음에 적용하지 않았습니다.",
 } as const;
 
 export type MessageKey = keyof typeof ko;

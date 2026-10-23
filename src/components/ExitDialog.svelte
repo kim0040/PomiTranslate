@@ -49,8 +49,10 @@
       {/snippet}
     </Dialog>
   {:else}
-    <Dialog showClose={false} title={t('exit.dirtyTitle')} onClose={() => app.exitStay()}>
-      <p>{t('exit.dirtyBody')}</p>
+    <!-- Unsaved glossary edits are a different list from unsaved settings, so they are named as such. -->
+    {@const glossaryOnly = app.glossaryDirty && !app.settingsDirty}
+    <Dialog showClose={false} title={t(glossaryOnly ? 'exit.glossaryTitle' : 'exit.dirtyTitle')} onClose={() => app.exitStay()}>
+      <p>{t(glossaryOnly ? 'exit.glossaryBody' : 'exit.dirtyBody')}</p>
       {#snippet actions()}
         <button type="button" class="btn btn-quiet" onclick={() => app.exitStay()}>{t('common.cancel')}</button>
         <button type="button" class="btn btn-secondary" disabled={working} onclick={() => run(() => app.exitQuit())}>{t('exit.quitWithoutSaving')}</button>

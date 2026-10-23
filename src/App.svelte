@@ -28,6 +28,7 @@
   import Tour from './components/Tour.svelte';
   import LicensesDialog from './components/LicensesDialog.svelte';
   import ExitDialog from './components/ExitDialog.svelte';
+  import KeychainAckDialog from './components/KeychainAckDialog.svelte';
 
   let pane: HTMLElement | undefined = $state();
   let dropping = $state(false);
@@ -277,6 +278,7 @@
 {/if}
 
 <DiscardReviewDialog />
+<KeychainAckDialog />
 
 <Toasts />
 

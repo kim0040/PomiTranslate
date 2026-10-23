@@ -1239,4 +1239,13 @@ export const ja: Record<MessageKey, string> = {
   "glossary.import.noFile": "先にファイルを選んでください。",
   "glossary.unsupported": "この版の翻訳コアには用語集がありません。アプリを最新版に更新してください。",
   "glossary.retry": "再読み込み",
+  "keychain.ack.title": "システムのキーチェーンをご自身で確認してください",
+  "keychain.ack.body": "アプリがシステムのキーチェーンに作成した項目を確認できませんでした。確認できない項目を推測して削除することはありません。",
+  "keychain.ack.steps": "システムのキーチェーン(Windows の資格情報マネージャー、macOS のキーチェーンアクセス、Linux の Secret Service)を開き、サービス名 PomiTranslate で検索して、見つかった項目をご自身で削除してください。",
+  "keychain.ack.check": "システムのキーチェーンから PomiTranslate の項目をご自身で削除しました",
+  "keychain.ack.note": "確認してもシステムのキーチェーンからは何も削除されません。確認できなかった項目の記録だけを消し、初期化やキーの削除を最後まで進められるようにします。",
+  "keychain.ack.confirm": "確認",
+  "keychain.ack.working": "確認中…",
+  "keychain.ack.failed": "確認を記録できませんでした。もう一度お試しください。",
+  "scan.warn.glossary_truncated": "1 回に送れる用語は 80 件までのため、超えた用語は一部の束に適用していません。",
 };

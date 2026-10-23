@@ -1240,4 +1240,13 @@ export const en: Record<MessageKey, string> = {
   "glossary.import.noFile": "Choose a file first.",
   "glossary.unsupported": "This version of the translation core has no glossary. Update the app to the latest version.",
   "glossary.retry": "Reload",
+  "keychain.ack.title": "Please check the system keychain yourself",
+  "keychain.ack.body": "The app could not confirm which entries it created in the system keychain. It does not guess, and it does not delete what it cannot confirm.",
+  "keychain.ack.steps": "Open the system keychain (Windows Credential Manager, macOS Keychain Access, or Secret Service on Linux), search for the service PomiTranslate, and delete any entries you find yourself.",
+  "keychain.ack.check": "I removed any PomiTranslate entries from the system keychain myself",
+  "keychain.ack.note": "Confirming deletes nothing in the system keychain. It only clears the app’s record of entries it could not confirm, so the reset or key removal can finish.",
+  "keychain.ack.confirm": "Confirm",
+  "keychain.ack.working": "Confirming…",
+  "keychain.ack.failed": "The confirmation could not be recorded. Please try again.",
+  "scan.warn.glossary_truncated": "At most 80 terms are sent per batch, so extra terms were not applied in some batches.",
 };

@@ -4,6 +4,8 @@
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { describeDetail, describeLocation, formatNumber } from '../lib/format';
   import Icon from './Icon.svelte';
+  import GlossaryAddDialog from './GlossaryAddDialog.svelte';
+  import { seedSource } from '../lib/glossary';
   import { compareTokens, tokenCounts } from '../lib/tokens';
   import { counterState, effectiveOverride, MAX_MANUAL_LENGTH } from '../lib/review';
 
@@ -20,6 +22,26 @@
   const counter = $derived(counterState(length));
   const kinds = $derived(candidate ? Object.entries(candidate.kinds ?? { [candidate.kind]: candidate.occurrences }) : []);
   const shown = $derived(candidate?.locations ?? []);
+
+  // "Add to glossary" starts from the part of the sentence that is selected, or the whole sentence.
+  let sourceElement: HTMLElement | undefined = $state();
+  let selectedText = $state('');
+  let addOpen = $state(false);
+  function trackSelection(): void {
+    const selection = document.getSelection();
+    const inside = !!sourceElement && !!selection?.anchorNode && !!selection.focusNode && sourceElement.contains(selection.anchorNode) && sourceElement.contains(selection.focusNode);
+    if (inside) selectedText = selection?.toString() ?? '';
+    else if (selection && !selection.isCollapsed) selectedText = '';
+  }
+  $effect(() => {
+    document.addEventListener('selectionchange', trackSelection);
+    return () => document.removeEventListener('selectionchange', trackSelection);
+  });
+  // A different sentence starts with no selection.
+  $effect(() => {
+    void candidate?.id;
+    selectedText = '';
+  });
 </script>
 
 <aside class="detail" aria-label={t('review.detail.title')}>
@@ -41,7 +63,14 @@
 
     <section class="block">
       <h3>{t('review.detail.source')}</h3>
-      <p class="source" lang="en">{candidate.source}</p>
+      <p class="source" lang="en" bind:this={sourceElement}>{candidate.source}</p>
+      <div class="glossary-add">
+        <!-- Pressing the button must not clear the selection that fills the source. -->
+        <button type="button" class="btn btn-secondary btn-sm" onmousedown={(event) => event.preventDefault()} onclick={() => (addOpen = true)}>
+          <Icon name="book" size={14} /> {t('glossary.addFromReview')}
+        </button>
+        <span class="hint">{t('glossary.addFromReview.help')}</span>
+      </div>
       {#if tokens.length}
         <p class="tokens" role="note">
           {#each tokens as token (token)}<code>{token}</code>{/each}
@@ -111,6 +140,10 @@
   {/if}
 </aside>
 
+{#if addOpen && candidate}
+  <GlossaryAddDialog source={seedSource(selectedText) || seedSource(candidate.source)} onClose={() => (addOpen = false)} />
+{/if}
+
 <style>
   .detail { display: grid; align-content: start; gap: var(--space-4); padding: 0 var(--space-4) var(--space-4); overflow: auto; height: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-card); container-type: inline-size; }
   .blank { display: grid; justify-items: center; align-content: center; gap: var(--space-3); min-height: 240px; padding: var(--space-5); text-align: center; color: var(--text-secondary); }
@@ -125,6 +158,8 @@
   h3 { font-size: var(--text-overline); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); }
   h3 label { cursor: pointer; }
   .source { margin: 0; padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; max-height: 160px; overflow: auto; font-size: var(--text-md); }
+  .glossary-add { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+  .glossary-add .hint { font-size: var(--text-xs); }
   .tokens { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); margin: 0; }
   .tokens code { padding: 1px 6px; border-radius: 4px; background: var(--warning-soft); color: var(--warning-text); font-weight: 700; }
   .counter { margin: 0; font-size: var(--text-xs); color: var(--text-secondary); text-align: end; }

@@ -16,7 +16,7 @@ export const MAX_SOURCE_CHARS = 200;
 export const MAX_TARGET_CHARS = 200;
 export const MAX_NOTE_CHARS = 300;
 /** The core refuses a longer import text. */
-export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
+export const MAX_IMPORT_CHARS = 2 * 1024 * 1024;
 
 export type FieldName = 'source' | 'target' | 'note';
 export type ProblemReason = 'required' | 'tooLong' | 'control' | 'duplicate' | 'targetRequired';
@@ -99,11 +99,16 @@ export function snapshot(drafts: DraftEntry[]): string {
   return JSON.stringify(savableDrafts(drafts).map(fromDraft));
 }
 
-/** Rows whose source, target or note contains the text (case-insensitive). An empty query keeps everything. */
-export function filterDrafts(drafts: DraftEntry[], query: string): DraftEntry[] {
+/**
+ * Rows whose source, target or note contains the text (case-insensitive). An empty query keeps
+ * everything. Rows still being typed (`pinned` keys, and empty rows) stay, so a new row does not
+ * vanish mid-edit.
+ */
+export function filterDrafts(drafts: DraftEntry[], query: string, pinned: readonly string[] = []): DraftEntry[] {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) return drafts;
-  return drafts.filter((draft) => `${draft.source}\n${draft.target}\n${draft.note}`.toLocaleLowerCase().includes(needle));
+  return drafts.filter((draft) => pinned.includes(draft.key) || isBlank(draft)
+    || `${draft.source}\n${draft.target}\n${draft.note}`.toLocaleLowerCase().includes(needle));
 }
 
 type EntryField = FieldName | 'mode' | 'id' | 'caseSensitive';
@@ -257,4 +262,9 @@ export async function addGlossaryEntry(scope: GlossaryScope, worldDir: string, e
 /** Text for the clipboard or a file: what `glossary.export` returned, as is. */
 export function exportFileName(scope: GlossaryScope, format: 'csv' | 'tsv'): string {
   return `pomi-glossary-${scope === 'global' ? 'all-worlds' : 'world'}.${format}`;
+}
+
+/** A sentence or a selected part of it as a glossary source: one line, at most the allowed length. */
+export function seedSource(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, MAX_SOURCE_CHARS).trim();
 }
