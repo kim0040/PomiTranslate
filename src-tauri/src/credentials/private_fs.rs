@@ -220,7 +220,7 @@ impl DirPin {
     }
 }
 
-/// The application data folder that holds the vault directories and the ownership record: a real
+/// The application data folder that holds the vault directories: a real
 /// directory (no link is followed to reach it), owned by the user, that neither the group nor
 /// others can write to. Anyone who could write there could swap the directories below it (R4).
 /// A process of the same user is outside this protection; see `docs/build.md`.

@@ -320,7 +320,7 @@ const COMPONENTS: &[&str] = &[
     "navigation",
 ];
 /// Non-request parts a source may carry after the component.
-const SUB_SOURCES: &[&str] = &["ledger", "bootstrap"];
+const SUB_SOURCES: &[&str] = &["keychain", "bootstrap"];
 
 /// A request type as it may be written: only a type of the known request list, else
 /// `[unknown request]` (the type may come from the page, which is not trusted with the log).

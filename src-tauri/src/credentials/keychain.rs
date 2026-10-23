@@ -70,11 +70,14 @@ pub mod fake {
         },
     };
 
-    /// An in-memory store that counts how often the vault reached it.
+    /// An in-memory store that counts how often the vault reached it and logs every call (`get:<name>`,
+    /// `set:<name>`, `delete:<name>`). The trait has no way to list the store, so the log is the whole
+    /// of what the app ever asked it.
     #[derive(Default)]
     pub struct FakeKeychain {
         pub entries: Mutex<HashMap<String, String>>,
         pub calls: AtomicUsize,
+        pub log: Mutex<Vec<String>>,
         pub fail_delete: AtomicBool,
         /// How many of the next writes fail *after* they changed the entry: the worst case, one that
         /// has to be undone.
@@ -84,6 +87,7 @@ pub mod fake {
     impl KeychainStore for FakeKeychain {
         fn get(&self, provider: &str) -> Result<Option<Zeroizing<String>>, IpcError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.log.lock().unwrap().push(format!("get:{provider}"));
             Ok(self
                 .entries
                 .lock()
@@ -94,6 +98,7 @@ pub mod fake {
         }
         fn set(&self, provider: &str, secret: &str) -> Result<(), IpcError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.log.lock().unwrap().push(format!("set:{provider}"));
             self.entries
                 .lock()
                 .unwrap()
@@ -110,6 +115,7 @@ pub mod fake {
         }
         fn delete(&self, provider: &str) -> Result<(), IpcError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.log.lock().unwrap().push(format!("delete:{provider}"));
             if self.fail_delete.load(Ordering::SeqCst) {
                 return Err(failed("fixture delete failure"));
             }

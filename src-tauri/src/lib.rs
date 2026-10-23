@@ -45,9 +45,6 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "settings.import_legacy",
     "settings.set",
     "credentials.delete",
-    // Handled by the shell, never sent to the core: the person's word that they removed any
-    // PomiTranslate entries from the system keychain themselves (clears the unknown-history marker).
-    "credentials.acknowledgeUnknownKeychain",
     "worlds.list",
     "worlds.remember",
     "worlds.forget",
@@ -133,9 +130,9 @@ fn credential_unavailable(error: IpcError) -> IpcError {
     }
 }
 
-/// What `credentials.delete` answers with when the key could not be removed. "Could not confirm" is
-/// its own answer, not an unavailable store: the OS entry was left alone because the app cannot say it
-/// made it, and the page tells the person so.
+/// What `credentials.delete` answers with when the key could not be removed. A refused OS delete
+/// (`KEYCHAIN_UNCONFIRMED`) is its own answer, not an unavailable store: the app's own copies are
+/// gone, the OS entry is not, and deleting again tries it again.
 fn delete_error(error: IpcError) -> IpcError {
     if error.code == code::KEYCHAIN_UNCONFIRMED {
         error
@@ -242,13 +239,7 @@ impl ResetOutcome {
         self.keys_deleted = purged.complete();
         self.keys_partially_deleted =
             !self.keys_deleted && (!purged.keychain_deleted.is_empty() || purged.files_removed);
-        for (_, reason) in &purged.keychain_failed {
-            self.note(match *reason {
-                code::KEYCHAIN_UNAVAILABLE => code::KEYCHAIN_UNAVAILABLE,
-                _ => code::KEYCHAIN_FAILED,
-            });
-        }
-        if purged.keychain_unverified || !purged.keychain_uncertain.is_empty() {
+        if !purged.keychain_failed.is_empty() {
             self.note(code::KEYCHAIN_UNCONFIRMED);
         }
         for reason in &purged.errors {
@@ -410,19 +401,6 @@ async fn handle_request(
             "id": id,
             "type": "response.ok",
             "payload": {"provider": provider, "deleted": true, "apiKeyStored": false}
-        }));
-    }
-    if kind == "credentials.acknowledgeUnknownKeychain" {
-        let cleared = vault(app, |credentials, root| {
-            credentials.acknowledge_unknown(root)
-        })
-        .await
-        .map_err(credential_unavailable)?;
-        return Ok(serde_json::json!({
-            "v": 1,
-            "id": id,
-            "type": "response.ok",
-            "payload": {"acknowledged": cleared}
         }));
     }
     if CREDENTIAL_OWNER_REQUESTS.contains(&kind.as_str()) {
@@ -787,6 +765,9 @@ pub fn run() {
                 diagnostics::global().set_dir(local.join("logs"));
             }
             diagnostics::global().log("INFO", "app", "PomiTranslate started");
+            if let Ok(root) = app.path().app_data_dir() {
+                credentials::remove_legacy_ledger(&root);
+            }
             app_menu::install(app)?;
             startup_theme::apply(app);
             Ok(())
@@ -913,7 +894,6 @@ mod tests {
             "glossary.import",
             "glossary.export",
             "credentials.delete",
-            "credentials.acknowledgeUnknownKeychain",
         ] {
             assert!(is_allowed_request(kind), "{kind} must be allowed");
         }
@@ -1122,17 +1102,12 @@ mod tests {
         }
         assert!(ALLOWED_REQUESTS
             .iter()
-            .all(|kind| !kind.starts_with("credentials.")
-                || matches!(
-                    *kind,
-                    "credentials.delete" | "credentials.acknowledgeUnknownKeychain"
-                )));
-        // The acknowledgement is answered by the shell and never reaches the core or a key.
-        let kind = "credentials.acknowledgeUnknownKeychain";
-        assert!(is_allowed_request(kind));
-        assert!(!KEY_INJECTED_REQUESTS.contains(&kind));
-        assert!(!CREDENTIAL_OWNER_REQUESTS.contains(&kind));
-        assert_eq!(sidecar::lane(kind), sidecar::Lane::Query);
+            .all(|kind| !kind.starts_with("credentials.") || *kind == "credentials.delete"));
+        // Nothing asks the shell to forget or accept what is in the OS keychain: the app only ever
+        // deletes its own entries, on the person's explicit delete, mode switch or reset.
+        assert!(!is_allowed_request(
+            "credentials.acknowledgeUnknownKeychain"
+        ));
     }
 
     // --- M6: the reset reports what it did, whatever failed --------------------------------------
@@ -1163,43 +1138,38 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_keychain_history_keeps_keys_deleted_false_until_the_person_acknowledges_it() {
+    fn a_reset_deletes_every_known_providers_entry_and_never_lists_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let (credentials, fake) = credentials::with_fake_keychain();
         credentials
             .save(dir.path(), "openai", credentials::Mode::Keychain, KEY, None)
             .unwrap();
-        credentials.reset_storage(dir.path()).unwrap();
-        // The record is lost and the archived vault that could have rebuilt it is gone too.
-        fs::write(dir.path().join("keychain-ledger.json"), b"  not a record").unwrap();
-        for entry in fs::read_dir(dir.path()).unwrap().flatten() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("credentials.broken-")
-            {
-                fs::remove_dir_all(entry.path()).unwrap();
-            }
-        }
-        for _ in 0..2 {
-            let outcome = reset_native(&credentials, dir.path(), true);
-            assert!(!outcome.keys_deleted, "{outcome:?}");
-            assert!(
-                outcome.errors.contains(&code::KEYCHAIN_UNCONFIRMED),
-                "{outcome:?}"
-            );
-            // A new vault between the resets is not a witness.
-            credentials
-                .save(dir.path(), "gemini", credentials::Mode::Keychain, KEY, None)
-                .unwrap();
-        }
-        assert!(fake.entries.lock().unwrap().contains_key("openai"));
-        // The acknowledgement clears the marker and deletes nothing.
-        assert!(credentials.acknowledge_unknown(dir.path()).unwrap());
-        assert!(fake.entries.lock().unwrap().contains_key("openai"));
+        // An entry the vault knows nothing about is still the app's own namespace.
+        fake.entries
+            .lock()
+            .unwrap()
+            .insert("gemini".into(), "left-over-fixture".into());
+        // Entries under other names are not the app's and stay.
+        fake.entries
+            .lock()
+            .unwrap()
+            .insert("someone-else".into(), "foreign-fixture".into());
+        fake.log.lock().unwrap().clear();
         let outcome = reset_native(&credentials, dir.path(), true);
         assert!(outcome.keys_deleted, "{outcome:?}");
         assert!(outcome.errors.is_empty(), "{outcome:?}");
+        let entries = fake.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key("someone-else"));
+        // Only the app's own names were asked for: one delete per known provider, nothing else.
+        let mut log = fake.log.lock().unwrap().clone();
+        let mut expected: Vec<String> = credentials::PROVIDERS
+            .iter()
+            .map(|provider| format!("delete:{provider}"))
+            .collect();
+        expected.sort();
+        log.sort();
+        assert_eq!(log, expected);
     }
 
     #[test]
@@ -1234,10 +1204,10 @@ mod tests {
             outcome.reports_cleared,
             "reports are cleared regardless: {outcome:?}"
         );
-        assert_eq!(outcome.errors, [code::KEYCHAIN_FAILED]);
+        assert_eq!(outcome.errors, [code::KEYCHAIN_UNCONFIRMED]);
         assert!(fake.entries.lock().unwrap().contains_key("openai"));
 
-        // The retry finishes it, because the ownership record kept the entry.
+        // The retry finishes it: every known provider is deleted again.
         fake.fail_delete.store(false, Ordering::SeqCst);
         let retry = reset_native(&credentials, dir.path(), true);
         assert!(retry.keys_deleted && retry.errors.is_empty(), "{retry:?}");
