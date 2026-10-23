@@ -17,7 +17,7 @@ from typing import Any, Callable
 from mwt import nbtio as nbt
 
 # Bump when the set of texts a scan finds changes, so saved scan plans stop matching.
-EXTRACTOR_VERSION = 4
+EXTRACTOR_VERSION = 5
 
 # What a text is, in words the interface translates. One string per kind of place.
 CATEGORIES = (
@@ -77,6 +77,174 @@ _COMMAND_JSON = (
     re.compile(r"^(/?(?:.*?\brun\s+)?tellraw\s+\S+\s+)([\[{'\"].*)$", re.DOTALL),
     re.compile(r"^(/?(?:.*?\brun\s+)?title\s+\S+\s+(?:title|subtitle|actionbar)\s+)([\[{'\"].*)$", re.DOTALL),
 )
+
+
+# --- JSON text with string positions -------------------------------------------------------------
+
+_JSON_SPACE = " \t\n\r"
+_JSON_STRING = re.compile(r'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"')
+_JSON_SCALAR = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?|true|false|null")
+
+
+@dataclass
+class _JsonSpan:
+    container: Any
+    key: Any
+    start: int
+    end: int
+    original: str
+
+
+class _JsonDocument:
+    """JSON text read together with where each string value sits in it.
+
+    Callers edit ``root`` like any parsed component, and ``render`` writes back only the string tokens
+    that changed. Whitespace, key order and the escapes of every other token stay as written.
+    """
+
+    def __init__(self, source: str, holder: list, spans: list[_JsonSpan]) -> None:
+        self.source = source
+        self.holder = holder  # a bare top-level string sits in this one-item list so it can be replaced
+        self._spans = spans
+
+    @property
+    def value(self) -> Any:
+        return self.holder[0]
+
+    @property
+    def root(self) -> Any:
+        """What ``_walk_json`` walks: the list holding a bare string literal, else the container."""
+        return self.holder if isinstance(self.holder[0], str) else self.holder[0]
+
+    def render(self) -> str | None:
+        """The source with changed strings re-encoded in place, or ``None`` if the edits were not
+        all string replacements (a string value swapped for an object, a key added) and so cannot
+        be mapped back onto the original text."""
+        out: list[str] = []
+        cursor = 0
+        for span in self._spans:
+            try:
+                current = span.container[span.key]
+            except (KeyError, IndexError):
+                return None
+            if not isinstance(current, str) or current == span.original:
+                continue
+            out.append(self.source[cursor : span.start])
+            out.append(_encode_json_string(current))
+            cursor = span.end
+        out.append(self.source[cursor:])
+        text = "".join(out)
+        try:
+            return text if json.loads(text) == self.value else None
+        except (json.JSONDecodeError, RecursionError):
+            return None
+
+
+def _encode_json_string(text: str) -> str:
+    encoded = json.dumps(text, ensure_ascii=False)
+    # Same rule as serialize_text_component: an escaped lone surrogate must stay an escape.
+    return _LONE_SURROGATE.sub(lambda match: "\\u%04x" % ord(match.group()), encoded)
+
+
+class _JsonScanner:
+    def __init__(self, source: str) -> None:
+        self.source = source
+        self.pos = 0
+        self.spans: list[_JsonSpan] = []
+
+    def space(self) -> None:
+        while self.pos < len(self.source) and self.source[self.pos] in _JSON_SPACE:
+            self.pos += 1
+
+    def string(self) -> str:
+        match = _JSON_STRING.match(self.source, self.pos)
+        if not match:
+            raise ValueError("bad string")
+        self.pos = match.end()
+        return json.loads(match.group())
+
+    def value(self, container: Any, key: Any) -> Any:
+        self.space()
+        if self.pos >= len(self.source):
+            raise ValueError("unexpected end")
+        char = self.source[self.pos]
+        if char == "{":
+            return self.compound()
+        if char == "[":
+            return self.array()
+        if char == '"':
+            start = self.pos
+            text = self.string()
+            self.spans.append(_JsonSpan(container, key, start, self.pos, text))
+            return text
+        match = _JSON_SCALAR.match(self.source, self.pos)
+        if not match:
+            raise ValueError("unexpected token")
+        self.pos = match.end()
+        return json.loads(match.group())
+
+    def compound(self) -> dict:
+        self.pos += 1
+        result: dict[str, Any] = {}
+        self.space()
+        if self.source.startswith("}", self.pos):
+            self.pos += 1
+            return result
+        while True:
+            self.space()
+            name = self.string()
+            if name in result:
+                raise ValueError("duplicate key")  # json.loads keeps the last; two spans would disagree
+            self.space()
+            if not self.source.startswith(":", self.pos):
+                raise ValueError("expected :")
+            self.pos += 1
+            result[name] = self.value(result, name)
+            self.space()
+            char = self.source[self.pos : self.pos + 1]
+            self.pos += 1
+            if char == "}":
+                return result
+            if char != ",":
+                raise ValueError("expected , or }")
+
+    def array(self) -> list:
+        self.pos += 1
+        result: list[Any] = []
+        self.space()
+        if self.source.startswith("]", self.pos):
+            self.pos += 1
+            return result
+        while True:
+            result.append(None)
+            result[-1] = self.value(result, len(result) - 1)
+            self.space()
+            char = self.source[self.pos : self.pos + 1]
+            self.pos += 1
+            if char == "]":
+                return result
+            if char != ",":
+                raise ValueError("expected , or ]")
+
+
+def _parse_json_spans(source: str) -> _JsonDocument | None:
+    """``source`` as an object, array or string literal with string positions, or ``None`` for
+    anything else (or any JSON dialect ``json.loads`` takes but this reader does not)."""
+    scanner = _JsonScanner(source)
+    holder: list[Any] = [None]
+    try:
+        holder[0] = scanner.value(holder, 0)
+        scanner.space()
+    except (ValueError, RecursionError):
+        return None
+    if scanner.pos != len(source) or not isinstance(holder[0], (dict, list, str)):
+        return None
+    return _JsonDocument(source, holder, scanner.spans)
+
+
+# The 1.21.9+ object component keeps its payload (an atlas sprite, a player's name, id and skin
+# properties) under these keys. None of it is text, whatever fields it nests.
+_OBJECT_PAYLOAD_KEYS = ("object", "player", "sprite")
 
 
 class TextExtractionMixin:
@@ -275,7 +443,7 @@ class TextExtractionMixin:
         if "translate" in node:
             if isinstance(fallback, str) and self.should_translate_text(fallback):
                 on_text(node, "fallback", fallback)
-        elif self._is_object_component(node.get("type"), node):
+        elif self._is_object_component(node.get("type"), node):  # type None: left out (or null)
             # 26.1+: an object component's fallback is a whole text component, not only a string.
             if isinstance(fallback, str):
                 if self.should_translate_text(fallback):
@@ -306,16 +474,19 @@ class TextExtractionMixin:
                         if isinstance(click.get(field), str):
                             self._walk_command(click, field, on_text, patch)
         for key, value in node.items():
-            if key not in handled and isinstance(value, (dict, list)):
+            if key not in handled and key not in _OBJECT_PAYLOAD_KEYS and isinstance(value, (dict, list)):
                 self._walk_json(value, on_text, patch)
 
     @staticmethod
     def _is_object_component(type_name: Any, node: Any) -> bool:
         """Whether a component is the 1.21.9+ ``object`` kind (a sprite or a player head).
 
-        ``type`` may be left out when an object-specific key is present, so those keys count too.
+        An explicit ``type`` decides, whatever else the compound holds. Only when ``type`` is left
+        out does the shape (an ``object``, ``sprite`` or ``player`` key) stand in for it.
         """
-        return type_name == "object" or "object" in node or "sprite" in node or "player" in node
+        if type_name is None:
+            return any(key in node for key in _OBJECT_PAYLOAD_KEYS)
+        return type_name == "object"
 
     def _walk_component_value(self, container: Any, key: Any, on_text: OnText, patch: bool) -> None:
         """A text component stored under ``container[key]``: a literal, JSON in a string (before
@@ -327,17 +498,41 @@ class TextExtractionMixin:
                 if self.should_translate_text(value):
                     on_text(container, key, value)
                 return
-            root = self._component_root(parsed)
             if not patch:
-                self._walk_json(root, on_text, False)
+                self._walk_json(self._component_root(parsed), on_text, False)
                 return
-            before = self.serialize_text_component(root)
-            self._walk_json(root, on_text, True)
-            after = self.serialize_text_component(root)
-            if after != before:
-                container[key] = self.serialize_text_component(root[0]) if root is not parsed else after
+            patched = self._patch_json_string(value, lambda root: self._walk_json(root, on_text, True))
+            if patched != value:
+                container[key] = patched
         elif isinstance(value, (dict, list)):
             self._walk_json(value, on_text, patch)
+
+    def _patch_json_string(self, raw: str, walk: Callable[[Any], None]) -> str:
+        """``raw``, JSON text of a component, with the strings ``walk`` replaces written back.
+
+        Only the replaced string tokens are re-encoded; whitespace, key order and the escapes of every
+        other token stay as written. When the edits cannot be mapped onto the original text, the
+        component is serialized compactly instead and ``json_span_fallbacks`` counts it. ``walk``
+        gets what ``_walk_json`` takes: a bare string literal arrives in a one-item list.
+        """
+        document = _parse_json_spans(raw)
+        if document is None:
+            # A dialect only json.loads takes (NaN, say): the compact serializer is all there is.
+            tree = json.loads(raw)
+            root = self._component_root(tree)
+            before = self.serialize_text_component(root)
+            walk(root)
+            after = self.serialize_text_component(root)
+            if after == before:
+                return raw
+            self.json_span_fallbacks = getattr(self, "json_span_fallbacks", 0) + 1
+            return self.serialize_text_component(root[0]) if root is not tree else after
+        walk(document.root)
+        patched = document.render()
+        if patched is not None:
+            return patched
+        self.json_span_fallbacks = getattr(self, "json_span_fallbacks", 0) + 1
+        return self.serialize_text_component(document.value)
 
     def _walk_item_components(self, components: dict, on_text: OnText, patch: bool) -> None:
         """The visible text of an item shown in a tooltip: its name and lore, nothing else."""
@@ -353,16 +548,23 @@ class TextExtractionMixin:
 
     def _walk_hover(self, hover: dict, on_text: OnText, patch: bool) -> None:
         action = hover.get("action")
-        if action in ("show_item", "show_entity"):
+        targeted = action in ("show_item", "show_entity")
+        if targeted:
             # 1.21.5+ writes the item or entity fields inline; before that they sit in ``contents``.
             for holder in (hover, hover.get("contents")):
                 if not isinstance(holder, dict):
                     continue
                 if action == "show_item" and isinstance(holder.get("components"), dict):
                     self._walk_item_components(holder["components"], on_text, patch)
-                elif action == "show_entity" and holder.get("name") is not None:
+                elif (
+                    action == "show_entity"
+                    and holder.get("name") is not None
+                    and not self._is_command_string(holder["name"])
+                ):
                     self._walk_component_value(holder, "name", on_text, patch)
-            return
+        # What is left is the shape older versions wrote, which the walker has always read: a component
+        # under ``value``, an embedded command in a string, a component list. The targeted fields
+        # above are the only ones narrowed to names and lore.
         for key in ("value", "contents", "name"):
             value = hover.get(key)
             if isinstance(value, str):
@@ -371,7 +573,12 @@ class TextExtractionMixin:
                 elif action == "show_text" and key in ("value", "contents") and self.should_translate_text(value):
                     on_text(hover, key, value)
             elif isinstance(value, (dict, list)):
+                if targeted and ((key == "contents" and isinstance(value, dict)) or (key == "name" and action == "show_entity")):
+                    continue
                 self._walk_json(value, on_text, patch)
+
+    def _is_command_string(self, value: Any) -> bool:
+        return isinstance(value, str) and self.extract_command_json(value) is not None
 
     def _walk_command(self, container: dict, key: str, on_text: OnText, patch: bool) -> None:
         extracted = self.extract_command_json(container[key])
@@ -383,15 +590,12 @@ class TextExtractionMixin:
         except json.JSONDecodeError:
             self._walk_snbt_command(container, key, prefix, raw_component, on_text, patch)
             return
-        holder = [embedded]  # A bare string is a component too: tellraw @a "Hello".
         if not patch:
-            self._walk_json(holder, on_text, False)
+            self._walk_json([embedded], on_text, False)  # A bare string is a component too: tellraw @a "Hello".
             return
-        before = self.serialize_text_component(embedded)
-        self._walk_json(holder, on_text, True)
-        after = self.serialize_text_component(holder[0])
-        if after != before:
-            container[key] = prefix + after
+        patched = self._patch_json_string(raw_component, lambda root: self._walk_json(root, on_text, True))
+        if patched != raw_component:
+            container[key] = prefix + patched
 
     def _walk_snbt_command(
         self, container: dict, key: str, prefix: str, raw: str, on_text: OnText, patch: bool
@@ -514,7 +718,8 @@ class TextExtractionMixin:
                 refs.append(self._ref("plain_tag", f"{path}/fallback", scope, category, detail, tag=fallback))
         elif fallback is not None:
             type_tag = comp.get("type")
-            type_name = type_tag.value if isinstance(type_tag, nbt.TAG_String) else None
+            # A type that is not a string is still an explicit (and not an object) type.
+            type_name = None if type_tag is None else type_tag.value if isinstance(type_tag, nbt.TAG_String) else ""
             if self._is_object_component(type_name, comp):
                 self._collect_component(fallback, refs, f"{path}/fallback", scope, category, detail)
         if "selector" in comp or "nbt" in comp:
@@ -532,12 +737,19 @@ class TextExtractionMixin:
                 continue
             action = hover.get("action")
             action_name = action.value if isinstance(action, nbt.TAG_String) else ""
-            if action_name in ("show_item", "show_entity"):
+            targeted = action_name in ("show_item", "show_entity")
+            if targeted:
                 self._collect_hover_target(hover, action_name, refs, f"{path}/{key}", scope, category, detail)
-                continue
+            # What the targeted pass does not take is the shape older versions wrote (a component under
+            # ``value``, a component list), which has always been read as a whole component.
             for field in ("value", "contents", "name"):
                 child = hover.get(field)
                 if isinstance(child, nbt.TAG_String) and action_name != "show_text" and field != "name":
+                    continue
+                if targeted and (
+                    (field == "contents" and isinstance(child, nbt.TAG_Compound))
+                    or (field == "name" and action_name == "show_entity")
+                ):
                     continue
                 if child is not None:
                     self._collect_component(child, refs, f"{path}/{key}/{field}", scope, category, detail)
@@ -779,16 +991,13 @@ class TextExtractionMixin:
                     changed += 1
             elif ref.kind == "json_tag":
                 try:
-                    component = self.parse_text_component(ref.tag.value)
+                    patched = self._patch_json_string(
+                        ref.tag.value, lambda root: self.patch_json_component(root, translations)
+                    )
                 except json.JSONDecodeError:
                     continue
-                # A bare string literal is walked inside a list and written back as a JSON string.
-                root = self._component_root(component)
-                before = self.serialize_text_component(root)
-                self.patch_json_component(root, translations)
-                after = self.serialize_text_component(root)
-                if after != before:
-                    ref.tag.value = self.serialize_text_component(root[0]) if root is not component else after
+                if patched != ref.tag.value:
+                    ref.tag.value = patched
                     changed += 1
             elif ref.kind == "command_tag":
                 updated = self.patch_command_component(ref.tag.value, translations)
