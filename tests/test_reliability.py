@@ -40,6 +40,8 @@ class Provider:
         self.poison = ""
         self.latency = 0.0
         self.drop_section_sign = False
+        self.in_flight = 0
+        self.max_in_flight = 0
         self.lock = threading.Lock()
         provider = self
 
@@ -54,7 +56,12 @@ class Provider:
                     number = provider.requests
                 payload = json.loads(body["messages"][1]["content"])
                 if provider.latency:
+                    with provider.lock:
+                        provider.in_flight += 1
+                        provider.max_in_flight = max(provider.max_in_flight, provider.in_flight)
                     time.sleep(provider.latency)
+                    with provider.lock:
+                        provider.in_flight -= 1
                 if provider.mode == "unauthorized":
                     return self._send(401, {"error": "bad key"})
                 if provider.mode == "always429" or number > provider.fail_after:
@@ -293,20 +300,21 @@ def test_unreadable_chunk_is_reported(tmp: Path) -> None:
 
 def test_concurrent_batches_are_faster_and_identical(tmp: Path) -> None:
     files = {f"r.{i}.0.mca": [f"Concurrent line {i} {n}" for n in range(3)] for i in range(8)}
-    timings: dict[int, float] = {}
+    overlap: dict[int, int] = {}
     outputs: dict[int, dict[str, str]] = {}
     for workers in (1, 4):
         provider = Provider()
         provider.latency = 0.25
         world = make_world(tmp, f"parallel-{workers}", files)
-        started = time.perf_counter()
         report = make_translator(world, provider, tmp / f"parallel-{workers}.json", batch_size=3, concurrency=workers).run()
-        timings[workers] = time.perf_counter() - started
+        overlap[workers] = provider.max_in_flight
         assert report["status"] == "completed" and report["translation"]["translated"] == 24
         assert provider.requests == 8, "one request per batch, however many run at once"
         outputs[workers] = hashes(world)
     assert outputs[1] == outputs[4], "the world must not depend on how many batches ran together"
-    assert timings[4] < timings[1] * 0.6, timings
+    # Requests that are waiting on the provider together, not wall-clock time: a busy machine slows
+    # the world writes of both runs alike and made a timing ratio flaky.
+    assert overlap[1] == 1 and 2 <= overlap[4] <= 4, overlap
     record("safety.concurrent_batches_identical")
 
 
