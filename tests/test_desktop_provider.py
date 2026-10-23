@@ -91,6 +91,18 @@ def test_public_catalog() -> None:
             entry.handle(request, fresh / "reports", fresh)
             assert emit.call_args.args[0]["type"] == "response.error"
         assert settings_path(data).read_bytes() == before
+    with tempfile.TemporaryDirectory() as directory:
+        # A saved OpenRouter model that is not a text model stays in the list, marked, instead of vanishing.
+        data = Path(directory) / "data"
+        remember_user_settings({"provider": "openrouter", "model": "google/gemini-robotics-fixture", "target_language": "한국어"}, data)
+        body = {"provider": "openrouter", "publicCatalog": True, "credentialOwner": "rust", "model": ""}
+        catalog = {"data": [{"id": "text-fixture"}, {"id": "google/gemini-robotics-fixture"}, {"id": "other/robotics-fixture-2"}]}
+        with patch.object(LLMProviderClient, "_request_json", return_value=catalog), patch.object(entry, "emit") as emit:
+            entry.handle({"v": 1, "id": "kept", "type": "models.list", "payload": body}, data / "reports", data)
+            models = emit.call_args.args[0]["payload"]["models"]
+        ids = [item["id"] for item in models]
+        assert "text-fixture" in ids and "google/gemini-robotics-fixture" in ids and "other/robotics-fixture-2" not in ids, ids
+        assert next(item for item in models if item["id"] == "google/gemini-robotics-fixture").get("unsuitable_reason")
     print("PASS desktop_provider.public_catalog_no_credentials_no_settings_write_cache_and_retry")
 
 if __name__ == "__main__":

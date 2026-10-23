@@ -1374,7 +1374,10 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             cached = False
             if public_catalog:
                 from mwt.userdata import load_model_catalog, remember_model_catalog
-                config["api"].update({"api_key": "", "base_url": "https://openrouter.ai/api/v1", "wire_format": "openai", "model": ""})
+                # The public catalog sends no key and checks no model; the saved model is passed only so the
+                # list filter keeps it (marked) even when it is not a text model.
+                kept = str(body.get("model") or (saved.get("model") if saved.get("provider") == "openrouter" else "") or "")
+                config["api"].update({"api_key": "", "base_url": "https://openrouter.ai/api/v1", "wire_format": "openai", "model": kept})
                 try:
                     models = LLMProviderClient(config).list_public_models()
                     remember_model_catalog(provider, models, root=data_dir)
