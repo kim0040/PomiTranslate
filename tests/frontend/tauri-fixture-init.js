@@ -108,7 +108,9 @@
       { id: 'playerdata', scanned: false, present: true, count: 4 }
     ]
   };
-  // ?chunks=clean|mixed|newer|skipped|empty: what the scan saw chunk by chunk. Without it the core predates the field.
+  // ?chunks=clean|mixed|newer|skipped|empty|overflow|resumed-empty: what the scan saw chunk by chunk. Without it the core predates the field.
+  // With ?scenario=interrupted-partial&chunks=newer, reloading the page is an app restart: the interrupted job (and its
+  // newer coverage) persist, translate.resume refuses until acceptNewerVersion is true, and only then settles the job.
   const chunkMode = new URLSearchParams(location.search).get('chunks');
   const chunkEntry = (state, dataVersion, compression, status, count) => ({ state, dataVersion, compression, status, count });
   const chunkCounts = (processed, skipped = 0, unreadable = 0, notInspected = 0) => ({ processed, skipped_unsupported: skipped, unreadable, not_inspected: notInspected });
@@ -120,14 +122,15 @@
       const known = entries.filter((entry) => entry.state === 'known').map((entry) => entry.dataVersion);
       return { dimension, kind, counts, min: known.length ? Math.min(...known) : null, max: known.length ? Math.max(...known) : null, entries };
     };
-    const finish = (groups, files, flags, distribution) => {
+    const finish = (groups, files, flags, distribution, extra = {}) => {
       const counts = chunkCounts(0);
       for (const item of groups) for (const key of Object.keys(counts)) counts[key] += item.counts[key];
       const known = distribution.filter((item) => item.state === 'known').map((item) => item.dataVersion);
       return {
         ...base, groups, flags, counts: { ...counts, total: Object.values(counts).reduce((sum, value) => sum + value, 0) },
-        chunkVersions: { min: known.length ? Math.min(...known) : null, max: known.length ? Math.max(...known) : null, distribution },
-        files: { scanned: 8, unreadable: 0, notInspected: 0, detectedUnsupported: {}, ...files }
+        chunkVersions: { min: known.length ? Math.min(...known) : null, max: known.length ? Math.max(...known) : null, distribution, ...(extra.versions || {}) },
+        files: { scanned: 8, unreadable: 0, notInspected: 0, detectedUnsupported: {}, ...files },
+        ...(extra.top || {})
       };
     };
     if (mode === 'clean') {
@@ -147,6 +150,18 @@
         group('overworld', 'region', [chunkEntry('known', 4189, 2, 'processed', 90), chunkEntry('known', 4800, 4, 'processed', 30)])
       ], {}, { mixed: true, newer: true, missing: false }, [{ dataVersion: 4189, state: 'known', count: 90 }, { dataVersion: 4800, state: 'known', count: 30 }]);
     }
+    if (mode === 'overflow') {
+      // One file met more version/compression combinations than the report itemises: the surplus is overflow, the range stays exact.
+      const overflowGroup = group('overworld', 'region', [chunkEntry('known', 4000, 2, 'processed', 1), chunkEntry('overflow', null, null, 'processed', 12), chunkEntry('unobserved', null, 127, 'skipped_unsupported', 63)]);
+      overflowGroup.min = 4000; overflowGroup.max = 5000; overflowGroup.overflow = 12; overflowGroup.writeBlockedFiles = 1;
+      return finish([overflowGroup], {}, { mixed: true, newer: true, missing: false }, [{ dataVersion: 4000, state: 'known', count: 1 }],
+        { versions: { min: 4000, max: 5000, truncated: true, overflow: 12 } });
+    }
+    if (mode === 'resumed-empty') {
+      // A scan continued from a checkpoint made before chunk coverage existed: finished files were not searched again.
+      return finish([group('overworld', 'region', [chunkEntry('known', 4189, 2, 'processed', 40)])], {}, { mixed: false, newer: false, missing: false },
+        [{ dataVersion: 4189, state: 'known', count: 40 }], { top: { partial: true } });
+    }
     // skipped / empty: part of the world was not searched.
     const searched = mode === 'empty' ? 0 : 100;
     return finish([
@@ -160,7 +175,7 @@
   }
   if (chunkMode) {
     scan.chunkCoverage = chunkCoverageFor(chunkMode);
-    if (chunkMode === 'empty') Object.assign(scan, { candidateCount: 0, occurrenceCount: 0, kinds: {}, candidates: [], requestEstimate: 0 });
+    if (chunkMode === 'empty' || chunkMode === 'resumed-empty') Object.assign(scan, { candidateCount: 0, occurrenceCount: 0, kinds: {}, candidates: [], requestEstimate: 0 });
   }
 
   // ?vault=corrupt: the credential store cannot be opened until "reset credential storage" runs.

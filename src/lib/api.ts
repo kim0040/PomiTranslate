@@ -164,8 +164,11 @@ export type CoverageItem = { id: string; scanned: boolean; present?: boolean; co
 /** How a chunk was handled by the scan. `not_inspected` is outside the scan scope, so nothing is known of it. */
 export type ChunkStatus = 'processed' | 'skipped_unsupported' | 'unreadable' | 'not_inspected';
 export type ChunkCoverageEntry = {
-  /** `known`: the chunk has a DataVersion. `missing`: it was read and has none. `unobserved`: it was not read. */
-  state: 'known' | 'missing' | 'unobserved';
+  /**
+   * `known`: the chunk has a DataVersion. `missing`: it was read and has none. `unobserved`: it was not read.
+   * `overflow`: chunks of a file that met more distinct combinations than the report itemises; no detail is kept for them.
+   */
+  state: 'known' | 'missing' | 'unobserved' | 'overflow';
   dataVersion: number | null;
   compression: number | null;
   status: ChunkStatus;
@@ -179,6 +182,10 @@ export type ChunkCoverageGroup = {
   max: number | null;
   entries: ChunkCoverageEntry[];
   entriesTruncated?: boolean;
+  /** Files of this group that were read and searched but cannot be rewritten (absent from an older core). */
+  writeBlockedFiles?: number;
+  /** Chunks of this group counted under `overflow` entries. */
+  overflow?: number;
 };
 /** What a scan saw chunk by chunk. Absent from a core or a saved scan that predates it. */
 export type ChunkCoverage = {
@@ -191,6 +198,9 @@ export type ChunkCoverage = {
     min: number | null;
     max: number | null;
     distribution: { dataVersion: number | null; state: 'known' | 'missing'; count: number }[];
+    /** The distribution leaves out `overflow` chunks of files with too many distinct combinations; min/max and the flags stay exact. */
+    truncated?: boolean;
+    overflow?: number;
   };
   flags: { mixed: boolean; newer: boolean; missing: boolean };
   counts: Record<ChunkStatus, number> & { total: number };

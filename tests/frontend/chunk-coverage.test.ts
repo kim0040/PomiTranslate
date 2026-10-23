@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 import { AppState } from '../../src/lib/app.svelte';
 import type { ChunkCoverage } from '../../src/lib/api';
 import {
-  compressionName, dimension, fileNotes, hasUninspected, leftOutChunks, leftOutFiles, leftOutText, needsNewerConfirmation, versionSummary
+  compressionName, dimension, distributionOverflow, fileNotes, hasUninspected, leftOutChunks, leftOutFiles, leftOutText, needsNewerConfirmation, versionSummary
 } from '../../src/lib/chunk-coverage';
 import { setLocale } from '../../src/lib/i18n/index.svelte';
 
@@ -36,6 +36,30 @@ describe('reading a chunk coverage', () => {
     expect(versionSummary(coverage({ chunkVersions: { min: null, max: null, distribution: [{ dataVersion: null, state: 'missing', count: 4 }] } })))
       .toEqual({ kind: 'unversioned' });
     expect(versionSummary(coverage({ chunkVersions: { min: null, max: null, distribution: [] } }))).toEqual({ kind: 'none' });
+  });
+
+  it('trusts the exact flags and range when the distribution leaves chunks out', () => {
+    // One itemised version, but the core says the versions are mixed: the other chunks were counted as overflow.
+    const truncated = coverage({
+      flags: { mixed: true, newer: true, missing: false },
+      chunkVersions: { min: 4000, max: 5000, truncated: true, overflow: 1, distribution: [{ dataVersion: 4000, state: 'known', count: 1 }] }
+    });
+    expect(versionSummary(truncated)).toEqual({ kind: 'mixed', min: 4000, max: 5000 });
+    expect(distributionOverflow(truncated)).toBe(1);
+    expect(distributionOverflow(coverage())).toBe(0);
+    // Everything read lies in the overflow: the exact range still names the version, and a missing one stays missing.
+    const onlyOverflow = coverage({ chunkVersions: { min: 4100, max: 4100, truncated: true, overflow: 70, distribution: [] } });
+    expect(versionSummary(onlyOverflow)).toEqual({ kind: 'single', version: 4100 });
+    const missingOnly = coverage({
+      flags: { mixed: false, newer: false, missing: true },
+      chunkVersions: { min: null, max: null, truncated: true, overflow: 3, distribution: [] }
+    });
+    expect(versionSummary(missingOnly)).toEqual({ kind: 'unversioned' });
+  });
+
+  it('counts a summary continued from an old checkpoint as incompletely inspected', () => {
+    expect(hasUninspected(coverage({ partial: true }))).toBe(true);
+    expect(hasUninspected(coverage({ partial: false }))).toBe(false);
   });
 
   it('says when part of the world was not searched', () => {
@@ -146,5 +170,94 @@ describe('the newer-version confirmation in the app', () => {
     expect(app.newerAccepted).toBe(false);
     expect(app.banner?.message).toContain('newer game version');
     expect(app.step).toBe('run');
+  });
+});
+
+describe('continuing an interrupted job of a newer world', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    setLocale('en');
+  });
+
+  const newer = coverage({ flags: { mixed: true, newer: true, missing: false }, chunkVersions: { min: 4189, max: 4800, distribution: [] } });
+  const job = {
+    jobId: 'job-1', kind: 'translate', worldPath: '/worlds/Roguefire', worldName: 'Roguefire', createdAt: '2026-09-30T09:12:00+09:00',
+    unitsTotal: 10, unitsVerified: 4, unitsUnknown: 0, needsAttention: true, legacy: false, state: 'partial', blocking: true
+  } as any;
+
+  function core(refuse = false) {
+    const sent: { type: string; payload: Record<string, any> }[] = [];
+    invokeMock.mockImplementation(async (command: string, args: any) => {
+      if (command !== 'sidecar_request') return undefined;
+      const { type, payload, id } = args.request;
+      sent.push({ type, payload });
+      const ok = (body: unknown) => ({ v: 1, id, type: 'response.ok', payload: body });
+      if (type === 'resume.status') {
+        return ok({ available: true, scanPlanId: 'plan', fingerprint: 'f', candidateCount: 1, candidates: [], chunkCoverage: newer, status: 'partial', savedAt: 1 });
+      }
+      if (type === 'translate.resume') {
+        if (refuse || payload.acceptNewerVersion !== true) {
+          return { v: 1, id, type: 'response.error', error: { code: 'NEWER_VERSION_UNCONFIRMED', message: 'x', recoverable: true } };
+        }
+        return ok({ status: 'completed', candidateCount: 1, changedFileCount: 1 });
+      }
+      if (type === 'settings.set') return ok({ settings: { provider: 'openai', model: 'fixture' }, apiKeyStored: true });
+      return ok({ available: false, backups: [], usage: null });
+    });
+    return sent;
+  }
+
+  function opened() {
+    const app = new AppState();
+    app.worldDir = '/worlds/Roguefire';
+    app.interruptedJobs = [job];
+    app.step = 'world';
+    return app;
+  }
+
+  it('asks in the recovery flow first, keeps the job, and sends the confirmation unchanged', async () => {
+    const sent = core();
+    const app = opened();
+    await app.continueInterrupted(job);
+    // Nothing was sent to translate, the job stays selected and the person is still on the world screen.
+    expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+    expect(app.continuation?.jobId).toBe('job-1');
+    expect(app.step).toBe('world');
+    expect(app.newerAccepted).toBe(false);
+    // Confirming without ticking does nothing.
+    await app.confirmContinuation();
+    expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+
+    app.newerAccepted = true;
+    await app.confirmContinuation();
+    const resume = sent.find((item) => item.type === 'translate.resume');
+    expect(resume?.payload.acceptNewerVersion).toBe(true);
+    expect(app.continuation).toBeNull();
+  });
+
+  it('stays on the confirmation when the core still refuses it', async () => {
+    core(true);
+    const app = opened();
+    await app.continueInterrupted(job);
+    app.newerAccepted = true;
+    await app.confirmContinuation();
+    expect(app.step).toBe('world');
+    expect(app.continuation?.jobId).toBe('job-1');
+    expect(app.newerAccepted).toBe(false);
+    expect(app.banner?.message).toContain('newer game version');
+  });
+
+  it('keeps a tick given earlier for the same saved scan, and drops it on cancel', async () => {
+    const sent = core();
+    const app = opened();
+    await app.continueInterrupted(job);
+    app.cancelContinuation();
+    expect(app.continuation).toBeNull();
+    expect(app.newerAccepted).toBe(false);
+    // The run step's box was ticked for this saved scan: Continue goes ahead without asking again.
+    app.newerAccepted = true;
+    await app.continueInterrupted(job);
+    expect(sent.filter((item) => item.type === 'translate.resume')).toHaveLength(1);
+    expect(sent.find((item) => item.type === 'translate.resume')?.payload.acceptNewerVersion).toBe(true);
   });
 });

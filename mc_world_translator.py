@@ -2125,19 +2125,19 @@ class WorldTranslator(TextExtractionMixin):
             record.add(NOT_INSPECTED, count=populated)
 
     @staticmethod
-    def _observe_chunk(record: FileCoverage, locked: bool, chunk: Any, root: Any) -> None:
-        """Count one non-empty chunk. ``root`` is its parsed NBT, or None when it could not be read."""
+    def _observe_chunk(record: FileCoverage, chunk: Any, root: Any) -> None:
+        """Count one non-empty chunk. ``root`` is its parsed NBT, or None when it could not be read.
+
+        A chunk that was read and searched is processed whether or not its file can be rewritten; that is
+        ``record.write_blocked``, set by the caller.
+        """
         if chunk.unsupported:
             record.add(SKIPPED_UNSUPPORTED, compression=chunk.unsupported_id)
         elif root is None:
             record.add(UNREADABLE, compression=chunk.compression or None)
         else:
             state, version = chunk_data_version(root)
-            # A file with an unsupported chunk or sector table is never rewritten, so its text is not searched for.
-            record.add(
-                SKIPPED_UNSUPPORTED if locked else PROCESSED,
-                compression=chunk.compression, state=state, data_version=version,
-            )
+            record.add(PROCESSED, compression=chunk.compression, state=state, data_version=version)
 
     def _chunk_refs(self, region: Any, path: Path, stats: dict[str, Any]):
         """Yield (chunk, root, refs, occurrences) for every chunk that can be read. Count the rest.
@@ -2206,9 +2206,10 @@ class WorldTranslator(TextExtractionMixin):
         if early is not None:
             return early
         locked = bool(region.unsupported_ids) or bool(region.layout_unsafe)
+        record.write_blocked = locked
         stats: dict[str, Any] = {
             "unreadable_chunks": 0,
-            "observe": lambda chunk, root: self._observe_chunk(record, locked, chunk, root),
+            "observe": lambda chunk, root: self._observe_chunk(record, chunk, root),
         }
         unique_texts: dict[str, None] = {}
         candidate_count = 0

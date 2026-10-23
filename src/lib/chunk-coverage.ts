@@ -21,10 +21,19 @@ export type VersionSummary =
 
 export function versionSummary(coverage: ChunkCoverage): VersionSummary {
   const { distribution, min, max } = coverage.chunkVersions;
-  if (!distribution.length) return { kind: 'none' };
-  if (distribution.length > 1) return { kind: 'mixed', min, max };
+  // The flags and the range are exact; the distribution may leave out the chunks of a file with too many combinations.
+  if (coverage.flags.mixed || distribution.length > 1) return { kind: 'mixed', min, max };
+  if (!distribution.length) {
+    if (min !== null) return { kind: 'single', version: min };
+    return coverage.flags.missing ? { kind: 'unversioned' } : { kind: 'none' };
+  }
   const only = distribution[0];
   return only.state === 'known' && only.dataVersion !== null ? { kind: 'single', version: only.dataVersion } : { kind: 'unversioned' };
+}
+
+/** Chunks the distribution does not itemise (a file met more version/compression combinations than the report keeps). */
+export function distributionOverflow(coverage: ChunkCoverage): number {
+  return coverage.chunkVersions.truncated ? coverage.chunkVersions.overflow ?? 0 : 0;
 }
 
 /** Chunks the scan did not search for text, whatever the reason. */
@@ -39,9 +48,12 @@ export function leftOutFiles(coverage: ChunkCoverage): number {
   return unreadable + notInspected + Object.values(detectedUnsupported).reduce((sum, count) => sum + count, 0);
 }
 
-/** True when part of the world was not searched, so "no text found" cannot be read as "no text here". */
+/**
+ * True when part of the world was not searched, so "no text found" cannot be read as "no text here". A summary
+ * marked `partial` (a scan continued from an older checkpoint, whose finished files were not searched again) counts too.
+ */
 export function hasUninspected(coverage: ChunkCoverage | null | undefined): boolean {
-  return !!coverage && (leftOutChunks(coverage) > 0 || leftOutFiles(coverage) > 0);
+  return !!coverage && (leftOutChunks(coverage) > 0 || leftOutFiles(coverage) > 0 || coverage.partial === true);
 }
 
 /** The write gate: chunks newer than the newest version this build has a fixture for. */

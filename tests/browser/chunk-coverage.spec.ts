@@ -153,3 +153,81 @@ test('dark theme keeps the summary, the warning and the confirmation readable', 
   await expect(page.getByRole('checkbox', { name: /내용을 이해했으며/ })).toBeVisible();
   await axe(page);
 });
+
+test('a file with too many version combinations says the distribution is truncated, and the range stays exact', async ({ page }) => {
+  await scanned(page, 'overflow', 'en');
+  await expect(page.getByTestId('chunk-versions')).toContainText('Mixed');
+  await expect(page.getByTestId('chunk-versions')).toContainText('4000–5000');
+  await card(page).locator('summary').click();
+  await expect(page.getByTestId('chunk-distribution-truncated')).toContainText('12 more chunks are not listed here');
+  // Overflow is its own row, never shown as "Not read".
+  await expect(card(page).getByRole('table').nth(1)).toContainText('Not itemised');
+  await axe(page);
+});
+
+test('a scan continued from an old checkpoint with no candidates says finished files were not searched again', async ({ page }) => {
+  await scanned(page, 'resumed-empty', 'en');
+  const warning = page.getByText('This scan continued a saved job, so files');
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText('not proof that the world has no text');
+  await expect(card(page)).toContainText('may be incomplete');
+  await axe(page);
+});
+
+test.describe('continuing an interrupted job of a newer world after a restart', () => {
+  async function restarted(page: Page) {
+    await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
+    await page.goto('/?scenario=interrupted-partial&chunks=newer&locale=en');
+    await expect(page.locator('.boot')).toHaveCount(0);
+    await page.reload(); // the app starts again: the job and its saved plan come back from the core
+    await expect(page.locator('.boot')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Continue the remaining work' })).toBeVisible();
+  }
+  const resumes = (page: Page) => page.evaluate(() => (window as any).__pomiResumes ?? []);
+  const confirmBox = (page: Page) => page.getByTestId('interrupted-newer').getByRole('checkbox', { name: /I understand/ });
+
+  test('Continue asks for the confirmation in the recovery flow, keeps the job, then resumes with it', async ({ page }) => {
+    await restarted(page);
+    await page.getByRole('button', { name: 'Continue the remaining work' }).click();
+    // The confirmation is in the interrupted job's own panel; nothing was sent and the person is still on the world screen.
+    const panel = page.getByTestId('interrupted-newer');
+    await expect(panel).toBeVisible();
+    await expect(panel.getByTestId('newer-version-notice')).toContainText('newer game version than this app has been tested with');
+    await expect(confirmBox(page)).toBeFocused();
+    const go = panel.getByRole('button', { name: 'Continue the remaining work' });
+    await expect(go).toBeDisabled();
+    expect(await resumes(page)).toEqual([]);
+    await axe(page);
+
+    await confirmBox(page).check();
+    await expect(go).toBeEnabled();
+    await go.click();
+    // The same tick reached the core (the fixture refuses without it) and the job is settled.
+    await expect.poll(() => resumes(page)).toEqual(['translate.resume']);
+    await expect(page.getByTestId('interrupted-newer')).toHaveCount(0);
+  });
+
+  test('cancelling leaves the job open and unticked', async ({ page }) => {
+    await restarted(page);
+    await page.getByRole('button', { name: 'Continue the remaining work' }).click();
+    await confirmBox(page).check();
+    await page.getByTestId('interrupted-newer').getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByTestId('interrupted-newer')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Continue the remaining work' })).toBeVisible();
+    expect(await resumes(page)).toEqual([]);
+    // Continue asks again from the start.
+    await page.getByRole('button', { name: 'Continue the remaining work' }).click();
+    await expect(confirmBox(page)).not.toBeChecked();
+  });
+
+  test('a box ticked on the run step counts when Continue is chosen for the same saved scan', async ({ page }) => {
+    await restarted(page);
+    await page.getByRole('button', { name: 'Continue the remaining work' }).click();
+    await confirmBox(page).check();
+    await goStep(page, /^Translate/);
+    await expect(page.getByRole('checkbox', { name: /I understand/ })).toBeChecked();
+    await goStep(page, /^Select World/);
+    await page.getByRole('button', { name: 'Continue the remaining work' }).click();
+    await expect.poll(() => resumes(page)).toEqual(['translate.resume']);
+  });
+});
