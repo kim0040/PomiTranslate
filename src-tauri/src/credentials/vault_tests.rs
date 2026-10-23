@@ -343,7 +343,8 @@ fn a_poisoned_in_process_lock_does_not_wedge_credentials() {
 
 type Fake = std::sync::Arc<keychain::fake::FakeKeychain>;
 
-fn with_fake() -> (Credentials, Fake) {
+/// A `Credentials` on `fake`; several of them stand for the app being started again.
+fn credentials_on(fake: &Fake) -> Credentials {
     struct Shared(Fake);
     impl KeychainStore for Shared {
         fn get(&self, p: &str) -> Result<Option<Zeroizing<String>>, IpcError> {
@@ -356,11 +357,12 @@ fn with_fake() -> (Credentials, Fake) {
             self.0.delete(p)
         }
     }
+    Credentials::with_keychain(Box::new(Shared(fake.clone())))
+}
+
+fn with_fake() -> (Credentials, Fake) {
     let fake = Fake::default();
-    (
-        Credentials::with_keychain(Box::new(Shared(fake.clone()))),
-        fake,
-    )
+    (credentials_on(&fake), fake)
 }
 
 #[test]
@@ -450,6 +452,68 @@ fn a_keychain_import_copies_into_local_and_leaves_the_original() {
         .import_keychain(dir.path(), "gemini", None)
         .unwrap_err();
     assert_eq!(empty.code, code::KEYCHAIN_EMPTY);
+    // The import recorded that the keychain holds a key, so deleting it still removes the original.
+    assert!(!calls(&fake).iter().any(|call| call.starts_with("delete:")));
+    fake.log.lock().unwrap().clear();
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
+    assert!(!has_entry(&fake, "openai"));
+}
+
+#[test]
+fn importing_from_the_keychain_is_refused_in_keychain_mode_and_keeps_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    fake.log.lock().unwrap().clear();
+    let error = vault
+        .import_keychain(dir.path(), "openai", None)
+        .unwrap_err();
+    assert_eq!(error.code, code::INVALID_REQUEST);
+    assert!(calls(&fake).is_empty(), "nothing was read or deleted");
+    assert!(has_entry(&fake, "openai"));
+    assert_eq!(
+        vault.status(dir.path(), "openai").unwrap().mode,
+        Mode::Keychain
+    );
+}
+
+#[test]
+fn importing_over_a_local_row_that_records_the_keychain_copies_and_keeps_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(
+            dir.path(),
+            "openai",
+            Mode::Local,
+            "older-local-fixture",
+            None,
+        )
+        .unwrap();
+    mark_known_keychain(dir.path(), "openai");
+    put_entry(&fake, "openai", "keychain-fixture");
+    fake.log.lock().unwrap().clear();
+    let status = vault.import_keychain(dir.path(), "openai", None).unwrap();
+    assert_eq!(status.mode, Mode::Local);
+    assert!(status.stored);
+    assert!(has_entry(&fake, "openai"), "the original is still there");
+    assert!(!calls(&fake).iter().any(|call| call.starts_with("delete:")));
+    assert_eq!(
+        vault
+            .read(dir.path(), "openai", None)
+            .unwrap()
+            .as_deref()
+            .map(|s| s.as_str()),
+        Some("keychain-fixture")
+    );
+    // The note is kept: a later delete removes the original as well.
+    fake.log.lock().unwrap().clear();
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
+    assert!(!has_entry(&fake, "openai"));
 }
 
 /// keyring 4.2.0 installs the platform store on the first `Entry::new`; making an entry does not
@@ -888,7 +952,7 @@ fn a_mode_switch_of_someone_who_never_used_the_keychain_makes_no_os_call() {
 }
 
 #[test]
-fn a_switch_away_from_a_mode_with_the_keychain_note_deletes_the_entry_and_clears_the_note() {
+fn a_local_session_switch_with_the_keychain_note_makes_no_os_call_and_keeps_the_note() {
     let dir = tempfile::tempdir().unwrap();
     let (vault, fake) = with_fake();
     vault
@@ -899,18 +963,53 @@ fn a_switch_away_from_a_mode_with_the_keychain_note_deletes_the_entry_and_clears
     vault
         .save(dir.path(), "openai", Mode::Session, "", None)
         .unwrap();
+    vault
+        .save(
+            dir.path(),
+            "openai",
+            Mode::Local,
+            "second-fixture-secret",
+            None,
+        )
+        .unwrap();
+    assert!(calls(&fake).is_empty(), "{:?}", calls(&fake));
+    assert!(has_entry(&fake, "openai"));
+    // The note is kept, so an explicit delete still removes the entry.
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
     assert!(!has_entry(&fake, "openai"));
-    let after = calls(&fake);
-    assert!(after.contains(&"delete:openai".to_string()), "{after:?}");
+}
+
+#[test]
+fn after_an_import_a_local_session_switch_leaves_the_original_and_a_delete_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    put_entry(&fake, "openai", "keychain-fixture");
+    vault.import_keychain(dir.path(), "openai", None).unwrap();
     fake.log.lock().unwrap().clear();
     vault
-        .save(dir.path(), "openai", Mode::Local, "", None)
+        .save(dir.path(), "openai", Mode::Session, "", None)
         .unwrap();
-    assert!(
-        calls(&fake).is_empty(),
-        "the note is cleared: {:?}",
-        calls(&fake)
-    );
+    vault
+        .save(
+            dir.path(),
+            "openai",
+            Mode::Local,
+            "local-again-fixture",
+            None,
+        )
+        .unwrap();
+    assert!(calls(&fake).is_empty(), "{:?}", calls(&fake));
+    assert!(has_entry(&fake, "openai"), "the original is kept");
+    let (known, _) = account_flags(
+        &Vault::new(dir.path()).connection(false).unwrap().unwrap().0,
+        "openai",
+    )
+    .unwrap();
+    assert!(known, "the flag is kept");
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
+    assert!(!has_entry(&fake, "openai"));
 }
 
 #[test]
@@ -1187,8 +1286,8 @@ fn a_write_that_cannot_be_undone_is_reported_uncertain() {
         .unwrap_err();
     assert!(error.uncertain);
     assert_eq!(error.error.code, code::CREDENTIAL_SAVE_UNCERTAIN);
-    // The way out the error names is to delete the key. The rolled-back save left no row, so the
-    // uncertain save itself noted that the keychain was used; the delete then reaches the entry.
+    // The way out the error names is to delete the key. The save recorded that the keychain was
+    // used before it wrote there, so the delete reaches the entry.
     fake.log.lock().unwrap().clear();
     vault.delete(dir.path(), "openai").unwrap();
     assert_eq!(calls(&fake), ["delete:openai"]);
@@ -1202,6 +1301,7 @@ fn plant_legacy_files(root: &Path) -> Vec<PathBuf> {
         "keychain-ledger.json",
         "keychain-ledger.json.new",
         "keychain-ledger.json.broken-1700000000000",
+        "keychain-ledger.json.broken-1700000000000-1",
     ];
     names
         .iter()
@@ -1261,6 +1361,234 @@ fn a_leftover_ownership_record_and_archived_vaults_are_never_consulted() {
     assert!(!archive.exists());
     for path in planted {
         assert!(!path.exists(), "a reset takes the leftover record with it");
+    }
+}
+
+// --- Review C3: first-write crash, unreadable-vault retry, link-following cleanup --------------
+
+/// Runs in a child process: a store whose write ends the process the moment it happens, before the
+/// vault can commit the mode.
+const CRASH_ROOT: &str = "PT_CRASH_AT_THE_OS_WRITE_ROOT";
+
+fn crash_test_name(name: &str) -> String {
+    let module = module_path!();
+    format!(
+        "{}::{name}",
+        module.split_once("::").map_or(module, |(_, rest)| rest)
+    )
+}
+
+fn run_the_crashing_child(test: &str, root: &Path) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &crash_test_name(test), "--test-threads=1"])
+        .env(CRASH_ROOT, root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(86),
+        "the child must end at the OS write: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_process_that_ends_between_the_os_write_and_the_mode_commit_leaves_the_delete_obligation() {
+    const NAME: &str =
+        "a_process_that_ends_between_the_os_write_and_the_mode_commit_leaves_the_delete_obligation";
+    if let Some(root) = std::env::var_os(CRASH_ROOT) {
+        struct Dies;
+        impl KeychainStore for Dies {
+            fn get(&self, _: &str) -> Result<Option<Zeroizing<String>>, IpcError> {
+                Ok(None)
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), IpcError> {
+                std::process::exit(86)
+            }
+            fn delete(&self, _: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+        }
+        let _ = Credentials::with_keychain(Box::new(Dies)).save(
+            Path::new(&root),
+            "openai",
+            Mode::Keychain,
+            SECRET,
+            None,
+        );
+        std::process::exit(3);
+    }
+    for reset in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        run_the_crashing_child(NAME, dir.path());
+        // The OS slot survived the crash; the vault has rolled the mode back.
+        let (vault, fake) = with_fake();
+        put_entry(&fake, "openai", "written-before-the-crash-fixture");
+        assert_eq!(
+            vault.status(dir.path(), "openai").unwrap().mode,
+            Mode::Local
+        );
+        if reset {
+            let purged = vault.purge(dir.path()).unwrap();
+            assert!(purged.complete(), "{purged:?}");
+        } else {
+            vault.delete(dir.path(), "openai").unwrap();
+        }
+        assert_eq!(calls(&fake), ["delete:openai"], "reset: {reset}");
+        assert!(!has_entry(&fake, "openai"), "reset: {reset}");
+    }
+}
+
+#[test]
+fn a_note_that_cannot_be_saved_means_no_os_write_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Local, "local-fixture", None)
+        .unwrap();
+    {
+        let (conn, _held) = Vault::new(dir.path()).connection(false).unwrap().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER no_note_insert BEFORE INSERT ON accounts WHEN NEW.known_keychain=1 BEGIN SELECT RAISE(ABORT,'fixture'); END; CREATE TRIGGER no_note_update BEFORE UPDATE ON accounts WHEN NEW.known_keychain=1 BEGIN SELECT RAISE(ABORT,'fixture'); END;",
+        )
+        .unwrap();
+    }
+    fake.log.lock().unwrap().clear();
+    let error = vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap_err();
+    assert_eq!(error.error.code, code::VAULT_IO);
+    assert!(!error.uncertain);
+    assert!(calls(&fake).is_empty(), "the OS store was not touched");
+    assert!(!has_entry(&fake, "openai"));
+    assert_eq!(
+        vault.status(dir.path(), "openai").unwrap().mode,
+        Mode::Local
+    );
+}
+
+#[test]
+fn a_failed_save_whose_undo_worked_keeps_the_note_so_a_delete_still_reaches_the_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    fake.fail_next_sets.store(1, Ordering::SeqCst);
+    let error = vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap_err();
+    assert_eq!(error.error.code, code::CREDENTIAL_SAVE_FAILED);
+    fake.log.lock().unwrap().clear();
+    vault.delete(dir.path(), "openai").unwrap();
+    assert_eq!(
+        calls(&fake),
+        ["delete:openai"],
+        "a spare delete for someone who opted in"
+    );
+}
+
+fn refused_delete_on_an_unreadable_vault() -> (tempfile::TempDir, Credentials, Fake) {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    break_the_database(dir.path());
+    fake.fail_delete.store(true, Ordering::SeqCst);
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert!(has_entry(&fake, "openai"));
+    (dir, vault, fake)
+}
+
+#[test]
+fn a_refused_delete_on_an_unreadable_vault_is_retried_after_the_vault_is_replaced() {
+    let (dir, _first_run, fake) = refused_delete_on_an_unreadable_vault();
+    assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
+    // The app is started again; the OS store now allows the delete.
+    fake.fail_delete.store(false, Ordering::SeqCst);
+    fake.log.lock().unwrap().clear();
+    let restarted = credentials_on(&fake);
+    restarted.delete(dir.path(), "openai").unwrap();
+    assert_eq!(
+        calls(&fake),
+        ["delete:openai"],
+        "the retry reaches the OS store"
+    );
+    assert!(!has_entry(&fake, "openai"));
+    // Confirmed: the note is gone and a further delete makes no OS call.
+    fake.log.lock().unwrap().clear();
+    restarted.delete(dir.path(), "openai").unwrap();
+    assert!(calls(&fake).is_empty());
+}
+
+#[test]
+fn a_refused_delete_keeps_the_unreadable_vault_when_no_replacement_can_be_made() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, fake) = with_fake();
+    vault
+        .save(dir.path(), "openai", Mode::Keychain, SECRET, None)
+        .unwrap();
+    break_the_database(dir.path());
+    let before = tree(dir.path());
+    fake.fail_delete.store(true, Ordering::SeqCst);
+    tests_hook::FAIL_NEW_VAULT.with(|flag| flag.set(true));
+    let error = vault.delete(dir.path(), "openai").unwrap_err();
+    tests_hook::FAIL_NEW_VAULT.with(|flag| flag.set(false));
+    assert_eq!(error.code, code::KEYCHAIN_UNCONFIRMED);
+    assert!(broken_entries(dir.path(), "credentials.broken-").is_empty());
+    assert_eq!(
+        tree(dir.path()),
+        before,
+        "the old vault is exactly as it was"
+    );
+    // Retry once the store allows it: the delete reaches the entry, then the vault is set aside.
+    fake.fail_delete.store(false, Ordering::SeqCst);
+    fake.log.lock().unwrap().clear();
+    credentials_on(&fake).delete(dir.path(), "openai").unwrap();
+    assert_eq!(calls(&fake), ["delete:openai"]);
+    assert!(!has_entry(&fake, "openai"));
+    assert_eq!(broken_entries(dir.path(), "credentials.broken-").len(), 1);
+}
+
+#[test]
+fn legacy_cleanup_does_not_follow_a_link_as_the_application_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let survivors = plant_legacy_files(&outside);
+    let link = dir.path().join("app-data");
+    link_directory(&link, &outside);
+    remove_legacy_ledger(&link);
+    for path in survivors {
+        assert!(
+            path.exists(),
+            "{} was reached through the link",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn legacy_cleanup_deletes_only_the_names_the_retired_record_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let planted = plant_legacy_files(dir.path());
+    let unrelated = [
+        "keychain-ledger.json.notes.txt",
+        "keychain-ledger.json.bak",
+        "keychain-ledger.json.broken-",
+        "keychain-ledger.json.broken-abc",
+        "keychain-ledger.json.broken-1-2-3",
+        "my-keychain-ledger.json",
+    ];
+    for name in unrelated {
+        fs::write(dir.path().join(name), b"keep").unwrap();
+    }
+    remove_legacy_ledger(dir.path());
+    for path in planted {
+        assert!(!path.exists(), "{}", path.display());
+    }
+    for name in unrelated {
+        assert!(dir.path().join(name).exists(), "{name} was deleted");
     }
 }
 

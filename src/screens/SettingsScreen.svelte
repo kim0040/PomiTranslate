@@ -771,10 +771,13 @@
           </select>
           <SettingsHint text={t('settings.vault.help')} />
           </div>
-          <div class="field import-key">
-            <div><button type="button" class="btn btn-secondary" disabled={importing || !!app.busy} onclick={importExisting}>{importing ? t('common.loading') : t('settings.vault.import')}</button></div>
-            <SettingsHint text={t('settings.vault.importHelp')} />
-          </div>
+          <!-- In Keychain mode the key already is the keychain entry: there is nothing to copy. -->
+          {#if savedCredentialMode !== 'keychain'}
+            <div class="field import-key">
+              <div><button type="button" class="btn btn-secondary" disabled={importing || !!app.busy} onclick={importExisting}>{importing ? t('common.loading') : t('settings.vault.import')}</button></div>
+              <SettingsHint text={t('settings.vault.importHelp')} />
+            </div>
+          {/if}
         </details>
       </div>
       {#if draft.provider === 'openrouter'}
