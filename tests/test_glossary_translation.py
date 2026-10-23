@@ -447,6 +447,27 @@ def test_a_manual_override_beats_a_cached_translation() -> None:
     assert batch.cache["Mira"] == "MANUAL"
 
 
+def test_letter_equivalents_count_as_the_letters_they_stand_for() -> None:
+    """L2: KELVIN/OHM/ANGSTROM SIGN and fullwidth forms are Latin or Greek letters at a word edge, as K, Omega and A-ring are."""
+    kelvin, ohm, angstrom, fullwidth_c = "\u212a", "\u2126", "\u212b", "\uff23"
+    cat = Glossary([term("cat", "x")])
+    for text in (f"{kelvin}cat", f"{ohm}cat", f"{angstrom}cat", f"{fullwidth_c}cat", f"cat{kelvin}", f"cat{ohm}"):
+        assert pick(cat, text) == [], text
+    assert pick(cat, "Kcat", "\u03a9cat") == [], "the plain letters were already rejected"
+    assert pick(cat, f"{kelvin} cat", f"cat {ohm}", "\u732bcat\u732b") == ["cat"], "a space or a Han neighbour is still a boundary"
+    # As the edge of the source itself.
+    for source in (kelvin, "K"):
+        assert pick(Glossary([term(source, "x")]), f"x{kelvin}x", "xKx") == [], source
+    assert pick(Glossary([term(kelvin, "x")]), f"a {kelvin}.", kelvin) == [kelvin]
+    assert pick(Glossary([term(ohm, "x")]), f"x{ohm}x") == [] and pick(Glossary([term(ohm, "x")]), f"{ohm} 5") == [ohm]
+    assert pick(Glossary([term(f"{ohm}x", "x")]), f"a{ohm}x", f"{ohm}xy") == []
+    assert pick(Glossary([term(angstrom, "x")]), f"x{angstrom}x") == []
+    # The scripts that need no word edge are untouched, also next to a letter equivalent.
+    assert pick(Glossary([term("\ud55c\uad6d", "Korea")]), "\ud55c\uad6d\uc5b4", f"{kelvin}\ud55c\uad6d{ohm}") == ["\ud55c\uad6d"]
+    assert pick(Glossary([term("\u732b", "cat")]), "\u718a\u732b", f"{kelvin}\u732b") == ["\u732b"]
+    assert pick(Glossary([term("\u30ab\u30ca", "x")]), "\u30ab\u30ca\u30c0") == ["\u30ab\u30ca"]
+
+
 def test_more_than_eighty_matching_terms_are_capped_and_counted() -> None:
     """The decision on > 80 terms: 80 in the prompt (longest first), the rest unenforced and counted."""
     entries = [term(f"Word{i:03d}", f"w{i:03d}") for i in range(100)]
@@ -579,6 +600,46 @@ def test_quality_warnings_survive_answer_log_crash_recovery(tmp: Path) -> None:
     assert over.translator.translate_texts(["Mira"]) == {"Mira": "MANUAL"} and "Mira" not in over.translator.quality_warnings
 
 
+def test_a_crash_before_the_quality_record_keeps_the_batch_selection(tmp: Path) -> None:
+    """L3: 80 longer rules fill the batch prompt, so Z's rule (the 81st) was never shown and is ``glossary_truncated``.
+    After a crash before the quality record, the recheck must use the logged selection and not enforce it."""
+    entries = [term(f"LongTerm{i:03d}", f"t{i:03d}") for i in range(80)] + [term("Z", "EXPECTED", ident="5a" + "0" * 18)]
+    long = " ".join(f"LongTerm{i:03d}" for i in range(80))
+    answer = " ".join(f"t{i:03d}" for i in range(80))
+    provider = Provider()
+    world = make_world(tmp, "w-cap", {"r.0.0.mca": [long, "Z"]})
+    report = tmp / "cap.json"
+    first = job(world, provider, report, entries, batch_size=2)
+    first.checkpoint_path.write_text(json.dumps(first.checkpoint_payload(), ensure_ascii=False), encoding="utf-8")
+    first.translator.client = Scripted(lambda text, prompt, number: answer if text == long else "wrong")
+    first.translator.translate_texts([long, "Z"])
+    truncated = [{"code": "glossary_truncated", "entryId": "5a" + "0" * 18}]
+    assert first.translator.quality_warnings == {"Z": truncated}, "the original review never enforced the cut rule"
+    log = BatchLog.path_for(first.checkpoint_path)
+    received = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if '"kind": "received"' in line]
+    assert len(received) == 1 and len(received[0]["terms"]) == MAX_TERMS_PER_BATCH and "5a" + "0" * 18 not in received[0]["terms"]
+
+    def resumed() -> WorldTranslator:
+        return WorldTranslator(world_config(world, provider, report, entries, batch_size=2, resume_from_checkpoint=True))
+
+    # The process dies before the batch's quality record reached the disk.
+    lines = log.read_text(encoding="utf-8").splitlines()
+    log.write_text("\n".join(line for line in lines if '"kind": "quality"' not in line) + "\n", encoding="utf-8")
+    again = resumed()
+    assert again.translator.quality_warnings == {"Z": truncated}, "zero requests, and the rule that was cut stays unenforced"
+    quiet = Scripted()
+    again.translator.client = quiet
+    assert again.translator.translate_texts([long, "Z"]) == {long: answer, "Z": "wrong"} and quiet.calls == []
+    assert provider.requests == 0
+    # A log from before the selection was recorded falls back to selecting per text, as before.
+    old = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    for item in old:
+        item.pop("terms", None)
+    log.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in old) + "\n", encoding="utf-8")
+    assert resumed().translator.quality_warnings == {"Z": [{"code": "glossary_mismatch", "entryId": "5a" + "0" * 18}]}
+    assert BatchLog.read_selection(log) == {}
+
+
 def main() -> None:
     unit = (
         test_selection_rules, test_prompt_block_is_data_not_instructions, test_only_matching_terms_reach_each_batch,
@@ -590,6 +651,7 @@ def main() -> None:
         test_residue_is_retried_once_and_then_only_warned, test_residue_is_not_checked_for_latin_targets_or_kept_words,
         test_a_retry_that_breaks_format_tokens_is_not_taken,
         test_terms_next_to_format_codes_are_matched, test_whole_word_rule_applies_to_space_separated_scripts_only,
+        test_letter_equivalents_count_as_the_letters_they_stand_for,
         test_one_folding_rule_for_selection_and_checking, test_world_precedence_ignores_sensitivity_and_ids_never_collide,
         test_a_manual_override_beats_a_cached_translation, test_more_than_eighty_matching_terms_are_capped_and_counted,
         test_a_fatal_failure_in_a_quality_retry_stops_the_job, test_quality_retries_feed_the_outage_and_rejection_breakers,
@@ -600,7 +662,7 @@ def main() -> None:
     whole = (
         test_report_counts_warnings_and_the_run_still_completes, test_resume_drops_translations_made_under_another_glossary,
         test_resume_with_the_same_glossary_requests_only_the_missing_batches, test_checkpoint_warnings_survive_a_resume,
-        test_quality_warnings_survive_answer_log_crash_recovery,
+        test_quality_warnings_survive_answer_log_crash_recovery, test_a_crash_before_the_quality_record_keeps_the_batch_selection,
     )
     for test in whole:
         with tempfile.TemporaryDirectory() as raw:

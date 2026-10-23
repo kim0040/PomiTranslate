@@ -702,6 +702,29 @@ class BatchLog:
                         warnings[text] = [entry for entry in items if isinstance(entry, dict)]
         return warnings
 
+    @staticmethod
+    def read_selection(path: Path) -> dict[str, list[str]]:
+        """The glossary entry ids each answered text was sent with (``terms`` of a ``received`` record), the latest
+        record winning. A log written before the field existed, or by a job without a glossary, has none."""
+        selection: dict[str, list[str]] = {}
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return selection
+        for line in raw.splitlines():
+            try:
+                item = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not (isinstance(item, dict) and item.get("kind") == "received" and isinstance(item.get("translations"), dict)
+                    and isinstance(item.get("terms"), list)):
+                continue
+            ids = [entry_id for entry_id in item["terms"] if isinstance(entry_id, str)]
+            for text in item["translations"]:
+                if isinstance(text, str):
+                    selection[text] = ids
+        return selection
+
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
 
@@ -1096,13 +1119,22 @@ class BatchTranslator:
             self._record("quality", warnings=reviewed)
         return result
 
-    def restore_quality(self, recovered: dict[str, str], recorded: dict[str, list[dict[str, Any]]]) -> None:
+    def restore_quality(
+        self,
+        recovered: dict[str, str],
+        recorded: dict[str, list[dict[str, Any]]],
+        selected: dict[str, list[str]] | None = None,
+    ) -> None:
         """Give the answers read back from the answer log (after a crash) the warnings they had.
 
         A text the log has a ``quality`` record for gets exactly that. For the others the check is run again on
         the stored answer, without a request: it is deterministic, and it also covers the crash that came
         before the batch's review finished. (A retry that was already paid for is not bought again; the
         warning simply stands.)
+
+        ``selected`` is the entry ids each text's batch prompt carried (``BatchLog.read_selection``). Where it is
+        known, only those entries are enforced and every other matching entry is ``glossary_truncated``, as in the
+        original review. Without it (a log from before the field) the entries are re-selected per text.
         """
         if not self.glossary and not self.residue_script:
             return
@@ -1118,9 +1150,14 @@ class BatchTranslator:
             else:
                 try:
                     matching = self.glossary.matching([text])
-                    terms = matching[:MAX_TERMS_PER_BATCH]
+                    if selected is not None and text in selected:
+                        shown = set(selected[text])
+                        terms = [entry for entry in matching if entry["id"] in shown]
+                        cut = [entry for entry in matching if entry["id"] not in shown]
+                    else:
+                        terms, cut = matching[:MAX_TERMS_PER_BATCH], matching[MAX_TERMS_PER_BATCH:]
                     issues, _usable = self._quality_issues(text, translated, terms)
-                    issues = issues + [{"code": TRUNCATED_WARNING, "entryId": entry["id"]} for entry in matching[MAX_TERMS_PER_BATCH:]]
+                    issues = issues + [{"code": TRUNCATED_WARNING, "entryId": entry["id"]} for entry in cut]
                 except Exception:
                     continue
             with self._lock:
@@ -1162,7 +1199,10 @@ class BatchTranslator:
                     for i, text in enumerate(texts)
                 }
                 # On disk before anything else can fail: this answer was paid for.
-                self._record("received", translations=answered)
+                # The terms the prompt carried are part of the record: after a crash the check must judge this answer
+                # against the same selection, not against a larger one the model never saw.
+                extra = {"terms": [entry["id"] for entry in self.glossary.select(texts)]} if self.glossary else {}
+                self._record("received", translations=answered, **extra)
                 return self._review_answers(texts, answered, budget)
             except (TranslationCancelled, ProviderUnavailable):
                 raise
@@ -1220,6 +1260,7 @@ class WorldTranslator(TextExtractionMixin):
         # Answers read back from the answer log after a crash, and the warnings it recorded for them.
         self._log_recovered: dict[str, str] = {}
         self._log_quality: dict[str, list[dict[str, Any]]] = {}
+        self._log_selection: dict[str, list[str]] = {}
         self.glossary_fingerprint = Glossary((config.get("glossary") or {}).get("entries")).fingerprint
         self.candidate_texts: set[str] = set()
         self.file_errors: list[dict[str, Any]] = []
@@ -1281,7 +1322,7 @@ class WorldTranslator(TextExtractionMixin):
         if self.translator is not None:
             self.translator.sink = self._batch_sink
             if self._log_recovered:
-                self.translator.restore_quality(self._log_recovered, self._log_quality)
+                self.translator.restore_quality(self._log_recovered, self._log_quality, self._log_selection)
 
     def emit(self, event: str, **payload: Any) -> None:
         if self.progress_callback is not None:
@@ -1438,6 +1479,7 @@ class WorldTranslator(TextExtractionMixin):
                     self.translation_cache[source] = translated
                     self._log_recovered[source] = translated
             self._log_quality = BatchLog.read_quality(self.batch_log.path)
+            self._log_selection = BatchLog.read_selection(self.batch_log.path)
         self.checkpoint_loaded = True
         self.emit(
             "checkpoint_loaded",

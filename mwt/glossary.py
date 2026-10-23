@@ -667,12 +667,19 @@ def load_merged(data_dir: Path, world_dir: str | Path | None) -> list[dict]:
 @lru_cache(maxsize=4096)
 def _spaced_word_char(char: str) -> bool:
     """A letter or digit of a script whose words are separated by spaces: Latin, Greek and Cyrillic letters and
-    the ASCII digits. Hangul, kana and Han (which have no such boundaries) are not."""
+    the ASCII digits. Hangul, kana and Han (which have no such boundaries) are not.
+
+    A letter is judged by its NFKC form, so the sign variants of a letter (KELVIN SIGN, OHM SIGN, ANGSTROM SIGN,
+    fullwidth and ligature forms) count as the Latin or Greek letter they stand for."""
     if char.isascii():
         return char.isalnum()
     if not char.isalpha():
         return False
-    return unicodedata.name(char, "").startswith(("LATIN", "GREEK", "CYRILLIC"))
+    letters = unicodedata.normalize("NFKC", char)
+    return bool(letters) and all(
+        letter.isalpha() and (letter.isascii() or unicodedata.name(letter, "").startswith(("LATIN", "GREEK", "CYRILLIC")))
+        for letter in letters
+    )
 
 
 def _mask_codes(text: str) -> str:
