@@ -104,7 +104,9 @@
 - **비용 추정 정가표**: OpenAI·Gemini·Anthropic 공식 가격 페이지에서 2026-10-23에 읽은 값(정확한 모델 ID만, 120일 지나면 unknown, 제공사 목록 가격 우선, Comet·Custom 제외). Sol이 35개 값을 공식 페이지와 다시 대조해 불일치 0. 같은 검토에서 찾은 기존 결함(카탈로그 가격 Infinity/overflow가 $0 추정이 됨)을 고쳤다.
 - **용어집 성능(U21)**: 편집한 줄만 다시 계산하고 200개를 넘으면 화면 밖 줄 layout을 미룬다(Chrome 4배 CPU 제한 2,000개: 입력 약 330→47 ms, "더 보기" 약 970→430 ms). 화면 읽기 프로그램 탐색 모드 영향은 U23으로 남겼다.
 - **문서·도움말**: ko/en/ja 소개 화면 9장 재캡처와 4개 언어 사용 안내 갱신(U13·U14), 도움말에 CometAPI 키 발급 페이지(U19).
-- **Windows native 확인(서명 없음, 공개하지 않음)**: `cd263f2`에서 `pnpm desktop:build`(PyInstaller 6.16.0 sidecar 시작 확인 `system.hello`, release build, NSIS 설치 파일 18 MB) PASS. 설치하지 않은 release 실행 파일로 두 번 실행: 코어가 Job 아래에서 시작해 `app.bootstrap`·`worlds.discover` 응답, 창 닫기(WM_CLOSE)로 종료 코드 0·sidecar 0개, 강제 종료(`taskkill /F`)에서도 sidecar와 그 자식까지 사라짐. 실행이 만든 앱 데이터 폴더(이전에 없던 두 곳)는 확인 후 지웠다. 설치 프로그램 실행·화면 조작(X 확인 창, Alt+F4, 저장 창)·키체인은 하지 않았다.
+- **Windows native 확인(서명 없음, 공개하지 않음)**: `cd263f2`와 검토 수정 뒤 `b0ac487`에서 각각 `pnpm desktop:build`(PyInstaller 6.16.0 sidecar 시작 확인 `system.hello`, release build, NSIS 설치 파일 18 MB) PASS. 두 build 모두 설치하지 않은 release 실행 파일로 두 번씩 실행: 코어가 Job 아래에서 시작해 `app.bootstrap`·`worlds.discover` 응답, 창 닫기(WM_CLOSE)로 종료 코드 0·sidecar 0개, 강제 종료(`taskkill /F`)에서도 sidecar와 그 자식까지 사라짐. 실행이 만든 앱 데이터 폴더(이전에 없던 두 곳)는 확인 후 지웠다. 설치 프로그램 실행·화면 조작(X 확인 창, Alt+F4, 저장 창)·키체인은 하지 않았다.
+
+- **두 번째 묶음의 자동 검사**: `fa3a2a6`에서 `pnpm verify:local` 60/60 PASS. 같은 소스의 전체 Playwright는 314 PASS·2 실패였고, 두 실패는 부하에 따른 테스트 타이밍(멈춘 종료의 대기 상태 150 ms, 5.2초 뒤 사라지는 알림)이라 테스트를 고쳐 반복 실행으로 확인했다. 최종 소스 `b0ac487`에서 전체 Playwright 316/316 PASS(2 workers, 26.9분).
 
 ## 8. 남은 증거 (이 문서 시점)
 
