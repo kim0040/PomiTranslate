@@ -106,7 +106,10 @@
     <p class="hint">{t('settings.data.preview')}</p>
   {/if}
   <div class="diagnostics">
-    <button type="button" class="btn btn-secondary" onclick={() => app.copyDiagnostics()}>{t('diagnostics.copy')}</button>
+    <div class="diagnostics-actions">
+      <button type="button" class="btn btn-secondary" onclick={() => app.copyDiagnostics()}>{t('diagnostics.copy')}</button>
+      <button type="button" class="btn btn-secondary" onclick={() => app.saveDiagnostics()}>{t('diagnostics.save')}</button>
+    </div>
     <SettingsHint text={t('diagnostics.help')} />
   </div>
 </section>
@@ -137,6 +140,7 @@
   .check small { color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
   .paths { margin: 0; display: grid; gap: var(--space-2); }
   .diagnostics { display: grid; gap: var(--space-2); justify-items: start; }
+  .diagnostics-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .paths > div { display: grid; grid-template-columns: minmax(140px, 0.6fr) minmax(0, 2fr); gap: var(--space-3); align-items: baseline; }
   .paths dt { color: var(--text-secondary); font-size: var(--text-sm); }
   .paths dd { margin: 0; font-size: var(--text-xs); overflow-wrap: anywhere; }

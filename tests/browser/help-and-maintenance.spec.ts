@@ -151,3 +151,21 @@ test('reset with keys deletes every provider key', async ({ page }) => {
   const cleared = JSON.parse(await page.evaluate(() => sessionStorage.getItem('pomi.fixture.cleared') ?? '[]'));
   expect(cleared.sort()).toEqual(['anthropic', 'comet', 'custom', 'gemini', 'openai', 'openrouter']);
 });
+
+test.describe('diagnostics export', () => {
+  test('saving the diagnostics asks the shell for a file and says so', async ({ page }) => {
+    await boot(page, 'scenario=selected');
+    await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('button', { name: '진단 정보를 파일로 저장' }).click();
+    await expect(page.getByText('진단 정보를 파일로 저장했습니다')).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__pomiShell)).toContain('diagnostics_export');
+  });
+
+  test('a dismissed save dialog says nothing', async ({ page }) => {
+    await boot(page, 'scenario=selected&diagnostics=cancel');
+    await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+    await page.getByRole('button', { name: '진단 정보를 파일로 저장' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__pomiShell)).toContain('diagnostics_export');
+    await expect(page.getByText('진단 정보를 파일로 저장했습니다')).toHaveCount(0);
+  });
+});

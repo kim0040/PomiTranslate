@@ -537,6 +537,10 @@
         return { keysDeleted: !!args.deleteKeys, keysPartiallyDeleted: false, reportsCleared: true, errors: [] };
       }
       if (command === 'diagnostics_snapshot') return 'PomiTranslate diagnostics\nversion 0.1.0\nevents: none';
+      if (command === 'diagnostics_export') {
+        (window.__pomiShell ||= []).push('diagnostics_export');
+        return new URLSearchParams(location.search).get('diagnostics') !== 'cancel';
+      }
       if (command === 'exit_set_settings_dirty') { window.__pomiDirty = args.dirty; return null; }
       // The shell requires the intent id of the question on every answer, and refuses one that is gone.
       // ?exit=gone answers UPDATE_CANCELLED, ?exit=gone-quit answers INVALID_REQUEST.

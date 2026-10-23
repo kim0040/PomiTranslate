@@ -20,6 +20,7 @@
     {#snippet actions()}
       <button type="button" class="btn btn-primary" data-autofocus onclick={reset}>{t('common.retry')}</button>
       <button type="button" class="btn btn-secondary" onclick={() => app.copyDiagnostics()}>{t('diagnostics.copy')}</button>
+      <button type="button" class="btn btn-secondary" onclick={() => app.saveDiagnostics()}>{t('diagnostics.save')}</button>
       <button type="button" class="btn btn-secondary" onclick={openHelp}>{t('startup.openHelp')}</button>
     {/snippet}
   </Callout>

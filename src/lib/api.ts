@@ -514,6 +514,14 @@ export async function nativeReset(deleteKeys: boolean): Promise<NativeResetOutco
 }
 
 /** Versions, platform, recent events and the core's last output, with secrets and paths removed. */
+/**
+ * Save the shell's diagnostics bundle as a text file through a native save dialog. Resolves true
+ * when a file was written and false when the dialog was dismissed; rejects with EXPORT_FAILED.
+ */
+export async function diagnosticsExport(): Promise<boolean> {
+  return shell<boolean>('diagnostics_export');
+}
+
 export async function diagnosticsSnapshot(): Promise<string> {
   return shell<string>('diagnostics_snapshot');
 }

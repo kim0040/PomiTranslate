@@ -2,7 +2,6 @@
   import { onMount, untrack } from 'svelte';
   import { app } from './lib/app.svelte';
   import { LOCALES, t, type Locale } from './lib/i18n/index.svelte';
-  import { keepWindowOnScreen } from './lib/plugins';
   import CrashScreen from './components/CrashScreen.svelte';
   import DiscardReviewDialog from './components/DiscardReviewDialog.svelte';
   import { applyTheme, storedTheme, watchSystemTheme } from './lib/theme';
@@ -40,8 +39,6 @@
     const stopTheme = watchSystemTheme(() => app.theme);
     document.documentElement.classList.toggle('mac-chrome', macChrome);
     void app.boot();
-    // The shell restores the saved window placement; make sure it is on a monitor that still exists.
-    void keepWindowOnScreen();
     const stops: (() => void)[] = [];
     void onMenu((action) => app.menu(action)).then((stop) => stops.push(stop)).catch(() => {});
     void onDropPath((path) => void app.openDropped(path), (over) => (dropping = over && !app.isBusy))

@@ -7,6 +7,7 @@ import {
   type CredentialMode,
   type CredentialState,
   type CredentialStoreError,
+  diagnosticsExport,
   diagnosticsSnapshot,
   fromShellError,
   nativeReset,
@@ -34,7 +35,7 @@ import {
   type WorldInspection
 } from './api';
 import {
-  appVersion, cancelExit, cancelUpdate, checkForUpdate, confirmExit, dataLocations, forceExit, installUpdate, isGoneQuestion, keepWaiting, onExitConfirm, onExitStuck, onExitWaiting,
+  appVersion, cancelExit, cancelUpdate, checkForUpdate, confirmExit, dataLocations, forceExit, inShell, installUpdate, isGoneQuestion, keepWaiting, onExitConfirm, onExitStuck, onExitWaiting,
   onOpenWorld, onUpdateProgress, openExternal, revealPath, type MenuAction, type UpdateInfo
 } from './native';
 import { expectedLogFolder, formatDiagnostics, newDiagnosticId } from './diagnostics';
@@ -383,6 +384,16 @@ export class AppState {
     // Written outside any render: describe runs from handlers, never from a template.
     this.lastError = { code: code || 'UNKNOWN', id, at: Date.now() };
     return `${t('error.default')} ${t('error.copyDiagnostics')} ${t('error.id', { id })}`;
+  }
+
+  /** Save the diagnostics bundle as a file the person can attach; the clipboard copy is the fallback outside the shell. */
+  async saveDiagnostics(): Promise<void> {
+    if (!inShell()) return this.copyDiagnostics();
+    try {
+      if (await diagnosticsExport()) this.notify(t('diagnostics.saved'), 'success');
+    } catch {
+      this.notify(t('diagnostics.saveFailed'), 'error');
+    }
   }
 
   /** Put what a bug report needs on the clipboard: versions, last error, log folder. No keys, no world text. */
