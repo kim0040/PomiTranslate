@@ -1108,9 +1108,17 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
     if kind == "app.reset":
         from mwt.userdata import reset_user_data
 
+        from mwt.userdata import ResetIncomplete
+
         if body.get("confirm") != "reset":
             raise ValueError("Reset needs an explicit confirmation")
-        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": reset_user_data(data_dir)})
+        try:
+            result = reset_user_data(data_dir)
+        except ResetIncomplete as exc:
+            # The names are the fixed reset items (RESET_FILES/RESET_DIRS), never a path.
+            _reply_error(request_id, "RESET_INCOMPLETE", str(exc), left=exc.left)
+            return
+        emit({"v": 1, "id": request_id, "type": "response.ok", "payload": result})
         return
     if kind == "notices.get":
         emit({"v": 1, "id": request_id, "type": "response.ok", "payload": payload()})
@@ -2113,10 +2121,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--report-dir", default="")
     parser.add_argument("--data-dir", default="")
     parser.add_argument("--cancel-file", default="")
+    parser.add_argument("--reset-user-data", action="store_true")
     args = parser.parse_args(argv)
     from mwt.userdata import user_data_dir
 
     prepare_stdio()
+    if args.reset_user_data:
+        # The Windows uninstaller's "Delete the application data" (src-tauri/windows/hooks.nsh) runs
+        # the same reset as Settings > Reset, so both remove the same things the same link-safe way.
+        from mwt.userdata import reset_user_data
+
+        print(json.dumps(reset_user_data(Path(args.data_dir).expanduser() if args.data_dir else None)))
+        return
     report_dir = Path(args.report_dir) if args.report_dir else Path.cwd() / ".pomi-reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else user_data_dir()

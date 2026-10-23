@@ -102,6 +102,19 @@ def test_secrets_stay_out_of_settings_and_logs() -> None:
     print("secret absent from settings dump and log")
 
 
+def test_no_keyring_backend_means_no_saved_key() -> None:
+    import keyring
+    from keyring.backends.fail import Keyring as NoBackend
+
+    previous = keyring.get_keyring()
+    keyring.set_keyring(NoBackend())
+    try:
+        assert load_api_key("openai") is None
+    finally:
+        keyring.set_keyring(previous)
+    print("no keyring backend reads as no saved key")
+
+
 def test_desktop_locale_catalogs_cover_visible_keys() -> None:
     visible_sources = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src").rglob("*.svelte"))
     used = {match[1] for match in re.findall(r"\bt\((['\"])(.*?)\1", visible_sources)}
@@ -122,5 +135,6 @@ def test_desktop_locale_catalogs_cover_visible_keys() -> None:
 if __name__ == "__main__":
     test_surfaces()
     test_secrets_stay_out_of_settings_and_logs()
+    test_no_keyring_backend_means_no_saved_key()
     test_desktop_locale_catalogs_cover_visible_keys()
     print("BRAND_SECRETS_PASSED")

@@ -508,6 +508,7 @@ const CORE_EXCEPTIONS: &[&str] = &[
     "ProviderError",
     "ProviderUnavailable",
     "RequestStopped",
+    "ResetIncomplete",
     "RegionError",
     "RegionLayoutUnsafe",
     "ReviewDraftError",

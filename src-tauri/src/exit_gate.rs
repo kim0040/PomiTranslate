@@ -111,6 +111,8 @@ pub struct ExitControl {
     confirmed: AtomicBool,
     /// A "cancel and quit" is waiting for the job to stop.
     waiting: AtomicBool,
+    /// A close or quit is being decided or was allowed: no new core request is admitted.
+    closing: AtomicBool,
     intents: Mutex<Intents>,
 }
 
@@ -120,6 +122,7 @@ impl Default for ExitControl {
             settings_dirty: AtomicBool::new(false),
             confirmed: AtomicBool::new(false),
             waiting: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
             intents: Mutex::new(Intents::default()),
         }
     }
@@ -244,10 +247,43 @@ pub fn prompt_for(job: bool, dirty: bool) -> Option<Prompt> {
     })
 }
 
+/// A question is only worth holding a close for when there is a window to show it in. Once the
+/// window is gone nothing can answer it, and a held exit would keep the process alive with nothing on
+/// screen, so the exit passes.
+fn held(prompt: Option<Prompt>, window_open: bool) -> Option<Prompt> {
+    prompt.filter(|_| window_open)
+}
+
 /// True while a confirmed quit waits for the job to stop. No new core request starts then: the page
 /// refreshes itself when the job ends, and every such request would hold the quit up a little longer.
 pub fn quitting<R: Runtime>(app: &AppHandle<R>) -> bool {
-    app.state::<ExitControl>().waiting.load(Ordering::SeqCst)
+    app.state::<ExitControl>().refuses_requests()
+}
+
+impl ExitControl {
+    /// No new core request starts: a confirmed quit waits for the job, a close is being decided or
+    /// was allowed, or the exit is confirmed (the app is ending, and a request admitted then would
+    /// be killed with it without the job question).
+    fn refuses_requests(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst)
+            || self.closing.load(Ordering::SeqCst)
+            || self.confirmed.load(Ordering::SeqCst)
+    }
+
+    /// Decide a close with admission shut first. A request that got the request gate before this
+    /// makes `decide` see a busy core and ask; one that gets it after sees `closing` once it holds
+    /// the gate (`handle_request` checks again there) and is refused. Admission reopens only when
+    /// the close is held for a question.
+    fn decide_close(&self, decide: impl FnOnce() -> bool) -> bool {
+        self.closing.store(true, Ordering::SeqCst);
+        let allowed = decide();
+        if allowed {
+            self.confirmed.store(true, Ordering::SeqCst);
+        } else {
+            self.closing.store(false, Ordering::SeqCst);
+        }
+        allowed
+    }
 }
 
 fn job_running<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -277,9 +313,12 @@ pub fn allow_close<R: Runtime>(app: &AppHandle<R>) -> bool {
     if control.confirmed.load(Ordering::SeqCst) {
         return true;
     }
-    match prompt_for(
-        job_running(app),
-        control.settings_dirty.load(Ordering::SeqCst),
+    match held(
+        prompt_for(
+            job_running(app),
+            control.settings_dirty.load(Ordering::SeqCst),
+        ),
+        app.get_webview_window("main").is_some(),
     ) {
         None => true,
         Some(prompt) => {
@@ -296,12 +335,22 @@ pub fn allow_close<R: Runtime>(app: &AppHandle<R>) -> bool {
     }
 }
 
+/// The window's own close (title-bar X, Alt+F4). An allowed close is final: the window goes and the
+/// app exits after it, and that exit must not ask again because of a request the page started in
+/// between (a refresh), with no window left to ask in.
+pub fn allow_window_close<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.state::<ExitControl>().decide_close(|| allow_close(app))
+}
+
+/// An exit the system or the app menu asked for without a window close first (Cmd+Q, logout). Held
+/// like a close, with admission shut while it is decided.
+pub fn allow_exit<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.state::<ExitControl>().decide_close(|| allow_close(app))
+}
+
 /// The Quit menu item and any other deliberate quit.
 pub fn request_exit<R: Runtime>(app: &AppHandle<R>) {
-    if allow_close(app) {
-        app.state::<ExitControl>()
-            .confirmed
-            .store(true, Ordering::SeqCst);
+    if app.state::<ExitControl>().decide_close(|| allow_close(app)) {
         app.exit(0);
     }
 }
@@ -413,8 +462,9 @@ pub fn exit_confirm(app: AppHandle, intent: u64) -> Result<(), IpcError> {
         return Ok(());
     }
     if !job_running(&app) {
-        control.waiting.store(false, Ordering::SeqCst);
+        // Confirmed before waiting is released, so no request is admitted in between.
         control.confirmed.store(true, Ordering::SeqCst);
+        control.waiting.store(false, Ordering::SeqCst);
         app.exit(0);
         return Ok(());
     }
@@ -430,13 +480,16 @@ pub fn exit_confirm(app: AppHandle, intent: u64) -> Result<(), IpcError> {
 #[tauri::command]
 pub fn exit_keep_waiting(app: AppHandle) {
     let control = app.state::<ExitControl>();
-    if !job_running(&app) {
-        control.waiting.store(false, Ordering::SeqCst);
-        control.confirmed.store(true, Ordering::SeqCst);
-        app.exit(0);
+    // Waiting is claimed before looking (the timed-out wait released it), so no request is admitted
+    // between an idle look and the exit.
+    if control.waiting.swap(true, Ordering::SeqCst) {
         return;
     }
-    if control.waiting.swap(true, Ordering::SeqCst) {
+    if !job_running(&app) {
+        // Confirmed before waiting is released, so no request is admitted in between.
+        control.confirmed.store(true, Ordering::SeqCst);
+        control.waiting.store(false, Ordering::SeqCst);
+        app.exit(0);
         return;
     }
     let _ = app.emit("pomi-exit-waiting", ());
@@ -482,6 +535,37 @@ mod tests {
     #[test]
     fn nothing_running_and_nothing_unsaved_asks_nothing() {
         assert_eq!(prompt_for(false, false), None);
+    }
+
+    #[test]
+    fn a_close_shuts_admission_before_it_looks_and_reopens_it_only_to_ask() {
+        let control = ExitControl::default();
+        assert!(!control.refuses_requests());
+        // While the close is being decided a request that has not got the gate yet is refused.
+        let allowed = control.decide_close(|| {
+            assert!(control.refuses_requests());
+            false
+        });
+        assert!(!allowed);
+        assert!(
+            !control.refuses_requests(),
+            "a close held for a question admits requests again"
+        );
+        assert!(!control.confirmed.load(Ordering::SeqCst));
+        assert!(control.decide_close(|| true));
+        assert!(
+            control.refuses_requests(),
+            "an allowed close keeps admission shut"
+        );
+        assert!(control.confirmed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_question_holds_the_close_only_while_there_is_a_window_to_ask_in() {
+        let ask = prompt_for(true, false);
+        assert_eq!(held(ask, true), ask);
+        assert_eq!(held(ask, false), None);
+        assert_eq!(held(None, true), None);
     }
 
     #[test]

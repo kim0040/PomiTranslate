@@ -127,10 +127,16 @@ async fn smoke_spawn_hello_and_bootstrap() {
     let launch = real_launch(scratch.path());
     let state = ActiveSidecar::default();
     let started = Instant::now();
+    // The shell adds `credentialOwner: rust` to these requests (CREDENTIAL_OWNER_REQUESTS), so the
+    // core never reads the OS keychain; without it a Linux box with no Secret Service fails the boot.
     let reply = run(
         &launch,
         &state,
-        request("smoke-boot", "app.bootstrap", json!({})),
+        request(
+            "smoke-boot",
+            "app.bootstrap",
+            json!({"credentialOwner": "rust"}),
+        ),
         |_| {},
     )
     .await
@@ -144,7 +150,11 @@ async fn smoke_spawn_hello_and_bootstrap() {
     let again = run(
         &launch,
         &state,
-        request("smoke-boot-2", "app.bootstrap", json!({})),
+        request(
+            "smoke-boot-2",
+            "app.bootstrap",
+            json!({"credentialOwner": "rust"}),
+        ),
         |_| {},
     )
     .await;
@@ -169,7 +179,11 @@ async fn smoke_scan_a_synthetic_world_without_changing_it() {
     let reply = run(
         &launch,
         &state,
-        request("smoke-scan", "scan.start", json!({"worldDir": world})),
+        request(
+            "smoke-scan",
+            "scan.start",
+            json!({"worldDir": world, "credentialOwner": "rust"}),
+        ),
         |_| {
             progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         },
@@ -212,7 +226,11 @@ async fn smoke_cancel_a_running_scan_writes_the_marker_and_the_job_ends() {
             run(
                 &launch,
                 &state,
-                request("smoke-cancel", "scan.start", json!({"worldDir": world})),
+                request(
+                    "smoke-cancel",
+                    "scan.start",
+                    json!({"worldDir": world, "credentialOwner": "rust"}),
+                ),
                 |_| {},
             )
             .await
@@ -261,7 +279,11 @@ async fn smoke_force_stop_a_core_that_cannot_react() {
             run(
                 &launch,
                 &state,
-                request("smoke-stall", "scan.start", json!({"worldDir": world})),
+                request(
+                    "smoke-stall",
+                    "scan.start",
+                    json!({"worldDir": world, "credentialOwner": "rust"}),
+                ),
                 |_| {},
             )
             .await

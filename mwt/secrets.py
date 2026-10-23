@@ -16,9 +16,15 @@ def remember_api_key(account: str, secret: str) -> None:
 
 
 def load_api_key(account: str) -> str | None:
+    """The saved key, or None. A system with no keyring backend at all (a Linux box without Secret
+    Service) has no saved key; other keyring failures still raise."""
     import keyring
+    from keyring.errors import NoKeyringError
 
-    return keyring.get_password(SERVICE_NAME, account)
+    try:
+        return keyring.get_password(SERVICE_NAME, account)
+    except NoKeyringError:
+        return None
 
 
 def save_public_settings(database: Path, *, provider: str, model: str) -> None:

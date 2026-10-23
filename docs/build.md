@@ -158,9 +158,14 @@ Docker Desktop이 있으면 Linux에서 Python core와 Rust 단위 테스트를 
 - Python: `python:3.12-slim`에서 `pip install -r requirements.txt` 뒤 `scripts/verify-local.mjs`의 Python 테스트 목록을 차례로 실행합니다. 이 이미지에는 `lsof`와 git 기록이 없어도 됩니다.
 - Rust: Ubuntu 24.04에 Tauri 시스템 패키지(`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libssl-dev`, `libxdo-dev`, `pkg-config`, `build-essential`)와 `rust-toolchain.toml`의 toolchain을 넣고 `src-tauri`에서 `cargo test --lib`, `cargo clippy --lib --tests -- -D warnings`. build script가 `../dist`와 `../build/sidecar/dist/pomi-sidecar/`를 요구하므로 컨테이너 안에서 빈 placeholder를 만듭니다. cargo registry와 target을 이름 있는 volume에 두면 다시 돌릴 때 빠릅니다.
 
-이것은 Linux 단위·fixture 검사이며 GTK 창, `tauri build`, packaged core smoke를 대신하지 않습니다.
+이것은 Linux 단위·fixture 검사입니다. 패키지 build와 창 시작은 따로 확인합니다:
 
-macOS 경로와 Linux의 실제 창·설치는 Windows 개발 머신에서 실행하지 못했습니다. 각 OS의 native gate에서 확인해야 합니다.
+- 패키지: 위 Rust 이미지에 Node 22(최신 22.x; 22.12의 corepack은 pnpm 서명 키를 찾지 못함), `corepack`의 pnpm 12.6.0, `python3-venv`·`python3-dev`, AppImage용 `file`·`patchelf`·`squashfs-tools`·`fuse2`를 더해, 컨테이너 안에서 `pnpm install --frozen-lockfile` → venv에 `requirements.txt`·`requirements-build.txt` → `pnpm sidecar:build:clean` → `APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 pnpm tauri build`. deb와 AppImage가 함께 나옵니다.
+- packaged core smoke: 같은 컨테이너에서 `POMI_SMOKE_SIDECAR=<build/sidecar/dist/pomi-sidecar/pomi-sidecar> POMI_SMOKE_WORLD=<합성 월드> cargo test --lib smoke_ -- --ignored --test-threads=1 --skip smoke_orphan`. orphan 확인은 600초 대기하므로 손으로 부모를 `kill -9`해 봅니다.
+- 창: 새 `ubuntu:24.04`에 `apt-get install ./PomiTranslate_*.deb`, 일반 사용자로 `dbus-run-session -- xvfb-run`(필요하면 `openbox`). `xdotool search --onlyvisible --name PomiTranslate`로 실제 창을 고릅니다(10×10 보조 창이 같은 이름). 정중한 닫기는 `wmctrl -ic` 또는 `WM_DELETE_WINDOW`이며 `xdotool windowclose`는 창을 파괴해 X 연결 끊김으로 끝납니다.
+- deb는 CJK 글꼴을 권장(`fonts-noto-cjk`)합니다. 글꼴이 없는 최소 시스템에서는 한국어·일본어가 네모로 보입니다. AppImage는 의존성을 선언할 수 없으므로 시스템 글꼴에 의존합니다.
+
+Xvfb는 실제 데스크톱 세션(GNOME/KDE, Wayland, GPU, HiDPI, 파일 대화상자, portal)을 대신하지 않습니다. macOS 경로와 Linux 실제 데스크톱은 각 OS의 native gate에서 확인해야 합니다.
 
 ## 로컬 gate
 

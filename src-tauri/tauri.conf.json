@@ -84,6 +84,13 @@
     },
     "macOS": {
       "minimumSystemVersion": "12.0"
+    },
+    "linux": {
+      "deb": {
+        "recommends": [
+          "fonts-noto-cjk"
+        ]
+      }
     }
   }
 }

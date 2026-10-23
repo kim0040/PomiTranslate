@@ -166,6 +166,22 @@ describe('the exit and reset flows', () => {
     expect(app.banner?.message).toContain(en['reset.partialKeys']);
   });
 
+  it('says what was removed when the core reset could not remove everything', async () => {
+    setLocale('en');
+    invokeMock.mockImplementation(async (command: string, args?: { request?: { id: string } }) => {
+      if (command === 'native_reset') return complete;
+      if (command === 'sidecar_request') {
+        const error = { code: 'RESET_INCOMPLETE', message: 'x', left: ['jobs'] };
+        return { v: 1, id: args?.request?.id, type: 'response.error', error };
+      }
+      return undefined;
+    });
+    const app = new AppState();
+    expect(await app.resetApp(true)).toBe(false);
+    expect(app.banner?.message).toBe(`${en['error.RESET_INCOMPLETE']} ${en['reset.alsoKeys']}`);
+    expect(app.banner?.message).not.toContain(en['reset.partialKeys']);
+  });
+
   it('does not touch the core when the shell half fails', async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'native_reset') throw { code: 'CREDENTIAL_UNAVAILABLE', message: 'x', detail: 'VAULT_IO' };

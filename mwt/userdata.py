@@ -11,6 +11,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import sys
 import time
 from contextlib import contextmanager
@@ -451,27 +452,72 @@ RESET_FILES = ("settings.json", "settings.backup.json", "settings.json.tmp", "se
 RESET_DIRS = ("models", "scans", "jobs", "review-drafts")
 
 
+# IsReparseTagNameSurrogate: the reparse point names another place (symbolic links, junctions and
+# similar). Other reparse points, such as cloud-file placeholders, hold their own content.
+_NAME_SURROGATE = 0x20000000
+
+
+def _is_link(path: Path) -> bool:
+    """A symbolic link, a Windows junction or another reparse point that names another place.
+    Path.is_symlink() does not see junctions."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) and bool(
+        getattr(info, "st_reparse_tag", 0) & _NAME_SURROGATE
+    )
+
+
+def _remove(path: Path) -> None:
+    """Delete a file or a folder tree. A link at any depth is removed as a link and never followed
+    (shutil.rmtree refuses a junction at the top and would leave the reset half done)."""
+    if _is_link(path) or not path.is_dir():
+        path.unlink()  # on Windows this also removes a directory link or junction
+        return
+    with os.scandir(path) as entries:
+        children = [Path(entry.path) for entry in entries]
+    for child in children:
+        _remove(child)
+    path.rmdir()
+
+
+class ResetIncomplete(OSError):
+    """Some of the reset items could not be removed; `left` names them (top-level names only)."""
+
+    def __init__(self, left: list[str]) -> None:
+        super().__init__(f"The reset could not remove: {', '.join(left)}")
+        self.left = left
+
+
 def reset_user_data(root: Path | None = None) -> dict:
     """Return the app to first launch: preferences, recent worlds, model lists and unfinished jobs.
 
-    World backups and copies of damaged settings stay. Nothing outside this folder is touched,
-    and a link inside it is removed as a link, never followed.
+    World backups and copies of damaged settings stay. A link found inside the folder, at any
+    depth, is removed as a link and never followed. (The folder itself may be a link: the data then
+    lives where it points, and that is where the reset works. A tree changed by another program
+    while the reset runs is outside this promise.) An entry that cannot be removed does not stop
+    the others; the reset then fails naming what is left.
     """
     base = user_data_dir(root)
     removed: list[str] = []
+    failed: list[str] = []
     with _settings_lock(root):
-        for name in RESET_FILES:
+        for name in RESET_FILES + RESET_DIRS:
             target = base / name
-            if target.is_symlink() or target.is_file():
-                target.unlink()
+            present = _is_link(target) or (target.is_dir() if name in RESET_DIRS else target.is_file())
+            if not present:
+                continue
+            try:
+                _remove(target)
+            except OSError:
+                failed.append(name)
+            else:
                 removed.append(name)
-        for name in RESET_DIRS:
-            target = base / name
-            if target.is_symlink():
-                target.unlink()
-                removed.append(name)
-            elif target.is_dir():
-                shutil.rmtree(target)
-                removed.append(name)
+    if failed:
+        raise ResetIncomplete(failed)
     kept = [name for name in ("backups",) if (base / name).is_dir()]
     return {"removed": removed, "kept": kept}

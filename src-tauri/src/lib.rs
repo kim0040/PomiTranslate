@@ -385,6 +385,13 @@ async fn handle_request(
             "Another PomiTranslate operation is still running",
         )
     })?;
+    // Again with the gate held: a close decided meanwhile saw no busy core and will end the app.
+    if exit_gate::quitting(app) {
+        return Err(IpcError::new(
+            code::APP_QUITTING,
+            "PomiTranslate is quitting",
+        ));
+    }
 
     let provider = request
         .get("payload")
@@ -820,7 +827,7 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if !exit_gate::allow_close(window.app_handle()) {
+                if !exit_gate::allow_window_close(window.app_handle()) {
                     api.prevent_close();
                 }
             }
@@ -833,7 +840,7 @@ pub fn run() {
                 // the same way while a job runs or settings are unsaved. An exit the person already
                 // confirmed carries a code and passes.
                 tauri::RunEvent::ExitRequested { api, code, .. } => {
-                    if code.is_none() && !exit_gate::allow_close(app) {
+                    if code.is_none() && !exit_gate::allow_exit(app) {
                         api.prevent_exit();
                     }
                 }

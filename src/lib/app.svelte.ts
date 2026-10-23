@@ -733,7 +733,11 @@ export class AppState {
       } catch { /* nothing cached */ }
       return true;
     } catch (cause) {
-      const partial = nativeDone ? ` ${t(clearKeys ? 'reset.partialKeys' : 'reset.partial')}` : '';
+      // An incomplete core reset removed what it could; the other failures removed nothing there.
+      const incomplete = cause instanceof BackendError && cause.code === 'RESET_INCOMPLETE';
+      const partial = !nativeDone
+        ? ''
+        : ` ${t(incomplete ? (clearKeys ? 'reset.alsoKeys' : 'reset.alsoReports') : clearKeys ? 'reset.partialKeys' : 'reset.partial')}`;
       const message = `${this.describe(cause)}${partial}`;
       this.banner = { tone: 'error', message };
       // The reset question is a modal: an error behind it would not be seen.
