@@ -161,6 +161,44 @@ export type Candidate = {
 
 export type CoverageItem = { id: string; scanned: boolean; present?: boolean; count?: number; scopeOption?: boolean };
 
+/** How a chunk was handled by the scan. `not_inspected` is outside the scan scope, so nothing is known of it. */
+export type ChunkStatus = 'processed' | 'skipped_unsupported' | 'unreadable' | 'not_inspected';
+export type ChunkCoverageEntry = {
+  /** `known`: the chunk has a DataVersion. `missing`: it was read and has none. `unobserved`: it was not read. */
+  state: 'known' | 'missing' | 'unobserved';
+  dataVersion: number | null;
+  compression: number | null;
+  status: ChunkStatus;
+  count: number;
+};
+export type ChunkCoverageGroup = {
+  dimension: string;
+  kind: 'region' | 'entities' | string;
+  counts: Record<ChunkStatus, number>;
+  min: number | null;
+  max: number | null;
+  entries: ChunkCoverageEntry[];
+  entriesTruncated?: boolean;
+};
+/** What a scan saw chunk by chunk. Absent from a core or a saved scan that predates it. */
+export type ChunkCoverage = {
+  version: number;
+  levelDataVersion: number | null;
+  levelDataVersions: { world: string; dataVersion: number | null }[];
+  /** The newest DataVersion this build has a fixture for. */
+  newestCovered: number;
+  chunkVersions: {
+    min: number | null;
+    max: number | null;
+    distribution: { dataVersion: number | null; state: 'known' | 'missing'; count: number }[];
+  };
+  flags: { mixed: boolean; newer: boolean; missing: boolean };
+  counts: Record<ChunkStatus, number> & { total: number };
+  groups: ChunkCoverageGroup[];
+  files: { scanned: number; unreadable: number; notInspected: number; detectedUnsupported: Record<string, number> };
+  partial?: boolean;
+};
+
 export type Estimate = {
   candidateCount: number;
   requests: number;
@@ -207,7 +245,9 @@ export type ScanResult = {
   warnings?: BackendWarning[];
   requestEstimate?: number;
   estimate?: Estimate;
+  /** What the scan was set to read (not the same as `chunkCoverage`, what it saw). */
   coverage?: CoverageItem[];
+  chunkCoverage?: ChunkCoverage;
   candidates?: Candidate[];
 };
 
@@ -264,6 +304,7 @@ export type ResumeStatus = {
   occurrenceCount?: number;
   kinds?: Record<string, number>;
   coverage?: CoverageItem[];
+  chunkCoverage?: ChunkCoverage;
   candidates?: Candidate[];
   excludedCandidateIds?: string[];
   candidateOverrides?: Record<string, string>;

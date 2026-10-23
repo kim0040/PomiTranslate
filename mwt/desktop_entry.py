@@ -15,6 +15,7 @@ import time
 import traceback
 from pathlib import Path
 
+from mwt.coverage import needs_newer_version_confirmation, public_summary as public_coverage_summary
 from mwt.extract import CATEGORIES, EXTRACTOR_VERSION
 from mwt.reasoning import normalize_reasoning
 from mwt.desktop_settings import (
@@ -390,6 +391,7 @@ def _save_scan_plan(
     scope_fingerprint: str,
     candidates: list[dict],
     external_pack_fingerprints: dict | None = None,
+    chunk_coverage: dict | None = None,
 ) -> None:
     path = _scan_plan_path(data_dir, scan_plan_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -401,6 +403,10 @@ def _save_scan_plan(
         "candidates": candidates,
         "externalPackFingerprints": external_pack_fingerprints or {},
     }
+    if chunk_coverage:
+        # Kept with the plan so translate.start can tell, without trusting the client, that the scan met
+        # chunks newer than this build was tested with. Plans saved before this field existed have none.
+        document["chunkCoverage"] = chunk_coverage
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, path)
@@ -602,6 +608,7 @@ def _resume_candidate(data_dir: Path, world: Path) -> dict:
                     "excludedCandidateIds": list(resume.get("excluded_candidate_ids") or []),
                     "candidateOverrides": candidate_overrides,
                     "externalPackWrites": resume.get("external_pack_writes") if isinstance(resume.get("external_pack_writes"), dict) else {},
+                    **({"chunkCoverage": plan["chunkCoverage"]} if isinstance(plan.get("chunkCoverage"), dict) else {}),
                     "savedAt": float(checkpoint.get("saved_at") or 0),
                     "backupSetId": str(report.get("backup_set_id") or ""),
                     "status": str(report.get("status") or ""),
@@ -1485,6 +1492,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
             return
         scan_plan_id = _scan_plan_id(fingerprint, scope_fingerprint)
         records = list(report.pop("_candidate_records", []))
+        # Reports that predate chunk coverage (or a scan that stopped before reading any chunk) have none.
+        chunk_coverage = public_coverage_summary(report["coverage"]) if isinstance(report.get("coverage"), dict) else None
         if report.get("status") == "completed":
             _save_scan_plan(
                 data_dir,
@@ -1493,6 +1502,7 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                 scope_fingerprint=scope_fingerprint,
                 candidates=records,
                 external_pack_fingerprints={item["path"]: {"sha256": item["sha256"], "parentIdentity": item["parentIdentity"]} for item in pack_inputs if "sha256" in item},
+                chunk_coverage=chunk_coverage,
             )
         saved = _saved(data_dir)
         estimate = _estimate(records, saved, data_dir)
@@ -1526,6 +1536,8 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                         _saved(data_dir).get("scan_options"),
                         _saved(data_dir).get("external_resource_pack_paths", []),
                     ),
+                    # What the scan saw per chunk. ``coverage`` above is the older list of what it was set to read.
+                    **({"chunkCoverage": chunk_coverage} if chunk_coverage else {}),
                     "candidates": report.get("candidate_preview", []),
                 },
             }
@@ -1626,6 +1638,23 @@ def handle(message: dict, report_dir: Path, data_dir: Path, cancel_path: Path | 
                     "error": {
                         "code": "PLAN_INVALIDATED",
                         "message": "The world, target language or resource pack setting changed after Scan Only. Run the scan again.",
+                        "recoverable": True,
+                    },
+                }
+            )
+            return
+        if needs_newer_version_confirmation(stored_plan.get("chunkCoverage")) and body.get("acceptNewerVersion") is not True:
+            emit(
+                {
+                    "v": 1,
+                    "id": request_id,
+                    "type": "response.error",
+                    "error": {
+                        "code": "NEWER_VERSION_UNCONFIRMED",
+                        "message": (
+                            "This world was saved by a newer game version than this app has been tested with. "
+                            "Confirm that you accept this before translating; a backup is always made."
+                        ),
                         "recoverable": True,
                     },
                 }

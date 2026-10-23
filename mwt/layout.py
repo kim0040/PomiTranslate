@@ -67,6 +67,48 @@ def discover_region_dirs(world_dir: Path) -> list[str]:
     return found
 
 
+def region_dir_identity(relative: str) -> tuple[str, str]:
+    """``(dimension, kind)`` of a region directory given relative to the world, such as ``DIM-1/entities``.
+
+    The dimension is ``overworld``, ``the_nether``, ``the_end`` or ``namespace:name`` for a custom one,
+    prefixed ``<world>/`` inside a server root. The kind is ``entities`` or ``region``.
+    """
+    parts = [part for part in relative.replace("\\", "/").split("/") if part and part != "."]
+    kind = "entities" if parts and parts[-1] == "entities" else "region"
+    if parts and parts[-1] in {"region", "entities"}:
+        parts = parts[:-1]
+    prefix = ""
+    if parts and parts[0] not in {"DIM-1", "DIM1", "dimensions"}:
+        prefix, parts = f"{parts[0]}/", parts[1:]
+    if not parts:
+        dimension = "overworld"
+    elif parts == ["DIM-1"]:
+        dimension = "the_nether"
+    elif parts == ["DIM1"]:
+        dimension = "the_end"
+    elif parts[0] == "dimensions" and len(parts) == 3:
+        dimension = f"{parts[1]}:{parts[2]}"
+    else:
+        dimension = "/".join(parts)
+    return f"{prefix}{dimension}", kind
+
+
+def count_unsupported_region_files(world_dir: Path) -> dict[str, int]:
+    """How many ``.mcr`` and ``.linear`` region files the world holds. They are detected, never read."""
+    root = world_dir.resolve()
+    found = {"mcr": 0, "linear": 0}
+    for data_root in world_data_roots(root):
+        if not _is_relative_inside(root, data_root):
+            continue
+        for path in data_root.rglob("*"):
+            if any(part.startswith(".pomi-") for part in path.parts):
+                continue
+            suffix = path.suffix.lower()
+            if suffix in {".mcr", ".linear"} and path.is_file():
+                found[suffix[1:]] += 1
+    return found
+
+
 def detect_write_blockers(world_dir: Path, *, recursive: bool = True) -> list[str]:
     root = world_dir.resolve()
     reasons: list[str] = []

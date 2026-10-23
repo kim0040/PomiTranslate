@@ -10,6 +10,9 @@
   import Pill from '../components/Pill.svelte';
   import SetupNotice from '../components/SetupNotice.svelte';
   import WorldSummary from '../components/WorldSummary.svelte';
+  import ChunkCoverageSummary from '../components/ChunkCoverageSummary.svelte';
+  import NewerVersionNotice from '../components/NewerVersionNotice.svelte';
+  import { hasUninspected, leftOutText, needsNewerConfirmation } from '../lib/chunk-coverage';
   import { exportDocument } from '../lib/document-export';
   import { clock, holdClock } from '../lib/clock.svelte';
   import { warningText } from '../lib/failures';
@@ -35,6 +38,16 @@
   );
   const fileLabel = (file: string) => baseName(file);
   const coverage = $derived(scan?.coverage ?? []);
+  const chunkCoverage = $derived(scan?.chunkCoverage);
+  // A scan that left chunks or files out cannot say the world has no text.
+  const partial = $derived(hasUninspected(chunkCoverage));
+  const leftOut = $derived(chunkCoverage ? leftOutText(chunkCoverage, {
+    status: (status) => t(`chunks.status.${status}` as MessageKey),
+    file: (note) => note.kind === 'detected'
+      ? t('chunks.files.detected', { count: formatNumber(note.count, app.locale), kind: note.format })
+      : t(note.kind === 'unreadable' ? 'chunks.files.unreadable' : 'chunks.files.notInspected', { count: formatNumber(note.count, app.locale) }),
+    number: (value) => formatNumber(value, app.locale)
+  }) : '');
   const scanned = $derived(coverage.filter((item) => item.scanned));
   const notScanned = $derived(coverage.filter((item) => !item.scanned));
   const blockerLine = (code: string) => {
@@ -106,9 +119,13 @@
       </Callout>
     {/if}
 
+    {#if needsNewerConfirmation(chunkCoverage)}
+      <NewerVersionNotice />
+    {/if}
+
     {#if done && !blockers.length}
       {#if scan.candidateCount === 0}
-        <Callout tone="warning" title={t('scan.none')}>{t('scan.noneHelp')}</Callout>
+        <Callout tone="warning" title={t('scan.none')}>{partial ? t('scan.noneHelpPartial', { details: leftOut }) : t('scan.noneHelp')}</Callout>
       {:else}
         <StatGrid
           label={t('scan.found', { count: formatNumber(scan.candidateCount, app.locale) })}
@@ -140,6 +157,10 @@
           {/each}
         </ul>
       </Callout>
+    {/if}
+
+    {#if chunkCoverage}
+      <ChunkCoverageSummary coverage={chunkCoverage} />
     {/if}
 
     {#if coverage.length}

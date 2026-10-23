@@ -46,6 +46,7 @@ import { LISTABLE_PROVIDERS } from './recommended-models';
 import { resourcePackOptions } from './resource-pack';
 import { assessReset, type ResetShortfall } from './reset';
 import { CandidateSource } from './candidates.svelte';
+import { needsNewerConfirmation } from './chunk-coverage';
 import { detectLocale, hasMessage, setLocale, t, type Locale, type MessageKey } from './i18n/index.svelte';
 import { applyTheme, type ThemeChoice } from './theme';
 import { emptyProgress, reduceProgress, type JobProgress } from './workflow';
@@ -193,6 +194,8 @@ export class AppState {
   recoveryJobId = $state('');
 
   scan = $state<ScanResult | null>(null);
+  /** The one confirmation per scan that its chunks come from a newer game version than this app was tested with. */
+  newerAccepted = $state(false);
   /** When the scan on screen was made (ms), for the return-visit summary. */
   scanAt = $state(0);
   candidates = new CandidateSource(() => ({
@@ -310,7 +313,12 @@ export class AppState {
 
   get canRun(): boolean {
     return !!this.scan && this.scan.status === 'completed' && !this.scan.writeBlockers?.length &&
-      this.includedCount > 0 && !this.busy && this.runBlockers.length === 0;
+      this.includedCount > 0 && !this.busy && this.runBlockers.length === 0 && !this.newerPending;
+  }
+
+  /** The scan met chunks newer than the newest tested version and the person has not confirmed yet. */
+  get newerPending(): boolean {
+    return needsNewerConfirmation(this.scan?.chunkCoverage) && !this.newerAccepted;
   }
 
   get stepReached(): Record<Step, boolean> {
@@ -950,6 +958,7 @@ export class AppState {
     this.draftState = 'idle';
     this.reviewVersion += 1;
     this.scan = null;
+    this.newerAccepted = false;
     this.scanAt = 0;
     this.candidates.reset('');
     this.excluded.clear();
@@ -1170,12 +1179,14 @@ export class AppState {
       occurrenceCount: resumable.occurrenceCount,
       kinds: resumable.kinds,
       coverage: resumable.coverage,
+      chunkCoverage: resumable.chunkCoverage,
       providerRequests: 0,
       fingerprint: resumable.fingerprint,
       scanPlanId: resumable.scanPlanId,
       dryRun: true,
       candidates: resumable.candidates || []
     };
+    this.newerAccepted = false;
     this.excluded.clear();
     for (const id of resumable.excludedCandidateIds || []) this.excluded.add(id);
     this.overrides = { ...(resumable.candidateOverrides || {}) };
@@ -1328,7 +1339,8 @@ export class AppState {
         model: this.settings.model,
         ...(this.settings.provider === 'custom' ? { baseUrl: this.settings.base_url } : {}),
         wireFormat: this.settings.wire_format,
-        failurePolicy: this.failurePolicy
+        failurePolicy: this.failurePolicy,
+        ...(this.newerAccepted && needsNewerConfirmation(this.scan.chunkCoverage) ? { acceptNewerVersion: true } : {})
       });
       this.result = outcome;
       this.resultAt = Date.now();
@@ -1344,6 +1356,8 @@ export class AppState {
       }
     } catch (cause) {
       this.fail(cause);
+      // The core asks again: the confirmation did not reach it, so it must be given again.
+      if (cause instanceof BackendError && cause.code === 'NEWER_VERSION_UNCONFIRMED') this.newerAccepted = false;
       this.step = this.scan ? 'run' : 'scan';
       // An unfinished job of this world must be settled first: take the person to where that happens.
       if (cause instanceof BackendError && cause.code === 'RECOVERY_REQUIRED') await this.openInterrupted();

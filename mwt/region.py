@@ -256,6 +256,21 @@ def region_coordinates(region_path: Path) -> tuple[int, int]:
     return 0, 0
 
 
+def count_populated_chunks(region_path: Path) -> int | None:
+    """Chunks a region file declares in its header, without reading any of them. None if unreadable."""
+    try:
+        with region_path.open("rb") as stream:
+            locations = stream.read(SECTOR)
+    except OSError:
+        return None
+    if len(locations) < SECTOR:
+        return None
+    return sum(
+        1 for index in range(1024)
+        if int.from_bytes(locations[index * 4 : index * 4 + 3], "big") and locations[index * 4 + 3]
+    )
+
+
 def external_chunk_path(region_path: Path, index: int) -> Path:
     region_x, region_z = region_coordinates(region_path)
     x, z = chunk_coords(index, region_x, region_z)

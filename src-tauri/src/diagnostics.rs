@@ -382,6 +382,7 @@ const CORE_MODULES: &[&str] = &[
     "mwt/__init__.py",
     "mwt/__main__.py",
     "mwt/backup_admin.py",
+    "mwt/coverage.py",
     "mwt/desktop_entry.py",
     "mwt/desktop_legacy_import.py",
     "mwt/desktop_prompt.py",

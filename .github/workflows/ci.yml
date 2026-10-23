@@ -52,6 +52,8 @@ jobs:
         run: python tests/test_settings_transaction.py
       - name: Scan scope settings
         run: python tests/test_scan_settings.py
+      - name: Chunk DataVersion coverage and newer-version confirmation
+        run: python tests/test_chunk_coverage.py
       - name: Provider usage and credential redaction
         run: python tests/test_desktop_usage.py
       - name: Desktop prompt enhancement
