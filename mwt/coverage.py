@@ -19,6 +19,11 @@ same counts so a resumed scan can replace one file without double counting. When
 than that, the surplus is counted per status under ``overflow`` (never as unobserved): the distribution then says
 it is truncated. The facts that must not depend on the retained keys (lowest and highest DataVersion, whether a
 chunk had none) are kept as their own exact values per file, so ``mixed``, ``missing`` and the ranges stay exact.
+
+A checkpoint stays readable by the readers from before the overflow was kept apart: it also exports the overflow
+as the row those readers folded it into (the unobserved key of its status), so their totals do not drop. The
+export says so with ``overflow_folded``, and this reader takes that row out again instead of counting it twice
+or calling known observations unobserved.
 """
 
 from __future__ import annotations
@@ -50,7 +55,7 @@ FILE_STATES = (FILE_SCANNED, FILE_UNREADABLE, FILE_NOT_INSPECTED)
 
 MAX_KEYS_PER_FILE = 64
 MAX_ENTRIES_PER_GROUP = 200
-SUMMARY_VERSION = 1  # additive fields (saw_missing, overflow_by_status, write_blocked, partial) keep it readable both ways
+SUMMARY_VERSION = 1  # additive fields (saw_missing, overflow_by_status, overflow_folded, write_blocked, partial) keep it readable both ways
 
 Key = tuple[str, Any, Any, str]  # (version state, DataVersion or None, compression or None, status)
 
@@ -98,10 +103,18 @@ class FileCoverage:
         self.counts[key] = self.counts.get(key, 0) + count
 
     def export(self) -> dict[str, Any]:
+        # The overflow also goes into ``counts`` as the earlier format folded it (into the unobserved key of its
+        # status), so a reader that only knows ``counts`` still counts every chunk. ``overflow_folded`` tells this
+        # reader to take the row out again.
+        counts = dict(self.counts)
+        for status, count in self.overflow.items():
+            key: Key = (UNOBSERVED, None, None, status)
+            counts[key] = counts.get(key, 0) + count
         return {
             "dimension": self.dimension, "kind": self.kind, "state": self.state,
-            "counts": [[*key, count] for key, count in sorted(self.counts.items(), key=_sort_key)],
+            "counts": [[*key, count] for key, count in sorted(counts.items(), key=_sort_key)],
             "overflow": sum(self.overflow.values()), "overflow_by_status": dict(sorted(self.overflow.items())),
+            "overflow_folded": bool(self.overflow),
             "low": self.low, "high": self.high, "saw_missing": self.saw_missing, "write_blocked": self.write_blocked,
         }
 
@@ -136,6 +149,17 @@ class FileCoverage:
                     return None
                 if count:
                     record.overflow[status] = count
+            if data.get("overflow_folded") is True:
+                # The legacy row written beside ``overflow_by_status``: it is the overflow, not unobserved chunks.
+                for status, count in record.overflow.items():
+                    key = (UNOBSERVED, None, None, status)
+                    left = record.counts.get(key, 0) - count
+                    if left < 0:
+                        return None
+                    if left:
+                        record.counts[key] = left
+                    else:
+                        record.counts.pop(key, None)
         # A checkpoint from before saw_missing was kept: the retained keys are all it can say.
         record.saw_missing = data.get("saw_missing") is True or any(key[0] == MISSING for key in record.counts)
         record.write_blocked = data.get("write_blocked") is True

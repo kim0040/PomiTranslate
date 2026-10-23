@@ -917,6 +917,63 @@ def test_explicit_type_wins_and_object_payloads_are_not_text() -> None:
     record("comp02.fix_explicit_type_and_payloads")
 
 
+def test_effective_kind_is_decided_before_the_fallback() -> None:
+    """R3: a recognised explicit type outranks the discriminator keys, in JSON and in direct NBT."""
+    wt = translator()
+    text_with_translate = {"type": "text", "text": "Visible label", "translate": "unused.key", "fallback": "Unused fallback"}
+    object_with_translate = {
+        "type": "object",
+        "object": "player",
+        "player": "SafeName",
+        "translate": "unused.key",
+        "fallback": {"text": "Visible object fallback"},
+    }
+    assert walked(wt, text_with_translate) == ["Visible label"]
+    assert walked(wt, object_with_translate) == ["Visible object fallback"]
+    # Without a type the keys still decide: translate, then the object keys.
+    assert walked(wt, {"translate": "k.v", "fallback": "Tr fallback"}) == ["Tr fallback"]
+    assert walked(wt, {"translate": "k.v", "player": "SafeName", "fallback": {"text": "Not read"}}) == []
+    assert walked(wt, {"type": None, "translate": "k.v", "fallback": "Null type"}) == ["Null type"]
+    assert walked(wt, {"type": "translatable", "translate": "k.v", "fallback": "Typed translatable"}) == ["Typed translatable"]
+    # A type nobody recognises keeps the reading from before: translate marks a translatable component.
+    assert walked(wt, {"type": "minecraft:text", "translate": "k.v", "fallback": "Other namespace"}) == ["Other namespace"]
+    assert walked(wt, {"type": 5, "translate": "k.v", "fallback": "Not a string"}) == ["Not a string"]
+    # The patcher follows the same decision: the inactive fallback stays as written.
+    node = copy.deepcopy(text_with_translate)
+    wt.patch_json_component(node, {"Visible label": "Changed", "Unused fallback": "Oops"})
+    assert node == {**text_with_translate, "text": "Changed"}
+    node = copy.deepcopy(object_with_translate)
+    wt.patch_json_component(node, {"Visible object fallback": "Changed"})
+    assert node == {**object_with_translate, "fallback": {"text": "Changed"}}
+
+    assert nbt_texts(
+        wt,
+        w_compound(
+            "CustomName",
+            w_string("type", "text"),
+            w_string("text", "Visible label"),
+            w_string("translate", "unused.key"),
+            w_string("fallback", "Unused fallback"),
+        ),
+    ) == ["Visible label"]
+    assert nbt_texts(
+        wt,
+        w_compound(
+            "CustomName",
+            w_string("type", "object"),
+            w_string("object", "player"),
+            w_string("player", "SafeName"),
+            w_string("translate", "unused.key"),
+            w_compound("fallback", w_string("text", "Visible object fallback")),
+        ),
+    ) == ["Visible object fallback"]
+    assert nbt_texts(
+        wt, w_compound("CustomName", w_string("translate", "k.v"), w_string("player", "SafeName"), w_string("fallback", "Translate wins untyped"))
+    ) == ["Translate wins untyped"]
+    assert nbt_texts(wt, w_compound("CustomName", w_string("translate", "k.v"), w_string("fallback", "Tr fallback"))) == ["Tr fallback"]
+    record("comp02.review_effective_component_kind")
+
+
 def review_fix_sign_lines(t: Tr) -> list[bytes]:
     """JSON-in-string components as older worlds and command blocks write them, noncompact on purpose."""
     inner = '{ "text" : "%s", "font" : "example:font", "color" : "\\u0072ed" }' % t("Hover blade")
@@ -1059,6 +1116,7 @@ def run_all(_tmp: Path | None = None) -> list[str]:
     test_legacy_hover_payloads_are_still_collected()
     test_legacy_hover_payloads_in_nbt_are_still_collected()
     test_explicit_type_wins_and_object_payloads_are_not_text()
+    test_effective_kind_is_decided_before_the_fallback()
     test_review_fixes_world_scan_write_reopen_restore()
     return list(RESULTS)
 

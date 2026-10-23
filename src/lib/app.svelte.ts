@@ -318,6 +318,15 @@ export class AppState {
 
   /** The interrupted job whose continuation waits for the newer-version confirmation, shown in the recovery panel itself. */
   continuation = $state<InterruptedJob | null>(null);
+  /** The saved scan the continuation was asked for; the confirmation is only sent while the loaded resume and scan are still this one. */
+  private continuationPlan = '';
+  /**
+   * Single flight for starting or resuming a translation: taken before the first await (the review is
+   * stored before the job takes the core) and held until the run has ended. The recovery panel disables its Continue button on it.
+   */
+  starting = $state(false);
+  /** Bumped whenever the loaded job context is dropped; a recovery lookup that began under an older value is discarded. */
+  private recoveryGeneration = 0;
   /** The last start was refused with NEWER_VERSION_UNCONFIRMED, so the confirmation is asked again where it was asked. */
   private newerRefused = false;
 
@@ -965,6 +974,8 @@ export class AppState {
     this.scan = null;
     this.newerAccepted = false;
     this.continuation = null;
+    this.continuationPlan = '';
+    this.recoveryGeneration++;
     this.scanAt = 0;
     this.candidates.reset('');
     this.excluded.clear();
@@ -1124,6 +1135,7 @@ export class AppState {
     if (this.isBusy) return;
     if (path !== this.worldDir && !(await this.mayDiscard('world'))) return;
     if (this.isBusy) return;
+    if (path !== this.worldDir) this.recoveryGeneration++;
     this.banner = null;
     try {
       const inspected = await callBackend<WorldInspection>('world.inspect', { worldDir: path });
@@ -1316,13 +1328,31 @@ export class AppState {
     this.progress = reduceProgress(this.progress, event);
   }
 
+  /** Run `work` as the one start/resume in flight; a second call before it has ended does nothing. */
+  private async singleFlight(work: () => Promise<void>): Promise<void> {
+    if (this.starting) return;
+    this.starting = true;
+    try {
+      await work();
+    } finally {
+      this.starting = false;
+    }
+  }
+
   async startTranslate(options: { resume?: boolean; fromInterrupted?: boolean } = {}): Promise<void> {
-    if (!this.scan || this.isBusy || this.settingsRecoveryRequired || this.credentialRecovery.has(this.settings.provider)) return;
+    await this.singleFlight(() => this.runTranslate(options));
+  }
+
+  private async runTranslate(options: { resume?: boolean; fromInterrupted?: boolean }): Promise<void> {
+    const loaded = this.scan;
+    if (!loaded || this.isBusy || this.settingsRecoveryRequired || this.credentialRecovery.has(this.settings.provider)) return;
     // Continuing an interrupted job is the one start allowed while it is open.
     if (this.interruptedHere.length && !options.fromInterrupted) return;
     // The review is stored before the job takes the core; a draft that cannot be stored is not lost
     // because the job's own checkpoint keeps the reviewed choices.
     await this.storeReview();
+    // A scan or reset that began while the review was being stored has replaced what was about to be sent.
+    if (this.scan !== loaded || this.isBusy) return;
     this.busy = 'translate';
     this.cancelling = false;
     this.newerRefused = false;
@@ -1544,46 +1574,71 @@ export class AppState {
 
   /** "Continue the remaining work" of a partial job: the same checkpoint, resumed. */
   async continueInterrupted(job: InterruptedJob): Promise<void> {
-    if (this.isBusy || !samePath(job.worldPath, this.worldDir)) return;
-    // A confirmation already given for this same saved scan (on the run step) still counts after it is loaded again.
-    const confirmedPlan = this.newerAccepted ? this.scan?.scanPlanId : '';
-    try {
-      this.applyResume(await callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir }));
-    } catch (cause) {
-      this.fail(cause);
-      return;
-    }
-    if (!this.resume || !this.scan) {
-      this.notify(t('interrupted.continueUnavailable'), 'error');
-      return;
-    }
-    if (confirmedPlan && confirmedPlan === this.scan.scanPlanId) this.newerAccepted = true;
-    if (needsNewerConfirmation(this.scan.chunkCoverage) && !this.newerAccepted) {
-      // Ask here, in the recovery panel, with the saved job still selected; nothing is sent until it is ticked.
-      this.continuation = job;
-      return;
-    }
-    await this.runContinuation();
+    if (this.starting || this.isBusy || !samePath(job.worldPath, this.worldDir)) return;
+    await this.singleFlight(async () => {
+      // A confirmation already given for this same saved scan (on the run step) still counts after it is loaded again.
+      const confirmedPlan = this.newerAccepted ? this.scan?.scanPlanId : '';
+      const generation = this.recoveryGeneration;
+      let status: ResumeStatus;
+      try {
+        status = await callBackend<ResumeStatus>('resume.status', { worldDir: this.worldDir });
+      } catch (cause) {
+        if (generation === this.recoveryGeneration) this.fail(cause);
+        return;
+      }
+      // A scan, reset, world switch or cancel happened while the lookup ran: its answer belongs to a context that is gone.
+      if (generation !== this.recoveryGeneration) return;
+      this.applyResume(status);
+      if (!this.resume || !this.scan) {
+        this.notify(t('interrupted.continueUnavailable'), 'error');
+        return;
+      }
+      if (confirmedPlan && confirmedPlan === this.scan.scanPlanId) this.newerAccepted = true;
+      if (needsNewerConfirmation(this.scan.chunkCoverage) && !this.newerAccepted) {
+        // Ask here, in the recovery panel, with the saved job still selected; nothing is sent until it is ticked.
+        this.continuation = job;
+        this.continuationPlan = this.scan.scanPlanId;
+        return;
+      }
+      await this.runContinuation();
+    });
   }
 
   /** The newer-version box of the recovery panel is ticked: send the continuation with that confirmation. */
   async confirmContinuation(): Promise<void> {
-    if (!this.continuation || this.isBusy || !this.newerAccepted || !this.scan || !this.resume) return;
-    await this.runContinuation();
+    if (this.starting || !this.continuation || this.isBusy || !this.newerAccepted || !this.scan || !this.resume) return;
+    await this.singleFlight(async () => {
+      const job = this.continuation;
+      // Only the job, scan and checkpoint the question was asked about may be sent.
+      if (!job || !samePath(job.worldPath, this.worldDir) || this.continuationPlan !== this.scan?.scanPlanId || this.resume?.scanPlanId !== this.scan?.scanPlanId) {
+        this.cancelContinuation();
+        this.notify(t('interrupted.continueUnavailable'), 'error');
+        return;
+      }
+      await this.runContinuation();
+    });
   }
 
   /** Leave the confirmation without continuing; the job stays open and the box is unticked. */
   cancelContinuation(): void {
+    this.recoveryGeneration++;
     this.continuation = null;
+    this.continuationPlan = '';
     this.newerAccepted = false;
   }
 
+  /** Runs inside the single flight of continueInterrupted / confirmContinuation. */
   private async runContinuation(): Promise<void> {
+    if (!this.resume || !this.scan || this.resume.scanPlanId !== this.scan.scanPlanId) {
+      this.notify(t('interrupted.continueUnavailable'), 'error');
+      return;
+    }
     this.step = 'run';
-    await this.startTranslate({ resume: true, fromInterrupted: true });
+    await this.runTranslate({ resume: true, fromInterrupted: true });
     // Refused for the confirmation: stay on it (it is asked again) instead of leaving for the world screen.
     if (this.newerRefused) return;
     this.continuation = null;
+    this.continuationPlan = '';
     // A finished continuation settles the job; its list entry is refreshed from the core.
     await this.openInterrupted();
     if (!this.interruptedHere.length) this.step = 'result';
