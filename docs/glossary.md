@@ -6,24 +6,33 @@
 
 - 전체 월드 공용: `<data_dir>/glossary/global.json`
 - 월드별: `<data_dir>/glossary/worlds/<worldKey>.json` (`worldKey`는 백업 journal과 같은 `world_key()`)
-- 한 파일에 항목 최대 2000개. `source` 1~200자, `target` 0~200자, `note` 0~300자. `mode`는 `translate`(항상 `target`으로 번역) 또는 `keep`(원문 그대로). `source`가 같은 항목(대소문자 무시, `caseSensitive`면 구분)은 둘 수 없다.
-- 월드별 항목이 같은 `source`의 전체 항목을 덮어쓴다.
-- 쓰기는 원자적·내구성 있게 한다. 읽을 수 없는 파일은 `<이름>.damaged-<시각>.json`으로 옆에 보관하고 빈 용어집으로 취급한다(번역은 멈추지 않는다).
-- `revision`으로 낙관적 충돌을 막는다. 오래된 `baseRevision`은 `GLOSSARY_CONFLICT`.
+- 한 파일에 항목 최대 2000개. `source` 1~200자, `target` 0~200자, `note` 0~300자. `mode`는 `translate`(항상 `target`으로 번역) 또는 `keep`(원문 그대로).
+- `translate` 항목은 `target`이 비어 있으면 저장하지 않는다(`GLOSSARY_INVALID`, `entries[i].target`). "빈 번역"은 따를 수 있는 규칙이 아니므로, 그대로 두려면 `keep`을 쓴다. `source`/`target`에는 줄바꿈 등 제어 문자를 쓸 수 없고 `note`만 줄바꿈·탭을 허용한다. 짝이 없는 서로게이트 같은 잘못된 유니코드도 필드 경로와 함께 `GLOSSARY_INVALID`다.
+- 같은 `source` 판정은 접은 문자열(`fold_key` = `casefold`)로 한다. 대소문자를 구분하는 두 항목은 대소문자만 달라도 함께 둘 수 있지만(`Mira`, `mira`), 대소문자를 구분하지 않는 항목은 접은 문자열이 같은 모든 항목과 충돌한다(`MIRA`(구분) + `mira`(구분 안 함)은 거부, `Straße` + `STRASSE`도 거부).
+- 월드별 항목이 접은 `source`가 같은 전역 항목을 통째로 덮어쓴다(양쪽의 `caseSensitive`와 무관). 번역에 쓰는 병합 목록의 항목 id는 파일 안에서만 유일하므로 `global:<id>` / `world:<id>`로 범위를 붙인다(경고의 `entryId`도 이 값).
+- 쓰기는 원자적·내구성 있게 한다. 읽을 수 없는 파일(깨진 JSON, 알 수 없는 버전, UTF-8 아님, 잘못된 `revision`/`updatedAt`, 잘못된 유니코드)은 `<이름>.damaged-<시각>.json`으로 옆에 보관하고 빈 용어집으로 취급한다(번역은 멈추지 않는다).
+- 파일 크기 한도는 스키마가 허용하는 최악의 UTF-8 크기(글자당 4바이트 + 키/구두점)에 맞춘다(약 5.9 MB). 저장 전에 직렬화 크기를 확인하므로, 저장된 용어집이 읽을 때 한도에 걸려 사라지는 일은 없다.
+- `revision`으로 낙관적 충돌을 막는다. 오래된 `baseRevision`은 `GLOSSARY_CONFLICT`. `set`/`import`는 읽기·비교·쓰기를 문서별 프로세스 간 잠금(`<문서>.lock`, OS 파일 잠금) 안에서 한다. 최대 5초 기다리고 못 얻으면 `GLOSSARY_BUSY`(복구 가능, 잠시 후 다시 시도)다. 다른 창·프로세스가 같은 revision을 동시에 받아들이는 일은 없다. 잠금을 지원하지 않는 파일 시스템에서는 프로세스 안 잠금만 쓴다.
 
 ## 요청 (질의 lane, 월드 잠금 없음)
 
-`glossary.get` / `glossary.set` / `glossary.import` / `glossary.export`. 입력 오류는 `GLOSSARY_INVALID`이며 메시지는 `entries[3].source: ...`처럼 필드 경로로 시작한다. 저장 실패는 `GLOSSARY_WRITE_FAILED`.
+`glossary.get` / `glossary.set` / `glossary.import` / `glossary.export`. 입력 오류는 `GLOSSARY_INVALID`이며 메시지는 `entries[3].source: ...`처럼 필드 경로로 시작한다. 저장 실패는 `GLOSSARY_WRITE_FAILED`, 잠금 대기 초과는 `GLOSSARY_BUSY`.
 
 CSV/TSV는 `source,target[,mode,note[,caseSensitive]]` 열이며 머리글은 선택, UTF-8(BOM 있어도 없어도 됨). 따옴표·쉼표·줄바꿈이 든 칸을 지원한다. 내보내기는 스프레드시트가 한글을 바로 읽도록 BOM을 붙인다.
 
+**수식 방지**: 내보낼 때 `source`/`target`/`note` 칸이 `=`, `+`, `-`, `@`, 탭, CR로 시작하면 앞에 작은따옴표 하나를 붙인다(스프레드시트가 수식으로 실행하지 않게). 이미 작은따옴표로 시작하고 그 뒤가 수식 문자인 글(`'=x`)은 따옴표를 하나 더 붙인다. 가져올 때는 "작은따옴표 뒤가 수식 문자"인 칸에서 따옴표 하나를 벗긴다. 그래서 내보내기 → 가져오기는 글자를 그대로 되돌린다. 손으로 쓴 파일의 `'=Sum`도 `=Sum`으로 읽는다.
+
 ## 번역에서의 사용
 
-- 배치마다 그 배치 텍스트에 실제로 나오는 항목만(영문자·숫자로 시작/끝나는 `source`는 낱말 단위, 최대 80개, 긴 `source` 먼저) 시스템 프롬프트 뒤 `[용어집]` 블록으로 보낸다. 용어는 JSON 문자열로 인용해 데이터로만 취급한다.
-- 번역 뒤 검사: 기대한 `target`(translate) 또는 원문(keep)이 없으면 그 문자열만 한 번 더 요청하고, 그래도 어긋나면 그대로 받아들이고 경고 `glossary_mismatch`(항목 id 포함)를 기록한다. 실패가 아니다.
-- 대상 언어가 한국어·일본어·중국어일 때, 서식 코드(`§x`) 바로 뒤에 원문 단어의 앞 글자가 1~3자 남은 경우(`§lcrypt` → `§lc지하실`)를 감지해 한 번 재시도하고, 남으면 경고 `format_residue`만 기록한다(자동으로 지우지 않는다). 원문 낱말을 그대로 둔 경우(`§6TNT` → `§6TNT는`)는 잔여가 아니다.
-- 경고 개수는 `translation_progress.warnings`와 보고서 `translation_warnings`(코드별 개수), `translation_warning_samples`에 담긴다.
-- 직접 번역(검토 화면)은 항상 용어집보다 우선하며 용어집 검사를 받지 않는다.
+- 배치마다 그 배치 텍스트에 실제로 나오는 항목만(최대 80개, 긴 `source` 먼저) 시스템 프롬프트 뒤 `[용어집]` 블록으로 보낸다. 용어는 JSON 문자열로 인용해 데이터로만 취급한다. 80개를 넘게 일치하면 앞의 80개만 프롬프트에 넣고, 나머지는 그 배치에서 강제하지 않으며 문자열마다 경고 `glossary_truncated`(항목 id 포함)로 센다.
+- **일치 규칙**
+  - 대소문자 무시(`caseSensitive`가 아니면)는 접은 문자열 기준이다. 선택 단계와 번역 뒤 검사가 같은 접기 규칙을 쓴다(`Straße`는 `STRASSE`와 일치하되 `ß`의 절반만 걸치는 일치는 거부).
+  - 낱말 단위 경계는 `source`의 가장자리 글자가 띄어쓰기를 쓰는 문자(라틴·그리스·키릴 글자와 ASCII 숫자)일 때만 적용한다. 그 경우 바로 옆 글자가 같은 종류의 글자/숫자이면 일치하지 않는다(`cat`은 `concat`, `cats`, `cat5`에는 안 걸리고 `猫cat猫`, `cat_dog`에는 걸린다). 한글·가나·한자(및 띄어쓰기 없는 문자) 가장자리는 부분 문자열로 일치한다(`한국`은 `한국어`, `대한한국어`에 걸리고, `猫`는 `熊猫`에 걸린다). 한국어 조사가 명사에 붙고 일본어·중국어에는 띄어쓰기가 없기 때문이다.
+  - 서식 코드(`§x`, 프로젝트 토크나이저의 패턴)는 경계다. `Meet §lElder Mira`에서 `Elder Mira`가 일치하고 `§l`의 `l`은 낱말에 속하지 않는다. 코드가 용어 가운데 끼면(`Elder §lMira`) 그 용어는 나뉜 것으로 본다. `source` 자체에 `§`가 들어 있으면 원문 그대로 찾는다. `&` 색 코드는 프로젝트 토크나이저가 서식 코드로 다루지 않으므로 경계가 아니다.
+- 번역 뒤 검사: 기대한 `target`(translate) 또는 원문(keep)이 없으면 그 문자열만 한 번 더 요청하고, 그래도 어긋나면 그대로 받아들이고 경고 `glossary_mismatch`(항목 id 포함)를 기록한다. 실패가 아니다. 이 재시도 요청에서 인증·설정·리다이렉트 오류가 나면 작업을 바로 멈추고, 속도 제한·장애·거부는 일반 요청과 같은 연속 실패 차단기에 센다(이전에는 문자열마다 조용히 다시 요청했다).
+- 대상 언어가 한국어·일본어·중국어일 때, 서식 코드(`§x`) 바로 뒤에 원문 단어의 앞 글자가 1~3자 남은 경우(`§lcrypt` → `§lc지하실`)를 감지해 한 번 재시도하고, 남으면 경고 `format_residue`만 기록한다(자동으로 지우지 않는다). 대상 언어는 언어 코드(`ko`, `ko-KR`, `ja`, `zh-Hans`, `zh_TW` 등. `ko-Latn`처럼 `Latn`이 붙은 로마자 표기는 제외)이거나 언어 이름과 정확히 같은 글(`한국어`, `日本語`, `中文`, `Korean`...)일 때만 켠다. `English (not Korean)`처럼 설명에 이름이 들어 있는 글은 켜지 않는다. 원문 낱말을 그대로 둔 경우(`§6TNT` → `§6TNT는`)는 잔여가 아니고, 같은 코드 뒤에 같은 낱말이 원문에 있으면(다른 낱말이 같은 접두사를 공유해도, 예: `§6CAT §6CATERPILLAR` → `§6CAT는 §6캐터필러`) 그 낱말 수만큼 잔여로 보지 않는다.
+- 경고 개수는 `translation_progress.warnings`와 보고서 `translation_warnings`(코드별 개수), `translation_warning_samples`에 담긴다. 경고는 답변 로그(`*.batches.jsonl`)에도 `quality` 기록으로 남아, 체크포인트 없이 로그에서 복구한 답변도 경고를 되찾는다. 기록이 없는 답변(검사가 끝나기 전에 끊긴 경우)은 복구 때 요청 없이 같은 검사를 다시 돌린다.
+- 직접 번역(검토 화면)은 항상 용어집보다 우선하며 용어집 검사를 받지 않는다. 이미 번역 캐시에 있는 문자열도 직접 번역이 덮어쓴다.
 - 용어집 지문(fingerprint)이 바뀐 뒤 이어하기(resume)하면 월드에 이미 쓴 상태는 유지하고 번역 캐시와 답변 로그는 통째로 버린다(경고 `glossary_changed`).
 
 검증: `python tests/test_glossary.py`, `tests/test_glossary_translation.py`, `tests/test_format_residue.py`. 실제 모델 응답에서의 효과는 합성 fixture로만 확인했고 실제 provider 호출은 하지 않았다.

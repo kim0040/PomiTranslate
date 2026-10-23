@@ -38,7 +38,7 @@ from llm_backends import (
 
 from mwt import nbtio as nbt
 from mwt.format_residue import RESIDUE_WARNING, find_residue, target_script
-from mwt.glossary import MISMATCH_WARNING, Glossary
+from mwt.glossary import MAX_TERMS_PER_BATCH, MISMATCH_WARNING, TRUNCATED_WARNING, Glossary
 from mwt.durable import CommittedWriteError, atomic_write_bytes, atomic_write_text, fsync_dir, fsync_fd, replace as durable_replace
 from mwt.extract import TextExtractionMixin, TextRef
 from mwt.locking import object_identity
@@ -680,6 +680,28 @@ class BatchLog:
                 translations.update({k: v for k, v in item["translations"].items() if isinstance(k, str) and isinstance(v, str)})
         return translations, counts
 
+    @staticmethod
+    def read_quality(path: Path) -> dict[str, list[dict[str, Any]]]:
+        """The quality warnings the log recorded per source text (``kind: quality``), the latest record winning.
+
+        A text without a record was either clean or not reviewed before the crash; the caller re-checks those.
+        """
+        warnings: dict[str, list[dict[str, Any]]] = {}
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return warnings
+        for line in raw.splitlines():
+            try:
+                item = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if isinstance(item, dict) and item.get("kind") == "quality" and isinstance(item.get("warnings"), dict):
+                for text, items in item["warnings"].items():
+                    if isinstance(text, str) and isinstance(items, list):
+                        warnings[text] = [entry for entry in items if isinstance(entry, dict)]
+        return warnings
+
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
 
@@ -797,10 +819,16 @@ class BatchTranslator:
         return prompt
 
     def pending(self, texts: list[str]) -> list[str]:
-        """Texts that still need a provider call: not cached and not manually overridden."""
+        """Texts that still need a provider call: not cached and not manually overridden.
+
+        A manual override always wins: it replaces a translation that is already cached (and the quality
+        warnings that translation carried), so an edit made after the text was translated is never lost.
+        """
         for text in texts:
-            if text not in self.cache and text in self.overrides:
+            if text in self.overrides and self.cache.get(text) != self.overrides[text]:
                 self.cache[text] = self.overrides[text]
+                with self._lock:
+                    self.quality_warnings.pop(text, None)
         return [text for text in texts if text not in self.cache]
 
     def lookup(self, texts: list[str]) -> dict[str, str]:
@@ -982,7 +1010,10 @@ class BatchTranslator:
     def _retry_once(self, text: str, hints: tuple[str, ...], budget: dict[str, Any]) -> str | None:
         """One more request for one string, charged to the batch's request budget. None when it gave nothing usable.
 
-        A provider failure here is not a translation failure: the first answer stands.
+        A provider failure here is not a translation failure: the first answer stands. It is still counted like
+        any other failed request (``_note_failure``): a fatal kind (bad key, wrong endpoint, refused redirect)
+        stops the job, and failures feed the same outage and rejection breakers, so a broken provider cannot be
+        hammered once per string.
         """
         if budget["left"] <= 0:
             return None
@@ -1001,9 +1032,16 @@ class BatchTranslator:
             self._charge_extra_requests(budget, requests_before)
         except (TranslationCancelled, ProviderUnavailable):
             raise
-        except Exception:
+        except Exception as exc:
             self._charge_extra_requests(budget, requests_before)
+            if failure_kind(exc) is not None:
+                delay = self._note_failure(exc, attempt=1, max_retries=1, batch_size=1)  # raises when the job must stop
+                if failure_kind(exc) == "rate_limit":
+                    self.wait(delay)
             return None
+        with self._lock:
+            self.consecutive_failures = 0
+            self.consecutive_rejections = 0
         answer = parsed.get("0")
         return answer if isinstance(answer, str) and answer.strip() else None
 
@@ -1014,17 +1052,25 @@ class BatchTranslator:
         replaces the answer only when it has fewer problems and keeps the format tokens; otherwise the first
         answer stands. What is still wrong is recorded as a warning (``glossary_mismatch`` with the entry id,
         ``format_residue``), never as a failure. Retries are charged to ``budget`` like any other request.
+
+        Only the entries that fit into the batch's term block (``Glossary.select``) are enforced: one that
+        matched but was cut by the limit was never shown to the model, so it is recorded as
+        ``glossary_truncated`` instead. The warnings of the batch are appended to the answer log, so they
+        survive a crash together with the answers they belong to.
         """
         if not self.glossary and not self.residue_script:
             return answered
         result = dict(answered)
         improved: dict[str, str] = {}
+        reviewed: dict[str, list[dict[str, Any]]] = {}
+        shown = {id(entry) for entry in self.glossary.select(texts)}
         for text in texts:
             candidate = result.get(text)
             if not isinstance(candidate, str):
                 continue
             try:
-                terms = self.glossary.select([text])
+                matching = self.glossary.matching([text])
+                terms = [entry for entry in matching if id(entry) in shown]
                 issues, _usable = self._quality_issues(text, candidate, terms)
                 if issues:
                     retried = self._retry_once(text, self._retry_hints(issues, terms), budget)
@@ -1033,6 +1079,7 @@ class BatchTranslator:
                         if usable and len(fresh) < len(issues):
                             candidate, issues = retried, fresh
                             result[text] = improved[text] = retried
+                issues = issues + [{"code": TRUNCATED_WARNING, "entryId": entry["id"]} for entry in matching if id(entry) not in shown]
             except (TranslationCancelled, ProviderUnavailable):
                 raise
             except Exception:
@@ -1040,11 +1087,47 @@ class BatchTranslator:
             with self._lock:
                 if issues:
                     self.quality_warnings[text] = issues
+                    reviewed[text] = issues
                 else:
                     self.quality_warnings.pop(text, None)
         if improved:
             self._record("received", translations=improved)
+        if reviewed:
+            self._record("quality", warnings=reviewed)
         return result
+
+    def restore_quality(self, recovered: dict[str, str], recorded: dict[str, list[dict[str, Any]]]) -> None:
+        """Give the answers read back from the answer log (after a crash) the warnings they had.
+
+        A text the log has a ``quality`` record for gets exactly that. For the others the check is run again on
+        the stored answer, without a request: it is deterministic, and it also covers the crash that came
+        before the batch's review finished. (A retry that was already paid for is not bought again; the
+        warning simply stands.)
+        """
+        if not self.glossary and not self.residue_script:
+            return
+        for text, translated in recovered.items():
+            if text in self.overrides:
+                continue
+            issues: list[dict[str, Any]] = []
+            if text in recorded:
+                issues = [
+                    {key: item[key] for key in ("code", "entryId") if isinstance(item.get(key), str)}
+                    for item in recorded[text] if isinstance(item.get("code"), str)
+                ]
+            else:
+                try:
+                    matching = self.glossary.matching([text])
+                    terms = matching[:MAX_TERMS_PER_BATCH]
+                    issues, _usable = self._quality_issues(text, translated, terms)
+                    issues = issues + [{"code": TRUNCATED_WARNING, "entryId": entry["id"]} for entry in matching[MAX_TERMS_PER_BATCH:]]
+                except Exception:
+                    continue
+            with self._lock:
+                if issues:
+                    self.quality_warnings[text] = issues
+                else:
+                    self.quality_warnings.pop(text, None)
 
     def _translate_batch(self, texts: list[str], batch_size: int, budget: dict[str, Any] | None = None) -> dict[str, str]:
         payload = {str(i): text for i, text in enumerate(texts)}
@@ -1134,6 +1217,9 @@ class WorldTranslator(TextExtractionMixin):
         self.completed_resource_pack_paths: set[str] = set()
         self.translation_cache: dict[str, str] = {}
         self.quality_warnings: dict[str, list[dict[str, Any]]] = {}
+        # Answers read back from the answer log after a crash, and the warnings it recorded for them.
+        self._log_recovered: dict[str, str] = {}
+        self._log_quality: dict[str, list[dict[str, Any]]] = {}
         self.glossary_fingerprint = Glossary((config.get("glossary") or {}).get("entries")).fingerprint
         self.candidate_texts: set[str] = set()
         self.file_errors: list[dict[str, Any]] = []
@@ -1194,6 +1280,8 @@ class WorldTranslator(TextExtractionMixin):
         )
         if self.translator is not None:
             self.translator.sink = self._batch_sink
+            if self._log_recovered:
+                self.translator.restore_quality(self._log_recovered, self._log_quality)
 
     def emit(self, event: str, **payload: Any) -> None:
         if self.progress_callback is not None:
@@ -1346,7 +1434,10 @@ class WorldTranslator(TextExtractionMixin):
         elif self.batch_log is not None:
             answered, _counts = BatchLog.read(self.batch_log.path)
             for source, translated in answered.items():
-                self.translation_cache.setdefault(source, translated)
+                if source not in self.translation_cache:
+                    self.translation_cache[source] = translated
+                    self._log_recovered[source] = translated
+            self._log_quality = BatchLog.read_quality(self.batch_log.path)
         self.checkpoint_loaded = True
         self.emit(
             "checkpoint_loaded",

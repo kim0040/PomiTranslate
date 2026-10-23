@@ -79,6 +79,36 @@ def test_target_script_names() -> None:
         assert target_script(name) == "", name
 
 
+def test_a_kept_brand_next_to_a_longer_word_with_the_same_prefix_is_not_residue() -> None:
+    """M8: the brand is a whole source word after the same code, whatever else shares the code and prefix."""
+    assert residue("§6CAT §6CATERPILLAR", "§6CAT는 §6캐터필러") == []
+    assert residue("§6CATERPILLAR §6CAT", "§6캐터필러 §6CAT는") == []
+    assert residue("§6CAT §6CATERPILLAR", "§6CAT는 §6CATERPILLAR가") == [], "a six-letter word is not a stray prefix"
+    assert residue("§6CAT", "§6CAT는") == []
+    # Each kept word excuses one occurrence only; the next one is judged on its own.
+    assert residue("§6Cat §6Caterpillar", "§6Cat는 §6Cat이야기") == ["Cat"]
+    # Without a kept word the leftover prefix is still residue, also next to other words.
+    assert residue("§6CATERPILLAR §6DOG", "§6CAT필러 §6개") == ["CAT"]
+    assert residue("§6CATERPILLAR", "§6CAT필러") == ["CAT"]
+
+
+def test_the_check_is_enabled_by_language_code_or_exact_name_only() -> None:
+    """L3: never by a name inside a longer description."""
+    for code in ("ko", "KO", "ko-KR", "ko_KR", "kor"):
+        assert target_script(code) == "ko", code
+    for code in ("ja", "ja-JP", "ja_JP", "jpn"):
+        assert target_script(code) == "ja", code
+    for code in ("zh", "zh-CN", "zh_TW", "zh-Hans", "zh-Hant-TW", "zho", "cmn"):
+        assert target_script(code) == "zh", code
+    for text in ("English (not Korean)", "Korean romanization", "Japanese (romaji)", "Write Chinese pinyin", "English; 한국어 병기",
+                 "한국어로 번역하되 영어 병기", "ko-Latn", "ja-Latn", "zh-Latn-pinyin", "en", "en-US", "es", "ru", "kok", "korea"):
+        assert target_script(text) == "", text
+    assert residue("§lcrypt", "§lc지하실", "English (not Korean)") == []
+    assert residue("§lcrypt", "§lc지하실", "ko-Latn") == []
+    assert residue("§lcrypt", "§lc지하실", "ko-KR") == ["c"]
+    assert residue("§lcrypt", "§lc지하실", "zh-Hant-TW") == ["c"]
+
+
 def main() -> None:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_") and callable(value)]
     for test in tests:

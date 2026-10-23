@@ -11,8 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from mc_world_translator import DEFAULT_CONFIG, BatchTranslator, WorldTranslator, merge_nested  # noqa: E402
-from mwt.glossary import MAX_TERMS_PER_BATCH, Glossary  # noqa: E402
+from llm_backends import ProviderError  # noqa: E402
+from mc_world_translator import (  # noqa: E402
+    DEFAULT_CONFIG, BatchLog, BatchTranslator, ProviderUnavailable, TranslationCancelled, WorldTranslator, merge_nested,
+)
+from mwt.glossary import MAX_TERMS_PER_BATCH, Glossary, merge_entries  # noqa: E402
 from mwt.region import RegionFile  # noqa: E402
 from mwt.safety import world_fingerprint  # noqa: E402
 from test_reliability import Provider, make_world  # noqa: E402
@@ -359,6 +362,223 @@ def test_checkpoint_warnings_survive_a_resume(tmp: Path) -> None:
     assert resumed.translator.quality_warnings == saved["quality_warnings"]
 
 
+# ------------------------------------------------------------------ review fixes: matching (M2, M3, M4, M5, M10)
+
+def pick(glossary: Glossary, *texts: str) -> list[str]:
+    return [item["source"] for item in glossary.select(list(texts))]
+
+
+def test_terms_next_to_format_codes_are_matched() -> None:
+    """M2: a format code is a boundary, and the letter of a code (the l of §l) is not part of the next word."""
+    glossary = Glossary([term("Elder Mira", mode="keep", ident="a" * 20)])
+    for text in ("Meet §lElder Mira", "§6§lElder Mira", "§x§1§2§3§4§5§6Elder Mira", "Elder Mira§r!", "§c§lElder Mira§r", "§rElder Mira", "Elder Mira"):
+        assert pick(glossary, text) == ["Elder Mira"], text
+    assert pick(glossary, "Meet Elder §lMira") == [], "a code inside the term splits it"
+    assert pick(Glossary([term("lElder", "x")]), "§lElder") == [], "the l belongs to the code"
+    assert pick(Glossary([term("§lElder Mira", "x")]), "Meet §lElder Mira") == ["§lElder Mira"], "a source may contain its own codes"
+    # The check after the translation sees the same text.
+    selected = glossary.select(["Meet §lElder Mira"])
+    assert glossary.misses("Meet §lElder Mira", "§l엘더 미라를 만나라", selected) == selected
+    assert glossary.misses("Meet §lElder Mira", "§lElder Mira를 만나라", selected) == []
+    translate = Glossary([term("Mira", "미라")])
+    assert translate.misses("§lMira", "§l마이라", translate.select(["§lMira"])) != []
+    assert translate.misses("§6§lMira", "§6§l미라", translate.select(["§6§lMira"])) == []
+
+
+def test_whole_word_rule_applies_to_space_separated_scripts_only() -> None:
+    """M3: Latin, Greek, Cyrillic letters and ASCII digits get word boundaries; Hangul, kana and Han do not."""
+    cat = Glossary([term("cat", "고양이")])
+    assert pick(cat, "猫cat猫") == ["cat"] and pick(cat, "A cat.") == ["cat"] and pick(cat, "cat_dog") == ["cat"]
+    for text in ("concat", "cats", "cat5", "bobcat", "écat", "ccat"):
+        assert pick(cat, text) == [], text
+    assert pick(Glossary([term("한국", "Korea")]), "한국어", "대한한국어", "한국") == ["한국"]
+    assert pick(Glossary([term("한국", "Korea")]), "A한국B") == ["한국"], "a Latin neighbour does not matter at a Hangul edge"
+    assert pick(Glossary([term("猫", "cat")]), "熊猫") == ["猫"] and pick(Glossary([term("カナ", "x")]), "カナダ") == ["カナ"]
+    assert pick(Glossary([term("кот", "x")]), "кот", "кот猫") == ["кот"] and pick(Glossary([term("кот", "x")]), "Скот", "коты") == []
+    assert pick(Glossary([term("αβ", "x")]), "αβ γ") == ["αβ"] and pick(Glossary([term("αβ", "x")]), "αβγ") == []
+    digits = Glossary([term("5th", "x")])
+    assert pick(digits, "the 5th floor") == ["5th"] and pick(digits, "15th") == [] and pick(digits, "5thx") == []
+    assert pick(Glossary([term("Lv.", "레벨")]), "Lv.5") == ["Lv."], "a punctuation edge needs no boundary"
+    mixed = Glossary([term("서쪽 탑", "West Tower")])
+    assert pick(mixed, "서쪽 탑으로") == ["서쪽 탑"]
+
+
+def test_one_folding_rule_for_selection_and_checking() -> None:
+    """M4: what selection finds, the check after the translation finds too (ß/ss, İ), with spans mapped back."""
+    glossary = Glossary([term("Straße", "슈트라세", ident="a" * 20)])
+    assert pick(glossary, "Go to STRASSE now") == ["Straße"]
+    selected = glossary.select(["STRASSE"])
+    assert glossary.misses("STRASSE", "다른 길", selected) == selected
+    assert glossary.misses("STRASSE", "슈트라세로", selected) == []
+    assert pick(Glossary([term("ss", "x")]), "ß") == ["ss"]
+    assert pick(Glossary([term("s", "x")]), "ß") == [], "a match may not start or end inside an expanded character"
+    assert pick(Glossary([term("İzmir", "이즈미르")]), "İZMIR rises") == ["İzmir"]
+    exact = Glossary([term("Straße", "x", cs=True)])
+    assert pick(exact, "STRASSE") == [] and pick(exact, "Straße") == ["Straße"], "case-sensitive stays exact"
+    keep = Glossary([term("straße", mode="keep")])
+    assert keep.misses("Die STRASSE", "Die 거리", keep.select(["Die STRASSE"])) != []
+    assert keep.misses("Die STRASSE", "Die STRASSE 거리", keep.select(["Die STRASSE"])) == []
+
+
+def test_world_precedence_ignores_sensitivity_and_ids_never_collide() -> None:
+    """M5/M10: same folded source -> the world entry wins; per-file ids are unique only per file."""
+    merged = merge_entries([term("Mira", "GLOBAL", ident="a" * 20)], [term("MIRA", "WORLD", cs=True, ident="a" * 20)])
+    assert [item["target"] for item in merged] == ["WORLD"]
+    assert pick(Glossary(merged), "MIRA") == ["MIRA"] and pick(Glossary(merged), "Mira") == [], "the narrower world rule is all that applies"
+    both = merge_entries([term("Mira", "MI", ident="a" * 20)], [term("crypt", "CELLAR", ident="a" * 20)])
+    assert len({item["id"] for item in both}) == 2
+    for entries in (both, list(reversed(both)), [term("Mira", "MI", ident="b" * 20), term("crypt", "CELLAR", ident="b" * 20)]):
+        glossary = Glossary(entries)  # even handed the same id twice, each rule keeps its own matcher
+        selected = glossary.select(["crypt"])
+        assert [item["source"] for item in selected] == ["crypt"]
+        assert glossary.misses("crypt", "wrong", selected) == selected, "the mismatch is still found"
+        assert glossary.misses("crypt", "CELLAR", selected) == []
+        both_selected = glossary.select(["Mira in the crypt"])
+        assert {item["source"] for item in glossary.misses("Mira in the crypt", "wrong", both_selected)} == {"Mira", "crypt"}
+
+
+def test_a_manual_override_beats_a_cached_translation() -> None:
+    """L1: also in the lower-level API, a cached answer never hides a manual override."""
+    fake = Scripted()
+    batch = batch_translator(fake, [term("Mira", "GLOSSARY")], overrides={"Mira": "MANUAL"}, initial_cache={"Mira": "OLD", "Other": "kept"})
+    batch.quality_warnings["Mira"] = [{"code": "glossary_mismatch", "entryId": "x"}]
+    assert batch.translate_texts(["Mira", "Other"]) == {"Mira": "MANUAL", "Other": "kept"}
+    assert fake.calls == [] and "Mira" not in batch.quality_warnings
+    assert batch.cache["Mira"] == "MANUAL"
+
+
+def test_more_than_eighty_matching_terms_are_capped_and_counted() -> None:
+    """The decision on > 80 terms: 80 in the prompt (longest first), the rest unenforced and counted."""
+    entries = [term(f"Word{i:03d}", f"w{i:03d}") for i in range(100)]
+    text = " ".join(f"Word{i:03d}" for i in range(100))
+    fake = Scripted(lambda value, prompt, number: " ".join(f"w{i:03d}" for i in range(80)))
+    batch = batch_translator(fake, entries)
+    events: list[dict] = []
+    batch.progress_callback = events.append
+    assert batch.translate_texts([text]) == {text: " ".join(f"w{i:03d}" for i in range(80))}
+    assert len(fake.calls) == 1, "terms beyond the cap are not enforced, so they cost no retry"
+    assert fake.calls[0][1].count("\n- ") == MAX_TERMS_PER_BATCH
+    assert '"Word079"' in fake.calls[0][1] and '"Word080"' not in fake.calls[0][1]
+    warnings = batch.quality_warnings[text]
+    assert {item["code"] for item in warnings} == {"glossary_truncated"} and len(warnings) == 20
+    assert {item["entryId"] for item in warnings} == {term(f"Word{i:03d}")["id"] for i in range(80, 100)}
+    assert batch.warning_counts() == {"glossary_truncated": 20} and events[-1]["warnings"] == {"glossary_truncated": 20}
+    assert len(Glossary(entries).matching([text])) == 100
+
+
+# ------------------------------------------------------------------ review fixes: retries and fatal errors (M9)
+
+class QualityFails(Scripted):
+    """The batch answers wrongly; every single-string request after it fails with ``make()``."""
+
+    def __init__(self, make, succeed_every: int = 0) -> None:
+        super().__init__(lambda text, prompt, number: "wrong")
+        self.make, self.succeed_every, self.failures = make, succeed_every, 0
+
+    def translate_mapping(self, payload: dict, *, system_prompt: str, temperature: float) -> dict:
+        if not self.calls:
+            return super().translate_mapping(payload, system_prompt=system_prompt, temperature=temperature)
+        self.calls.append((dict(payload), system_prompt))
+        if self.succeed_every and len(self.calls) % self.succeed_every == 0:
+            return {key: "wrong" for key in payload}
+        self.failures += 1
+        raise self.make()
+
+
+def quality_run(make, **options) -> tuple[BatchTranslator, QualityFails, list[tuple[str, dict]], list[float], BaseException | None]:
+    fake = QualityFails(make, **options)
+    batch = batch_translator(fake, [term("Mira", "EXPECTED")], batch_size=12)
+    records: list[tuple[str, dict]] = []
+    waits: list[float] = []
+    batch.sink = lambda kind, **details: records.append((kind, details))
+    batch.wait = waits.append
+    error: BaseException | None = None
+    try:
+        batch.translate_texts([f"Mira {i}" for i in range(12)])
+    except (ProviderUnavailable, TranslationCancelled) as exc:
+        error = exc
+    return batch, fake, records, waits, error
+
+
+def test_a_fatal_failure_in_a_quality_retry_stops_the_job() -> None:
+    """M9: a bad key is not retried once per string."""
+    for status in (401, 402, 403, 404):
+        batch, fake, records, _waits, error = quality_run(lambda: ProviderError("denied", status=status))
+        assert isinstance(error, ProviderUnavailable) and error.fatal, (status, error)
+        assert len(fake.calls) == 2, (status, "one batch, one failed retry, then nothing more")
+        assert batch._abort is error
+        received = [details for kind, details in records if kind == "received"]
+        assert received and len(received[0]["translations"]) == 12, "the paid first answers are in the answer log"
+
+
+def test_quality_retries_feed_the_outage_and_rejection_breakers() -> None:
+    from mc_world_translator import MAX_CONSECUTIVE_REJECTIONS, MAX_CONSECUTIVE_REQUEST_FAILURES
+
+    batch, fake, _records, waits, error = quality_run(lambda: ProviderError("busy", status=429, retry_after=7))
+    assert isinstance(error, ProviderUnavailable) and not error.fatal
+    assert len(fake.calls) == 1 + MAX_CONSECUTIVE_REQUEST_FAILURES
+    assert waits == [7.0] * (MAX_CONSECUTIVE_REQUEST_FAILURES - 1), "the provider's own back-off is honoured"
+    batch, fake, _records, _waits, error = quality_run(lambda: ProviderError("down", status=503))
+    assert isinstance(error, ProviderUnavailable) and len(fake.calls) == 1 + MAX_CONSECUTIVE_REQUEST_FAILURES
+    batch, fake, _records, _waits, error = quality_run(lambda: ProviderError("bad", status=400))
+    assert isinstance(error, ProviderUnavailable) and error.code == "REQUEST_REJECTED" and error.fatal
+    assert len(fake.calls) == 1 + MAX_CONSECUTIVE_REJECTIONS
+    # A request that works in between starts the count again, so scattered failures never stop a job.
+    batch, fake, _records, _waits, error = quality_run(lambda: ProviderError("down", status=503), succeed_every=3)
+    assert error is None and len(fake.calls) == 13 and batch.warning_counts() == {"glossary_mismatch": 12}
+    # An exception that is not a provider failure is still only a lost retry.
+    batch, fake, _records, _waits, error = quality_run(lambda: RuntimeError("boom"))
+    assert error is None and len(fake.calls) == 13 and batch.consecutive_failures == 0
+
+
+# ------------------------------------------------------------------ review fixes: crash recovery (M7)
+
+def test_quality_warnings_survive_answer_log_crash_recovery(tmp: Path) -> None:
+    entries = [term("Mira", "EXPECTED", ident="f" * 20)]
+    provider = Provider()
+    world = make_world(tmp, "w-crash", {"r.0.0.mca": ["Mira"]})
+    report = tmp / "crash.json"
+    first = job(world, provider, report, entries, batch_size=1)
+    first.checkpoint_path.write_text(json.dumps(first.checkpoint_payload(), ensure_ascii=False), encoding="utf-8")
+    first.translator.client = Scripted(lambda text, prompt, number: "wrong")  # misses on the batch and on its retry
+    first.translator.translate_texts(["Mira"])
+    assert first.translator.warning_counts() == {"glossary_mismatch": 1}
+    log = BatchLog.path_for(first.checkpoint_path)
+    expected = {"Mira": [{"code": "glossary_mismatch", "entryId": "f" * 20}]}
+
+    def resumed() -> WorldTranslator:
+        return WorldTranslator(world_config(world, provider, report, entries, batch_size=1, resume_from_checkpoint=True))
+
+    # The process dies here: only the checkpoint written before the translation and the answer log remain.
+    again = resumed()
+    assert again.checkpoint_loaded and again.translator.cache["Mira"] == "wrong"
+    assert again.translator.quality_warnings == expected and again.translator.warning_counts() == {"glossary_mismatch": 1}
+    quiet = Scripted()
+    again.translator.client = quiet
+    again.translator.translate_texts(["Mira"])
+    assert quiet.calls == [], "the paid answer is reused, and the retry already spent is not bought again"
+    # The cut came before the batch's review finished: no quality record exists, the check runs again on the answer.
+    lines = [line for line in log.read_text(encoding="utf-8").splitlines() if '"kind": "quality"' not in line]
+    assert len(lines) < len(log.read_text(encoding="utf-8").splitlines())
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert resumed().translator.quality_warnings == expected
+    # A retry that fixed the answer leaves nothing to warn about after the crash either.
+    fixed_log = tmp / "fixed"
+    fixed_world = make_world(tmp, "w-fixed", {"r.0.0.mca": ["Mira"]})
+    fixed_report = fixed_log.with_suffix(".json")
+    fixed = job(fixed_world, provider, fixed_report, entries, batch_size=1)
+    fixed.checkpoint_path.write_text(json.dumps(fixed.checkpoint_payload(), ensure_ascii=False), encoding="utf-8")
+    fixed.translator.client = Scripted(lambda text, prompt, number: "wrong" if number == 1 else "EXPECTED")
+    fixed.translator.translate_texts(["Mira"])
+    assert fixed.translator.warning_counts() == {}
+    back = WorldTranslator(world_config(fixed_world, provider, fixed_report, entries, batch_size=1, resume_from_checkpoint=True))
+    assert back.translator.cache["Mira"] == "EXPECTED" and back.translator.quality_warnings == {}
+    # An override made after the crash wins over the recovered answer.
+    over = WorldTranslator(world_config(world, provider, report, entries, batch_size=1, resume_from_checkpoint=True))
+    over.translator.overrides["Mira"] = "MANUAL"
+    assert over.translator.translate_texts(["Mira"]) == {"Mira": "MANUAL"} and "Mira" not in over.translator.quality_warnings
+
+
 def main() -> None:
     unit = (
         test_selection_rules, test_prompt_block_is_data_not_instructions, test_only_matching_terms_reach_each_batch,
@@ -369,6 +589,10 @@ def main() -> None:
         test_a_failing_retry_keeps_the_first_answer, test_without_a_glossary_nothing_changes,
         test_residue_is_retried_once_and_then_only_warned, test_residue_is_not_checked_for_latin_targets_or_kept_words,
         test_a_retry_that_breaks_format_tokens_is_not_taken,
+        test_terms_next_to_format_codes_are_matched, test_whole_word_rule_applies_to_space_separated_scripts_only,
+        test_one_folding_rule_for_selection_and_checking, test_world_precedence_ignores_sensitivity_and_ids_never_collide,
+        test_a_manual_override_beats_a_cached_translation, test_more_than_eighty_matching_terms_are_capped_and_counted,
+        test_a_fatal_failure_in_a_quality_retry_stops_the_job, test_quality_retries_feed_the_outage_and_rejection_breakers,
     )
     for test in unit:
         test()
@@ -376,6 +600,7 @@ def main() -> None:
     whole = (
         test_report_counts_warnings_and_the_run_still_completes, test_resume_drops_translations_made_under_another_glossary,
         test_resume_with_the_same_glossary_requests_only_the_missing_batches, test_checkpoint_warnings_survive_a_resume,
+        test_quality_warnings_survive_answer_log_crash_recovery,
     )
     for test in whole:
         with tempfile.TemporaryDirectory() as raw:
