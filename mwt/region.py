@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import math
+import re
 import struct
 import zlib
 from dataclasses import dataclass, field
@@ -210,15 +211,24 @@ def chunk_coords(index: int, region_x: int = 0, region_z: int = 0) -> tuple[int,
     return region_x * 32 + (index % 32), region_z * 32 + (index // 32)
 
 
+_REGION_NAME = re.compile(r"r\.(-?\d+)\.(-?\d+)\.mca")
+
+
+def is_standard_region_name(region_path: Path) -> bool:
+    """Whether the name is one Minecraft writes and reads: ``r.<x>.<z>.mca``."""
+    return _REGION_NAME.fullmatch(region_path.name) is not None
+
+
 def region_coordinates(region_path: Path) -> tuple[int, int]:
-    """Region x and z from a file name such as ``r.-1.3.mca``. Unknown names count as 0, 0."""
-    parts = region_path.name.split(".")
-    if len(parts) >= 4 and parts[0] == "r" and parts[-1] == "mca":
-        try:
-            return int(parts[1]), int(parts[2])
-        except ValueError:
-            pass
-    return 0, 0
+    """Region x and z from a file name such as ``r.-1.3.mca``.
+
+    Any other name (a copy such as ``r.0.0.old.mca``) raises. Guessing 0, 0 would place the file's
+    external ``c.<x>.<z>.mcc`` chunks, and the locations a scan reports, somewhere else entirely.
+    """
+    match = _REGION_NAME.fullmatch(region_path.name)
+    if match is None:
+        raise RegionError(f"Not a standard region file name: {region_path.name}")
+    return int(match.group(1)), int(match.group(2))
 
 
 def external_chunk_path(region_path: Path, index: int) -> Path:
@@ -283,8 +293,11 @@ class RegionFile:
                 region.chunks.append(record)
                 continue
             if record.external:
-                mcc = external_chunk_path(path, index)
-                if not mcc.is_file():
+                try:
+                    mcc = external_chunk_path(path, index)
+                except RegionError:
+                    mcc = None  # a file name that does not say where its .mcc files are
+                if mcc is None or not mcc.is_file():
                     record.malformed = True
                 else:
                     record.mcc_bytes = mcc.read_bytes()
