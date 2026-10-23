@@ -149,6 +149,8 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 4. `codesign --verify --deep --strict`와 `spctl --assess`로 중첩 파일의 서명자가 모두 같은지 확인합니다.
 5. notarize 후 staple하고, 격리 속성이 붙은 clean machine에서 실행해 확인합니다.
 
+실제 OS 자격 증명 저장소 확인은 기본 테스트에서 건너뛰는 `cargo test --lib os_keychain_round_trip -- --ignored --nocapture`로 OS마다 따로 실행한다(앱 이름 공간의 임시 provider 이름에 더미 값을 쓰고 지움). 2026-10-23 Windows PASS.
+
 macOS와 Linux 경로(`core_process_unix.rs`, 0755, `killpg`, `PDEATHSIG`)는 Windows 개발 머신에서 실제로 실행하지 못했습니다. 각 OS의 native gate에서 확인해야 합니다.
 
 ## 로컬 gate

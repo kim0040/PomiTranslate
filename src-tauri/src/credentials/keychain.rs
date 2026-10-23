@@ -119,6 +119,31 @@ mod tests {
             assert_eq!(error.code, code::KEYCHAIN_FAILED);
         }
     }
+
+    /// The real OS store, under the app's own service and a provider name no real provider uses.
+    /// It writes a dummy value (never a key) and removes it again. Run it on purpose on each OS:
+    /// `cargo test --lib os_keychain_round_trip -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "touches the real OS credential store"]
+    fn os_keychain_round_trip() {
+        let provider = format!("native-check-{}", std::process::id());
+        let store = OsKeychain;
+        assert!(store.get(&provider).unwrap().is_none(), "the probe name is free");
+        store.set(&provider, "dummy value — 더미 ✓").unwrap();
+        assert_eq!(
+            store.get(&provider).unwrap().as_deref().map(String::as_str),
+            Some("dummy value — 더미 ✓")
+        );
+        store.set(&provider, "replaced").unwrap();
+        assert_eq!(
+            store.get(&provider).unwrap().as_deref().map(String::as_str),
+            Some("replaced")
+        );
+        store.delete(&provider).unwrap();
+        assert!(store.get(&provider).unwrap().is_none(), "deleted");
+        store.delete(&provider).unwrap();
+        println!("OS keychain round trip under {SERVICE}/{provider}: ok");
+    }
 }
 
 #[cfg(test)]
