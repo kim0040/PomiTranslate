@@ -119,17 +119,15 @@ JSONL 한 줄 8 MiB, progress 한 줄 1 MiB, 요청당 stdout 밖 잡음 1 MiB, 
 ### 자격 증명 저장소 보호
 
 - 키 디렉터리와 vault 디렉터리는 읽기·승격·격리(set aside) 전에 심볼릭 링크/junction/reparse point가 아닌지, 소유자와 ACL이 기대와 같은지 검사합니다. Windows는 `FILE_SHARE_DELETE` 없이 디렉터리 핸들을 열어 두어 검사 뒤 이름 바꾸기·교체가 불가능하게 하고(Unix는 `O_NOFOLLOW|O_DIRECTORY`로 연 핸들에서 `fstat`으로 소유자·모드를 확인하고 장치/inode를 비교), rename 직전에 한 번 더 확인합니다. 링크이면 `VAULT_PERMISSIONS`로 거부하고 링크 바깥은 건드리지 않습니다.
-- **앱 데이터 폴더(root)도 검사합니다.** vault를 열기 전, 그리고 vault DB·마스터 키·소유 기록을 옮기거나 격리하는 rename 직전마다 root가 실제 디렉터리이고(링크·junction이 아님), Unix에서는 사용자 소유이며 그룹·다른 사용자가 쓸 수 없는지(`mode & 0o022 == 0`)를 연 핸들의 `fstat`으로 확인합니다. 사용자 소유인데 쓰기 비트가 있으면(umask 002인 배포판이 폴더를 그룹 쓰기 가능으로 만듭니다) 같은 핸들에서 `fchmod`로 그룹·다른 사용자의 쓰기 비트를 제거한 뒤 다시 확인하고, 안전하게 만들 수 없거나 소유자가 다르면 `VAULT_PERMISSIONS`로 거부합니다.
+- **앱 데이터 폴더(root)도 검사합니다.** vault를 열기 전, 그리고 vault DB·마스터 키를 옮기거나 격리하는 rename 직전마다 root가 실제 디렉터리이고(링크·junction이 아님), Unix에서는 사용자 소유이며 그룹·다른 사용자가 쓸 수 없는지(`mode & 0o022 == 0`)를 연 핸들의 `fstat`으로 확인합니다. 사용자 소유인데 쓰기 비트가 있으면(umask 002인 배포판이 폴더를 그룹 쓰기 가능으로 만듭니다) 같은 핸들에서 `fchmod`로 그룹·다른 사용자의 쓰기 비트를 제거한 뒤 다시 확인하고, 안전하게 만들 수 없거나 소유자가 다르면 `VAULT_PERMISSIONS`로 거부합니다.
 - **위협 모델: 같은 사용자(uid)로 실행되는 다른 프로세스는 보호 범위 밖입니다.** 그런 프로세스는 DB와 key 파일을 직접 읽을 수 있고 같은 권한으로 디렉터리를 바꿀 수 있습니다. 위 검사는 다른 사용자·링크 치환·잘못된 권한을 막는 것이며 악성 프로그램이나 계정 탈취를 막는다고 소개하지 않습니다.
 - Custom 키에 기록된 endpoint가 없으면(예전 저장본) 키를 절대 주입하지 않고 `CREDENTIAL_ENDPOINT_UNBOUND`를 돌려줍니다. endpoint를 확인만으로 묶는 명령은 없습니다(`credentials.confirmEndpoint`는 제거됨). 화면은 사용자에게 **키를 다시 입력**하도록 안내하고, 다시 저장할 때 현재 endpoint에 묶입니다. 이미 묶인 키는 다른 endpoint로 옮길 수 없습니다(`CREDENTIAL_ENDPOINT_MISMATCH`).
-- **OS 키체인 소유 기록**(`keychain-ledger.json`, 비밀 없음, vault 밖이라 저장소 초기화·격리에서도 남음). provider마다 상태는 셋입니다: `owned`(앱이 쓰고 확인됨), `pending`(OS 쓰기 진행 중이거나 결과 불명, 이전 소유 상태를 함께 기록), `uncertain`(있을 수 있으나 앱이 만들었다고 말할 수 없음).
-  - 키체인에 쓰기 전에 `pending`(이전 상태 포함)을 먼저 내구적으로 기록합니다. 쓰기가 확인되면 `owned`, 실패했고 보정이 이전 값을 되돌렸으면 이전 소유 상태를 그대로 되돌립니다(원래 남의 항목이었으면 계속 앱 것이 아닙니다). 되돌리지 못했으면 `uncertain`입니다.
-  - 앱 초기화(키 삭제)는 `owned`만 지웁니다. `pending`·`uncertain`은 지우지 않고 `KEYCHAIN_UNCONFIRMED`로 보고하며 `keysDeleted`는 거짓입니다. 키체인을 나열하거나 다른 항목을 건드리지 않습니다.
-  - **소유 판단은 하나입니다.** 키 하나를 지울 때와 앱 초기화(키 삭제)가 같은 판단(`Record::authority`)을 씁니다: 확인된 `owned`만 OS 삭제를 허락합니다. vault의 키체인 모드는 그것만으로 소유가 아니며(`uncertain`으로만 들어옵니다), `pending`·`uncertain`·기록이 없는데 이력이 알 수 없음인 항목은 OS를 호출하지 않고 `KEYCHAIN_UNCONFIRMED`를 돌려줍니다. vault를 읽을 수 있는지와 무관합니다.
-  - 기록 파일 자체도 vault처럼 보호합니다: 소유자 전용으로 만들고(Unix 0600, Windows는 현재 사용자 전용 ACL), 링크를 따라가지 않고 열며, 읽을 때 일반 파일·링크 1개·소유자 일치(Unix)·그룹/기타 쓰기 불가를 확인합니다. 이 검사를 통과하지 못한 기록은 신뢰하지 않고 보존용으로 격리한 뒤 **알 수 없음** 상태로 들어갑니다.
-  - 기록이 없거나 손상·불신된 것은 "빈 기록"이 아니라 **알 수 없음**입니다. 손상된 파일은 `keychain-ledger.json.broken-<ms>`로 보존하고(삭제하지 않음), 거기서 읽을 수 있는 이름, vault 메타데이터, 그리고 저장소 초기화로 보관된 이전 vault(`credentials.broken-*`)의 메타데이터를 합칩니다. 이력을 덮을 때만 불확실 표시(`unreconciled`)를 남기지 않습니다: 보관된 vault가 모두 읽혔고 현재 vault도 읽혔으며, 기록이 있었다는 증거(손상 파일·이전 사본)가 있으면 보관본이나 현재 vault 중 하나에 키체인 행이 실제로 있어야 합니다. **새로 만든(교체된) vault는 증인이 아닙니다.**
-  - 불확실 표시는 **내구적**입니다. 손실이 발견된 그 시점에만 판단하고, 저장된 표시는 이후 새 vault가 읽힌다고 해서 지워지지 않습니다. 지우는 방법은 (a) 손실 시점에 보관된 메타데이터로 이력이 완전히 복원된 경우, (b) 사용자의 명시적 확인 `credentials.acknowledgeUnknownKeychain`뿐입니다. 이 요청은 표시를 지우고 시각(`acknowledged_at`)만 기록하며 OS 키체인·vault·다른 항목을 건드리지 않습니다(`pending`·`uncertain` 항목은 그대로 남아 계속 보고됩니다). 표시가 남아 있는 동안 `native_reset.keysDeleted`는 거짓이고 `errors`에 `KEYCHAIN_UNCONFIRMED`가 있습니다.
-  - vault 메타데이터(저장소 초기화·삭제)를 지우기 전에 발견했거나 삭제에 실패한 모든 항목을 기록에 먼저 씁니다. 기록을 쓰지 못하면 vault를 옮기거나 지우지 않습니다. `native_reset.keysDeleted`는 모든 항목이 정리된 경우에만 참입니다.
+- **OS 키체인 소유는 이름 공간으로 정의합니다(추론하지 않습니다).** 앱의 항목은 서비스 `PomiTranslate`(`keychain.rs`의 `SERVICE`)에 계정이 앱이 아는 provider 이름(`openai`, `gemini`, `anthropic`, `openrouter`, `comet`, `custom`) 중 하나인 것뿐이고, 이 이름 공간에는 PomiTranslate만 씁니다. 소유 기록 파일, 보관된 vault 메타데이터 대조, "알 수 없음" 표시, 확인(acknowledge) 명령은 없습니다.
+  - 앱은 키체인을 나열하지 않고, 사용자가 Keychain 방식을 고르고 요청이 키를 필요로 할 때만 읽습니다(자동 읽기·가져오기 없음).
+  - **삭제는 사용자의 명시적 동작에서만, 이름으로 합니다.** provider 키 삭제와 그 provider를 Keychain에서 다른 방식으로 전환할 때는 `PomiTranslate/<provider>`를, 앱 초기화(키 삭제)는 앱이 아는 모든 provider의 항목을 지웁니다. 이미 없는 항목은 삭제된 것으로 봅니다. vault가 읽히는지·무엇을 기록했는지와 무관합니다.
+  - 보고하는 것은 OS 삭제 실패 하나뿐입니다. 키 삭제는 `KEYCHAIN_UNCONFIRMED`(항목을 삭제하지 못함, 그 밖에 불확실한 것은 없음)를 돌려주며 항목과 vault의 `known_keychain` 표시는 그대로 두고 앱 자신의 사본(암호화 행·세션)은 지웁니다. 저장 방식 전환은 전체가 롤백되어 `CREDENTIAL_SAVE_FAILED`입니다. `native_reset.keysDeleted`는 삭제 실패가 있을 때만 거짓이고 `errors`에 `KEYCHAIN_UNCONFIRMED`가 있으며, 다시 하면 모든 항목을 다시 삭제합니다(기록하지 않으므로 상태가 없습니다). vault·key 디렉터리·보관본은 삭제 실패와 무관하게 정리합니다.
+  - 키체인 쓰기 실패 보정은 그대로입니다(`keychain_transaction.rs`): 쓰기나 메타데이터 커밋이 실패하면 이전 값을 되돌리고, 되돌리지 못하면 `CREDENTIAL_SAVE_UNCERTAIN`입니다.
+  - 이전 빌드의 `keychain-ledger.json`(과 `.new`·`.broken-<ms>` 사본)은 더 이상 읽지 않습니다. 앱이 시작할 때와 앱 초기화(키 삭제) 때 **삭제**합니다(비밀이 없는 파일). `credentials.broken-*` 보관본은 저장소 초기화·앱 초기화가 정리할 뿐 내용을 읽지 않습니다.
 
 코어 환경 변수: `POMI_APP_VERSION`, `POMI_BUILD_SHA`, `POMI_BUILD_DATE`, `PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`. API 키 환경 변수는 비워서 전달합니다.
 

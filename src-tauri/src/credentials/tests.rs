@@ -65,7 +65,9 @@ fn encrypted_roundtrip_restart_update_delete_and_provider_isolation() {
         SECRET
     );
     assert!(vault.read(dir.path(), "openai", None).unwrap().is_none());
-    let restarted = Credentials::default();
+    // A fake store: deleting a key also deletes its OS entry by name, which a unit test never does
+    // against the real keychain.
+    let (restarted, _fake) = with_fake_keychain();
     assert_eq!(
         restarted
             .read(dir.path(), "openrouter", None)
