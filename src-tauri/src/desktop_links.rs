@@ -16,7 +16,9 @@ const HOSTS: &[&str] = &[
     "aistudio.google.com",
     "ai.google.dev",
     "platform.openai.com",
+    "developers.openai.com",
     "console.anthropic.com",
+    "platform.claude.com",
     "www.cometapi.com",
     "cometapi.com",
 ];
@@ -99,11 +101,22 @@ mod tests {
         ));
         assert!(allowed("https://www.minecraft.net/en-us/eula"));
         assert!(allowed("mailto:mini0227kim@gmail.com"));
+        // The three pricing pages the cost note links, each at its exact host.
+        for pricing in [
+            "https://ai.google.dev/gemini-api/docs/pricing",
+            "https://developers.openai.com/api/docs/pricing",
+            "https://platform.claude.com/docs/en/about-claude/pricing",
+        ] {
+            assert!(allowed(pricing), "{pricing} must open");
+        }
         for refused in [
             "http://github.com/",
             "https://github.com.evil.example/",
             "https://user@github.com/",
             "https://github.com:8443/",
+            "https://developers.openai.com.evil.example/api/docs/pricing",
+            "https://evil.platform.claude.com.example/",
+            "https://docs.claude.com/",
             "file:///etc/passwd",
             "mailto:someone@example.com",
             "javascript:alert(1)",

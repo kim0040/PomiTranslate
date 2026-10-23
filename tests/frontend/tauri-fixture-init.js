@@ -79,6 +79,8 @@
   // ?provider=custom: a Custom endpoint. ?key=unbound: its saved key predates address binding, so the
   // shell refuses it (CREDENTIAL_ENDPOINT_UNBOUND) until a key is typed again.
   if (new URLSearchParams(location.search).get('provider') === 'custom') Object.assign(settings, { provider: 'custom', base_url: 'https://llm.example/v1', model: 'custom-model' });
+  // ?provider=gemini&price=table: a Gemini model priced from the dated list-price table; price=unknown has no price at all.
+  if (new URLSearchParams(location.search).get('provider') === 'gemini') Object.assign(settings, { provider: 'gemini', model: new URLSearchParams(location.search).get('model') || 'gemini-2.5-flash' });
   const keyUnbound = () => new URLSearchParams(location.search).get('key') === 'unbound' && sessionStorage.getItem('pomi.fixture.bound') !== 'true';
   // A fresh install: no model chosen and no key saved yet.
   const fresh = new URLSearchParams(location.search).get('fresh') === '1';
@@ -86,9 +88,12 @@
   let freshKeySaved = false;
   const estimate = {
     candidateCount: candidates.length, requests: 1, sourceChars: 180, inputTokens: 720,
-    outputTokens: 240, price: { input: 0.00000015, output: 0.0000006, perMillionInput: 0.15, perMillionOutput: 0.6 },
+    outputTokens: 240, price: { input: 0.00000015, output: 0.0000006, perMillionInput: 0.15, perMillionOutput: 0.6, source: 'catalog' },
     cost: { low: 0.000252, high: 0.000504 }
   };
+  const priceMode = new URLSearchParams(location.search).get('price');
+  if (priceMode === 'table') Object.assign(estimate, { price: { input: 3e-7, output: 2.5e-6, perMillionInput: 0.3, perMillionOutput: 2.5, source: 'table', checkedOn: '2026-10-23', sourceUrl: 'https://ai.google.dev/gemini-api/docs/pricing' }, cost: { low: 0.000816, high: 0.001632 } });
+  if (priceMode === 'unknown') Object.assign(estimate, { price: null, cost: null });
   const scan = {
     status: 'completed', candidateCount: candidates.length, occurrenceCount: candidates.reduce((sum, item) => sum + item.occurrences, 0),
     kinds: candidates.reduce((counts, item) => { counts[item.kind] = (counts[item.kind] || 0) + 1; return counts; }, {}),

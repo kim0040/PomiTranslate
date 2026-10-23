@@ -100,6 +100,8 @@ jobs:
         run: python tests/test_provider_coordination.py
       - name: Model lists offer only models that can translate text
         run: python tests/test_model_filter.py
+      - name: Cost estimate prices from the provider list, else a dated 120-day list-price table
+        run: python tests/test_price_table.py
       - name: Formatter and Minecraft placeholder preservation
         run: python tests/test_text_tokens.py
       - name: Legacy web UI token, Host, Origin and JSON checks

@@ -102,7 +102,7 @@ One candidate applies the same translation to all occurrences of that source. Pe
 
 ## 4. Run and result
 
-In Run, check the world, target language, provider/model, strings to send, manual overrides, reasoning, estimated requests/cost and external-transfer notice. Writing starts only after translation succeeds and the backup is verified. Estimates can omit reasoning tokens, retries and routing-price differences; check your provider's dashboard.
+In Run, check the world, target language, provider/model, strings to send, manual overrides, reasoning, estimated requests/cost and external-transfer notice. Writing starts only after translation succeeds and the backup is verified. Estimates can omit reasoning tokens, retries and routing-price differences; check your provider's dashboard. A price in the provider's own model list (OpenRouter) is used as published. For OpenAI, Gemini and Anthropic the app uses the list price from the provider's official pricing page, shown with the date it was checked and a link to that page; after 120 days the cost is shown as unavailable instead of an old price. This is a list price, never your bill. Comet API and Custom endpoints are priced only when their own model list carries a price.
 
 ![English pre-run confirmation using synthetic data](images/locales/en/run.png)
 

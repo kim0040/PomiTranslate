@@ -401,6 +401,7 @@ const CORE_MODULES: &[&str] = &[
     "mwt/model_filter.py",
     "mwt/nbtio.py",
     "mwt/notices.py",
+    "mwt/price_table.py",
     "mwt/reasoning.py",
     "mwt/region.py",
     "mwt/review_drafts.py",

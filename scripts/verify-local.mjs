@@ -53,6 +53,7 @@ const PYTHON_TESTS = [
   ['Gemini thinking floor is kept across jobs and concurrent batches', 'tests/test_gemini_floor.py'],
   ['Batches waiting for the thinking-level learner follow cancellation and its outcome', 'tests/test_provider_coordination.py'],
   ['Model lists offer only models that can translate text', 'tests/test_model_filter.py'],
+  ['Cost estimate prices from the provider list, else a dated 120-day list-price table', 'tests/test_price_table.py'],
   ['Formatter and Minecraft placeholder preservation', 'tests/test_text_tokens.py'],
   ['Legacy web UI token, Host, Origin and JSON checks', 'tests/test_webui_security.py'],
   ['Write journal, staged transaction and fault-injection matrix', 'tests/test_journal.py'],

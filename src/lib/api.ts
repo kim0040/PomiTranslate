@@ -167,7 +167,8 @@ export type Estimate = {
   sourceChars: number;
   inputTokens: number;
   outputTokens: number;
-  price: { input: number; output: number; perMillionInput: number; perMillionOutput: number } | null;
+  // 'catalog' is the provider's own model list; 'table' is the dated list-price table, which also says when and where.
+  price: { input: number; output: number; perMillionInput: number; perMillionOutput: number; source?: 'catalog' | 'table'; checkedOn?: string; sourceUrl?: string } | null;
   cost: { low: number; high: number } | null;
 };
 
