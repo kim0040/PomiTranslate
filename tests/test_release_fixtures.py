@@ -756,12 +756,13 @@ def main() -> None:
             test_world_write_lock(tmp)
             test_cancelled_job_resumes_same_backup_set(tmp)
             # The extraction and reliability suites are fixtures too: their passing rows feed the matrix.
-            from tests import test_extraction, test_reliability, test_snbt_commands
+            from tests import test_component_shapes, test_extraction, test_reliability, test_snbt_commands
 
             for name in (
                 test_extraction.run_all(tmp / "extraction")
                 + test_reliability.run_all(tmp / "reliability")
                 + test_snbt_commands.run_all(tmp / "snbt")
+                + test_component_shapes.run_all(tmp / "component-shapes")
             ):
                 record(name)
             matrix = render_support_matrix(RESULTS)

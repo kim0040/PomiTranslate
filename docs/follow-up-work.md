@@ -10,7 +10,7 @@
 
 1. **UX-NATIVE-01 — macOS 실제 확인(사용자 로컬 필요).** Linux에서는 컴파일·fixture로만 확인했다. `pnpm desktop:dev`(sidecar 빌드 포함)로 overlay 타이틀바·메뉴(도움말 메뉴·업데이트 확인 포함)·⌘Q·drop·saves 목록·Dock 진행률·다크 시작·외부 링크가 브라우저로 열리는지·데이터 폴더 열기·초기화 후 재시작을 본다. 결함은 native-only 재현 후 수정.
 2. **PROVIDER-01 — 제공사 후속.** 2026-10-23 Gemini thinking 최저 단계를 앱 데이터에 30일 기억(작업·동시 batch 모두 거부 1회 이하)하고, 번역에 쓸 수 없는 모델(음성·이미지·임베딩·robotics·computer-use 등)을 목록에서 빼되 저장된 모델은 경고와 함께 남기도록 했다(가짜 endpoint 테스트, 실제 호출 확인 전). 남은 것: 비 OpenRouter 제공사의 날짜·출처 명시 가격표 기반 비용 추정, 실제 Gemini로 단계 기억 확인.
-3. **COMP-02 → COMP-03 → COMP-04** ([호환성 계획](compatibility-roadmap-2026-10-01.md)): 최신 component(26.x object fallback, hover/book/sign), chunk별 DataVersion·coverage UI, 1.21.5+로 실제 생성한 맵의 번역·게임 로드 확인.
+3. **COMP-02 → COMP-03 → COMP-04** ([호환성 계획](compatibility-roadmap-2026-10-01.md)): COMP-02는 2026-10-23 합성 fixture로 구현·검증([기록](history/comp02-component-shapes-2026-10-23.md); 게임 로드 미확인). 남은 것: chunk별 DataVersion·coverage UI(COMP-03), 1.21.5+로 실제 생성한 맵의 번역·게임 로드 확인(COMP-04).
 4. **QUALITY-01 — 번역 품질.** 2026-10-23 용어집(전체/월드별, 원문 유지·고정 번역, 가져오기·내보내기, 검토에서 추가, 불일치 재시도·경고)과 서식 인접 잔여 글자 감지를 구현했다([기록](history/commercial-readiness-2026-10-23.md)). 남은 것: 실제 제공사로 재시도 효과 확인, TM, native 창에서의 용어집 화면 확인.
 5. **UX-WEB-01**([알려진 UI/UX 문제](ux-issues.md)의 중간 항목; U1 창 닫기의 실제 창 확인은 UX-NATIVE-01과 함께), **UX-NATIVE-02**, 그다음 **CONTENT(datapack `.mcfunction`)**, **DATA/RECOVERY**, 마지막으로 **LEGAL-01 / PLATFORM-01 / RELEASE-01**.
 
@@ -27,7 +27,7 @@
 | UX-NATIVE-02 | 남은 네이티브 다듬기 | 미착수 | 사이드바 vibrancy(투명 창 필요 여부 결정), 후보 행 우클릭 메뉴(포함/제외/직접 번역/복사), 창 크기·위치 기억, Windows Mica/타이틀바 확인 |
 | PROVIDER-01 | Gemini·비 OpenRouter 제공사 후속 | 2026-10-01 최신 모델 실측 완료: 3.8/3.7 flash·pro·`flash-latest`는 minimal 거부 → 자동 단계 상승 구현. **코드 부분 완료(자동 검사만, 실제 호출 미확인):** 학습한 thinking 최저 단계를 앱 데이터 `models/gemini-thinking-floors.json`에 (제공사, endpoint 해시, 모델, 단계, 시각)만 저장해 작업·프로세스 간 재사용(30일 만료, 손상·없음=floor 없음, 제공사가 요구한 단계 이상으로 올리지 않음), 모델별 lock으로 동시 batch도 거부 1회 이하(`mwt/gemini_floor.py`, `tests/test_gemini_floor.py`). 모델 목록은 `mwt/model_filter.py`의 문서화된 deny 규칙(출력 modality·id 부분 문자열/단어)으로 embedding·음성·이미지/영상·moderation·robotics·computer-use 등을 제외하고 사용자가 설정한 모델은 `unsuitable_reason`을 달아 남김(`tests/test_model_filter.py`). | 남은 일: 공개 OpenRouter 카탈로그(`provider.models` 공개 경로)에서 설정 모델 보존·`unsuitable_reason` 표시는 desktop_entry/UI 연동 필요, Gemini/OpenAI/Anthropic 가격을 날짜·출처와 함께 추정에 반영(확인 불가 시 unknown; 가격표는 이번에 만들지 않음), 변경마다 최소 실제 호출로 확인(미실행) |
 | QUALITY-01 | 번역 품질 보강 | 서식 토큰 개수 검사·끝 `§r` 정리 완료. 2026-10-23 용어집 저장·요청·번역 적용·불일치 재시도/경고, 서식 인접 잔여 글자 감지와 용어집 화면(가져오기·내보내기·검토에서 추가·실행/결과 경고)을 구현하고 mock core·자동 검사·반대 계열 검토로 확인([용어집](glossary.md)). 실제 모델 확인·native 창·TM은 미완 | 고유명사 처리 규칙/glossary와 연결, 서식 코드 바로 뒤 원문 잔여 글자 감지(경고 또는 재시도), 모델별 비교 fixture(합성)로 회귀 확인 |
-| COMP-02–06 | 호환성 확대 | COMP-01 완료. 나머지는 [호환성 계획](compatibility-roadmap-2026-10-01.md) | 계획 문서의 각 완료 조건 |
+| COMP-02–06 | 호환성 확대 | COMP-01 완료. COMP-02 합성 fixture 구현(object fallback·hover item/entity·separator·mannequin description, 게임 미확인). 나머지는 [호환성 계획](compatibility-roadmap-2026-10-01.md) | 계획 문서의 각 완료 조건 |
 | LEGAL-01 | 배포물 라이선스·고지 | source MIT 유지. 2026-10-02 앱 안 고지 생성기(`pnpm licenses`, Rust 415/JS 21/Python 16, 데스크톱 build에서 플랫폼별 재생성)와 정보 화면 뷰어 추가. 법적 검토·MPL source 안내 확인·SBOM은 미완 | target별 포함 목록·SBOM·전체 license/NOTICE·MPL source 안내·Python/native library 고지를 package에 동봉. 충돌 미해결이면 해당 배포 보류 |
 | PLATFORM-01 | clean-machine·키체인 | macOS arm64 개발 앱·Local/Session 검증; OS keychain opt-in/Windows/Linux native 미완 | Python/Node/Rust 없는 각 목표 OS에서 설치·chooser·credential permission/import·restart·backup/restore 확인; macOS Intel 목표 결정 |
 | RELEASE-01 | 서명·업데이트·설치 배포 | unsigned 개발 bundle. 2026-10-02 updater 연결(확인·서명 검증 설치·작업 중 거부·재시작), 키 없는 빌드는 알림+다운로드 페이지. **공개키 비어 있음, `latest.json` 게시 없음** ([업데이트·데이터](updates-and-data.md)) | 승인 후 updater 키 생성·공개키 commit·secret 등록, release에 서명 파일+`latest.json` 게시, 이전 버전→새 버전 설치·재시작·설정/키/백업 유지·작업 중 거부를 각 OS에서 확인. macOS 공증·Windows 코드서명 |
@@ -68,7 +68,7 @@
 - [x] world/global glossary와 규칙·revision·import/export/delete(2026-10-23, mock core·자동 검사 범위; native·실제 제공사 확인은 QUALITY-01에 남음).
 - [ ] revision/context-aware TM, world 격리, 잘못된 번역 무효화·편집·삭제.
 - [ ] provider 가격·시각 기반 token/cost low/high 추정과 실제 usage 비교, resume 남은 분량. 2026-10-02 실제 DeepSeek 1요청/3후보 번역·write/restore와 catalog 모델 변경 후 자동 재계산은 확인했지만, 실제 $0.000219114가 예상 상한 $0.00010710을 초과했다. reasoning 토큰·실제 라우팅 단가를 반영한 추정 보강 필요. [검증 기록](history/deepseek-api-verification-2026-10-02.md)
-- [ ] COMP-02–06: 최신 component·chunk별 DataVersion/coverage·대표 게임 버전 생성/로드·혼합 형식·구형 pack·버전별 지원 근거. 기존 압축/entities/dimensions/emoji/NUL 및 신규 .mcc 합성 회귀를 재구현하는 작업은 아님.
+- [ ] COMP-02(fixture 구현 완료, bossbar/team adapter와 미구현 항목은 [기록](history/comp02-component-shapes-2026-10-23.md))–06: 최신 component·chunk별 DataVersion/coverage·대표 게임 버전 생성/로드·혼합 형식·구형 pack·버전별 지원 근거. 기존 압축/entities/dimensions/emoji/NUL 및 신규 .mcc 합성 회귀를 재구현하는 작업은 아님.
 - [ ] crash/kill 뒤 interrupted 복구, consistency 검사, 사용자 restore/resume/discard.
 - [ ] 자연스러운 core/desktop 모듈 분리, CLI·legacy 설정 호환.
 - [x] 공개 settings import/export/reset, 전체 앱 두 단계 초기화(백업 유지·키 삭제 선택), 데이터 위치 표시, 도움말/시작 안내, 데스크톱 밀도와 시스템/라이트/다크 모드 구현. Linux 검증 기록이며 최신 macOS native gate는 UX-NATIVE-01.

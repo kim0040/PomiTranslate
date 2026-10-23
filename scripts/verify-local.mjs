@@ -42,6 +42,7 @@ const PYTHON_TESTS = [
   ['Failure reporting and retry', 'tests/test_reliability.py'],
   ['Text extraction and NBT round trip', 'tests/test_extraction.py'],
   ['SNBT command text (Java 1.21.5+)', 'tests/test_snbt_commands.py'],
+  ['Current text-component shapes (object fallback, hover item/entity, separator)', 'tests/test_component_shapes.py'],
   ['Launcher world discovery is read-only', 'tests/test_world_discovery.py'],
   ['Saved data survives damage and reset keeps backups', 'tests/test_user_data_durability.py'],
   ['World write lock and session lock survive crashes', 'tests/test_world_locking.py'],
