@@ -103,6 +103,60 @@
       { id: 'playerdata', scanned: false, present: true, count: 4 }
     ]
   };
+  // ?chunks=clean|mixed|newer|skipped|empty: what the scan saw chunk by chunk. Without it the core predates the field.
+  const chunkMode = new URLSearchParams(location.search).get('chunks');
+  const chunkEntry = (state, dataVersion, compression, status, count) => ({ state, dataVersion, compression, status, count });
+  const chunkCounts = (processed, skipped = 0, unreadable = 0, notInspected = 0) => ({ processed, skipped_unsupported: skipped, unreadable, not_inspected: notInspected });
+  function chunkCoverageFor(mode) {
+    const base = { version: 1, levelDataVersion: 4189, levelDataVersions: [{ world: 'Roguefire', dataVersion: 4189 }], newestCovered: 4556 };
+    const group = (dimension, kind, entries) => {
+      const counts = chunkCounts(0);
+      for (const entry of entries) counts[entry.status] += entry.count;
+      const known = entries.filter((entry) => entry.state === 'known').map((entry) => entry.dataVersion);
+      return { dimension, kind, counts, min: known.length ? Math.min(...known) : null, max: known.length ? Math.max(...known) : null, entries };
+    };
+    const finish = (groups, files, flags, distribution) => {
+      const counts = chunkCounts(0);
+      for (const item of groups) for (const key of Object.keys(counts)) counts[key] += item.counts[key];
+      const known = distribution.filter((item) => item.state === 'known').map((item) => item.dataVersion);
+      return {
+        ...base, groups, flags, counts: { ...counts, total: Object.values(counts).reduce((sum, value) => sum + value, 0) },
+        chunkVersions: { min: known.length ? Math.min(...known) : null, max: known.length ? Math.max(...known) : null, distribution },
+        files: { scanned: 8, unreadable: 0, notInspected: 0, detectedUnsupported: {}, ...files }
+      };
+    };
+    if (mode === 'clean') {
+      return finish([group('overworld', 'region', [chunkEntry('known', 4189, 2, 'processed', 120)])], {}, { mixed: false, newer: false, missing: false },
+        [{ dataVersion: 4189, state: 'known', count: 120 }]);
+    }
+    if (mode === 'mixed') {
+      return finish([
+        group('overworld', 'region', [chunkEntry('known', 4189, 2, 'processed', 60), chunkEntry('known', 4556, 4, 'processed', 30), chunkEntry('missing', null, 2, 'processed', 10)]),
+        group('the_nether', 'region', [chunkEntry('known', 4189, 2, 'processed', 20)])
+      ], {}, { mixed: true, newer: false, missing: true }, [
+        { dataVersion: null, state: 'missing', count: 10 }, { dataVersion: 4189, state: 'known', count: 80 }, { dataVersion: 4556, state: 'known', count: 30 }
+      ]);
+    }
+    if (mode === 'newer') {
+      return finish([
+        group('overworld', 'region', [chunkEntry('known', 4189, 2, 'processed', 90), chunkEntry('known', 4800, 4, 'processed', 30)])
+      ], {}, { mixed: true, newer: true, missing: false }, [{ dataVersion: 4189, state: 'known', count: 90 }, { dataVersion: 4800, state: 'known', count: 30 }]);
+    }
+    // skipped / empty: part of the world was not searched.
+    const searched = mode === 'empty' ? 0 : 100;
+    return finish([
+      group('overworld', 'region', [
+        ...(searched ? [chunkEntry('known', 4189, 2, 'processed', searched)] : []),
+        chunkEntry('known', 4189, 2, 'skipped_unsupported', 12), chunkEntry('unobserved', null, 127, 'skipped_unsupported', 3), chunkEntry('unobserved', null, 2, 'unreadable', 4)
+      ]),
+      group('overworld', 'entities', [chunkEntry('unobserved', null, null, 'not_inspected', 6)])
+    ], { notInspected: 1 }, { mixed: false, newer: false, missing: false },
+    [{ dataVersion: 4189, state: 'known', count: searched + 12 }]);
+  }
+  if (chunkMode) {
+    scan.chunkCoverage = chunkCoverageFor(chunkMode);
+    if (chunkMode === 'empty') Object.assign(scan, { candidateCount: 0, occurrenceCount: 0, kinds: {}, candidates: [], requestEstimate: 0 });
+  }
 
   // ?vault=corrupt: the credential store cannot be opened until "reset credential storage" runs.
   function vaultBroken() {
@@ -123,7 +177,7 @@
   function resumePayload() {
     return {
       available: true, scanPlanId: scan.scanPlanId, fingerprint: scan.fingerprint,
-      candidateCount: candidates.length, occurrenceCount: scan.occurrenceCount, kinds: scan.kinds, coverage: scan.coverage, candidates: candidates.slice(0, 200), excludedCandidateIds: ['tellraw'],
+      candidateCount: candidates.length, occurrenceCount: scan.occurrenceCount, kinds: scan.kinds, coverage: scan.coverage, ...(scan.chunkCoverage ? { chunkCoverage: scan.chunkCoverage } : {}), candidates: candidates.slice(0, 200), excludedCandidateIds: ['tellraw'],
       candidateOverrides: { shop: previewTranslations[previewLocale] }, savedAt: 1790672400,
       status: 'needs_retry', translatedCount: 2
     };
@@ -284,7 +338,7 @@
   async function sidecar(request) {
     const type = request.type;
     const body = request.payload || {};
-    window.__pomiRequests.push({ type, provider: body.provider, publicCatalog: body.publicCatalog });
+    window.__pomiRequests.push({ type, provider: body.provider, publicCatalog: body.publicCatalog, acceptNewerVersion: body.acceptNewerVersion });
     const current = scenario();
     if (type === 'app.bootstrap') {
       bootstrapAttempts++;
@@ -432,6 +486,8 @@
       return ok(request, scan);
     }
     if (type === 'translate.start' || type === 'translate.resume') {
+      // The core refuses a scan with newer chunks until the person confirmed once.
+      if (chunkMode === 'newer' && body.acceptNewerVersion !== true) return { v: 1, id: request.id, type: 'response.error', error: { code: 'NEWER_VERSION_UNCONFIRMED', recoverable: true, message: 'raw core text' } };
       if (keyUnbound()) throw { code: 'CREDENTIAL_ENDPOINT_UNBOUND', message: 'raw shell text that must not be shown' };
       if (current === 'run-progress') {
         // ?progress=nocost: the provider reports no cost (null). ?progress=many: more samples than the list keeps.

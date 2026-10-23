@@ -29,6 +29,7 @@ const PYTHON_TESTS = [
   ['Desktop credential routing boundary', 'tests/test_desktop_provider.py'],
   ['Settings validation and recovery', 'tests/test_settings_transaction.py'],
   ['Scan scope settings', 'tests/test_scan_settings.py'],
+  ['Chunk DataVersion coverage and newer-version confirmation', 'tests/test_chunk_coverage.py'],
   ['Provider usage and credential redaction', 'tests/test_desktop_usage.py'],
   ['Desktop prompt enhancement', 'tests/test_desktop_prompt.py'],
   ['Safe legacy settings preview', 'tests/test_legacy_settings_import.py'],

@@ -10,7 +10,7 @@
 
 1. **UX-NATIVE-01 — macOS 실제 확인(사용자 로컬 필요).** Linux에서는 컴파일·fixture로만 확인했다. `pnpm desktop:dev`(sidecar 빌드 포함)로 overlay 타이틀바·메뉴(도움말 메뉴·업데이트 확인 포함)·⌘Q·drop·saves 목록·Dock 진행률·다크 시작·외부 링크가 브라우저로 열리는지·데이터 폴더 열기·초기화 후 재시작을 본다. 결함은 native-only 재현 후 수정.
 2. **PROVIDER-01 — 제공사 후속.** 2026-10-23 Gemini thinking 최저 단계를 앱 데이터에 30일 기억(작업·동시 batch 모두 거부 1회 이하)하고, 번역에 쓸 수 없는 모델(음성·이미지·임베딩·robotics·computer-use 등)을 목록에서 빼되 저장된 모델은 경고와 함께 남기도록 했다(가짜 endpoint 테스트, 실제 호출 확인 전). 남은 것: 비 OpenRouter 제공사의 날짜·출처 명시 가격표 기반 비용 추정, 실제 Gemini로 단계 기억 확인.
-3. **COMP-02 → COMP-03 → COMP-04** ([호환성 계획](compatibility-roadmap-2026-10-01.md)): COMP-02는 2026-10-23 합성 fixture로 구현·검증([기록](history/comp02-component-shapes-2026-10-23.md); 게임 로드 미확인). 남은 것: chunk별 DataVersion·coverage UI(COMP-03), 1.21.5+로 실제 생성한 맵의 번역·게임 로드 확인(COMP-04).
+3. **COMP-02 → COMP-03 → COMP-04** ([호환성 계획](compatibility-roadmap-2026-10-01.md)): 2026-10-23 COMP-02(최신 component: object fallback·hover item/entity·separator·mannequin description, [기록](history/comp02-component-shapes-2026-10-23.md))와 COMP-03(chunk별 DataVersion·압축·상태 coverage와 시험보다 새 버전 월드의 확인 1회)을 합성 fixture·browser로 구현·검증했다(native·게임 로드 미확인). 남은 것: 1.21.5+로 실제 생성한 맵의 번역·게임 로드 확인(COMP-04).
 4. **QUALITY-01 — 번역 품질.** 2026-10-23 용어집(전체/월드별, 원문 유지·고정 번역, 가져오기·내보내기, 검토에서 추가, 불일치 재시도·경고)과 서식 인접 잔여 글자 감지를 구현했다([기록](history/commercial-readiness-2026-10-23.md)). 남은 것: 실제 제공사로 재시도 효과 확인, TM, native 창에서의 용어집 화면 확인.
 5. **UX-WEB-01**([알려진 UI/UX 문제](ux-issues.md)의 중간 항목; U1 창 닫기의 실제 창 확인은 UX-NATIVE-01과 함께), **UX-NATIVE-02**, 그다음 **CONTENT(datapack `.mcfunction`)**, **DATA/RECOVERY**, 마지막으로 **LEGAL-01 / PLATFORM-01 / RELEASE-01**.
 

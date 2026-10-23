@@ -10,6 +10,7 @@
   import Dialog from '../components/Dialog.svelte';
   import Icon from '../components/Icon.svelte';
   import PageHeader from '../components/PageHeader.svelte';
+  import ChunkCoverageSummary from '../components/ChunkCoverageSummary.svelte';
   import Popover from '../components/Popover.svelte';
 
   const source = app.candidates;
@@ -150,6 +151,7 @@
 
 <div class="review">
   <PageHeader title={t('review.title')} lead={t('review.lead')} />
+  {#if app.scan?.chunkCoverage}<ChunkCoverageSummary coverage={app.scan.chunkCoverage} compact />{/if}
 
   <div class="toolbar">
     <div class="search">

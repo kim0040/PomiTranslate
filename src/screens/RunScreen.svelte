@@ -9,6 +9,8 @@
   import Dialog from '../components/Dialog.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import WorldCard from '../components/WorldCard.svelte';
+  import NewerVersionNotice from '../components/NewerVersionNotice.svelte';
+  import { needsNewerConfirmation } from '../lib/chunk-coverage';
   import { REASONING_PROVIDERS, reasoningSummary, supportsReasoning } from '../lib/reasoning';
   import { clock, holdClock } from '../lib/clock.svelte';
   import { milestone, percentDone, remainingSeconds, roundEta } from '../lib/workflow';
@@ -206,6 +208,10 @@
     <PageHeader title={t('run.title')} lead={t('run.lead')} />
 
     <SetupNotice blocking />
+
+    {#if needsNewerConfirmation(app.scan?.chunkCoverage)}
+      <NewerVersionNotice confirm />
+    {/if}
 
     <div class="cols">
       <section class="col" aria-labelledby="summary-title">

@@ -40,6 +40,19 @@ from llm_backends import (
 from mwt import nbtio as nbt
 from mwt.format_residue import RESIDUE_WARNING, find_residue, target_script
 from mwt.glossary import MAX_TERMS_PER_BATCH, MISMATCH_WARNING, TRUNCATED_WARNING, Glossary
+from mwt.coverage import (
+    FILE_NOT_INSPECTED,
+    FILE_SCANNED,
+    FILE_UNREADABLE,
+    NOT_INSPECTED,
+    PROCESSED,
+    SKIPPED_UNSUPPORTED,
+    UNREADABLE,
+    ChunkCoverage,
+    FileCoverage,
+    chunk_data_version,
+    level_data_versions,
+)
 from mwt.durable import CommittedWriteError, atomic_write_bytes, atomic_write_text, fsync_dir, fsync_fd, replace as durable_replace
 from mwt.extract import TextExtractionMixin, TextRef
 from mwt.locking import object_identity
@@ -1287,6 +1300,10 @@ class WorldTranslator(TextExtractionMixin):
         self.occurrences: dict[str, dict[str, Any]] = {}
         self.final_translations: dict[str, str] = {}
         self.file_scan: dict[str, dict[str, Any]] = {}
+        # Per-chunk DataVersion, compression and status of this scan, kept as counts (mwt/coverage.py).
+        self.coverage = ChunkCoverage()
+        self._level_versions: list[dict[str, Any]] | None = None
+        self._detected_unsupported: dict[str, int] = {}
         self._run_backup = None
         self._backup_published = False
         self._write_lock = None
@@ -1428,6 +1445,7 @@ class WorldTranslator(TextExtractionMixin):
                 "external_pack_writes": dict(self.external_pack_writes),
             },
             "completed_region_files": sorted(self.completed_region_files),
+            "chunk_coverage": self.coverage.export(),
             "completed_resource_pack_paths": sorted(self.completed_resource_pack_paths),
             "translation_cache": self.translator.cache if self.translator is not None else self.translation_cache,
             # The glossary the cached translations were made under ("" for none). A different glossary on resume
@@ -1461,6 +1479,8 @@ class WorldTranslator(TextExtractionMixin):
             self.emit("checkpoint_ignored", reason="world_fingerprint")
             return
         self.completed_region_files = set(checkpoint.get("completed_region_files", []))
+        if not self.coverage.restore(checkpoint.get("chunk_coverage")) and self.completed_region_files:
+            self.coverage.partial = True  # a checkpoint from before chunk coverage: finished files are not rescanned
         self.completed_resource_pack_paths = set(checkpoint.get("completed_resource_pack_paths", []))
         self.translation_cache = dict(checkpoint.get("translation_cache", {}))
         self.quality_warnings = self._saved_quality_warnings(checkpoint.get("quality_warnings"))
@@ -1573,6 +1593,13 @@ class WorldTranslator(TextExtractionMixin):
             if item.get("candidates", 0) > 0
         })
         self.report["candidate_text_count"] = len(self.candidate_texts)
+        self.report["coverage"] = self.coverage_summary()
+
+    def coverage_summary(self) -> dict[str, Any]:
+        """What this run looked at: the level.dat version, every chunk DataVersion met and how each chunk was handled."""
+        if self._level_versions is None:
+            self._level_versions = level_data_versions(Path(self.config["world_dir"]))
+        return self.coverage.summary(self._level_versions, detected_unsupported=self._detected_unsupported)
 
     def run(self) -> dict[str, Any]:
         try:
@@ -1615,6 +1642,11 @@ class WorldTranslator(TextExtractionMixin):
             blockers = detect_write_blockers(world_dir)
             self.report["write_blockers"] = blockers
             if blockers:
+                if {"mcr", "linear"} & set(blockers):
+                    from mwt.layout import count_unsupported_region_files
+
+                    # Detected, never read: the scan stops here, so these files are counted, not their chunks.
+                    self._detected_unsupported = count_unsupported_region_files(world_dir)
                 self.report["status"] = "unsupported"
                 self.report["errors"].append({"scope": "layout", "message": ",".join(blockers)})
                 self.refresh_report_counts()
@@ -1736,6 +1768,8 @@ class WorldTranslator(TextExtractionMixin):
                 self.ensure_not_cancelled()
                 self.emit("file_start", phase="collect", index=index, total=total_files, file=str(file_path))
                 result = self._run_file_step(self.collect_region_file, file_path)
+                if result.get("skipped") == "file_error":
+                    self._coverage_file(file_path, FILE_UNREADABLE)  # what it counted before failing is not trusted
                 self.file_scan[str(file_path)] = result
                 if dry_run and (result["changed_chunks"] > 0 or result.get("candidates", 0) > 0 or result.get("skipped")):
                     self.report["changed_files"].append(result)
@@ -1839,6 +1873,7 @@ class WorldTranslator(TextExtractionMixin):
                     fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative_path, pattern)
                     for pattern in self.skip_patterns
                 ):
+                    self._note_not_inspected(path)
                     continue
                 resolved_path = path.resolve()
                 if not resolved_path.is_relative_to(world_dir):
@@ -2074,13 +2109,53 @@ class WorldTranslator(TextExtractionMixin):
                 "error": str(exc),
             }
 
+    def _coverage_file(self, path: Path, state: str = FILE_SCANNED) -> FileCoverage:
+        from mwt.layout import region_dir_identity
+
+        dimension, kind = region_dir_identity(self._relative(path.parent))
+        return self.coverage.file(self._relative(path), dimension, kind, state)
+
+    def _note_not_inspected(self, path: Path) -> None:
+        """A region file the scan scope leaves out: its chunks are only counted from the header."""
+        from mwt.region import count_populated_chunks
+
+        record = self._coverage_file(path, FILE_NOT_INSPECTED)
+        populated = count_populated_chunks(path)
+        if populated:
+            record.add(NOT_INSPECTED, count=populated)
+
+    @staticmethod
+    def _observe_chunk(record: FileCoverage, locked: bool, chunk: Any, root: Any) -> None:
+        """Count one non-empty chunk. ``root`` is its parsed NBT, or None when it could not be read."""
+        if chunk.unsupported:
+            record.add(SKIPPED_UNSUPPORTED, compression=chunk.unsupported_id)
+        elif root is None:
+            record.add(UNREADABLE, compression=chunk.compression or None)
+        else:
+            state, version = chunk_data_version(root)
+            # A file with an unsupported chunk or sector table is never rewritten, so its text is not searched for.
+            record.add(
+                SKIPPED_UNSUPPORTED if locked else PROCESSED,
+                compression=chunk.compression, state=state, data_version=version,
+            )
+
     def _chunk_refs(self, region: Any, path: Path, stats: dict[str, Any]):
-        """Yield (chunk, root, refs, occurrences) for every chunk that can be read. Count the rest."""
+        """Yield (chunk, root, refs, occurrences) for every chunk that can be read. Count the rest.
+
+        ``stats["observe"]``, when set, is told about every non-empty chunk (see ``_observe_chunk``).
+        """
+        observe = stats.get("observe")
         for chunk in region.chunks:
             self.ensure_not_cancelled()
-            if chunk.empty or chunk.unsupported:
+            if chunk.empty:
+                continue
+            if chunk.unsupported:
+                if observe:
+                    observe(chunk, None)
                 continue
             if chunk.malformed or chunk.raw_nbt is None:
+                if observe:
+                    observe(chunk, None)
                 stats["unreadable_chunks"] += 1
                 if chunk.oversize:
                     stats["oversize_chunks"] = stats.get("oversize_chunks", 0) + 1
@@ -2091,9 +2166,13 @@ class WorldTranslator(TextExtractionMixin):
             except Exception as exc:
                 chunk.malformed = True
                 chunk.raw_nbt = None
+                if observe:
+                    observe(chunk, None)
                 stats["unreadable_chunks"] += 1
                 stats.setdefault("unreadable_sample", f"{type(exc).__name__}: {exc}"[:200])
                 continue
+            if observe:
+                observe(chunk, root)
             refs: list[TextRef] = []
             self.collect_tag_refs(root, refs, f"{path.name}#{chunk.index}")
             yield chunk, root, refs, self.extract_occurrences(refs)
@@ -2121,10 +2200,16 @@ class WorldTranslator(TextExtractionMixin):
     def collect_region_file(self, path: Path) -> dict[str, Any]:
         """Find translatable text in one region file. Never calls the provider or writes."""
         region, early = self._open_region(path)
+        record = self._coverage_file(
+            path, FILE_UNREADABLE if early is not None and early.get("skipped") == "parse_error" else FILE_SCANNED
+        )
         if early is not None:
             return early
         locked = bool(region.unsupported_ids) or bool(region.layout_unsafe)
-        stats: dict[str, Any] = {"unreadable_chunks": 0}
+        stats: dict[str, Any] = {
+            "unreadable_chunks": 0,
+            "observe": lambda chunk, root: self._observe_chunk(record, locked, chunk, root),
+        }
         unique_texts: dict[str, None] = {}
         candidate_count = 0
         unparsed_before = getattr(self, "unparsed_commands", 0)
