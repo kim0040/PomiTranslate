@@ -1135,7 +1135,7 @@ export class AppState {
     if (this.isBusy) return;
     if (path !== this.worldDir && !(await this.mayDiscard('world'))) return;
     if (this.isBusy) return;
-    if (path !== this.worldDir) this.recoveryGeneration++;
+    // A valid new world resets the job (and with it any pending recovery lookup); an invalid folder changes nothing.
     this.banner = null;
     try {
       const inspected = await callBackend<WorldInspection>('world.inspect', { worldDir: path });

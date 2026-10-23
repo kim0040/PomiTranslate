@@ -97,6 +97,15 @@
 - `700aad8`에서 `pnpm verify:local` 57/57 PASS(Python·frontend·Rust: Rust lib 247 PASS/5 ignored, clippy·fmt, vitest 250). 같은 소스에서 browser fixture 전체 Playwright 293/293 PASS(2 workers, 21.9분). 같은 날 앞선 실행에서 `test_webui_security`가 부하 중 한 번 실패하고 단독 실행에서 통과했다(부하 의존 불안정, 원인 미확정).
 - 반대 계열 검토는 Codex 사용 한도로 마지막 제공사 수정 재검토를 끝내지 못해, 구현(Sonnet)과 다른 모델(Opus)이 대조 검토했다(대기 중 로더 import 위치 한 건 수정).
 
+## 7e. 같은 날 두 번째 묶음
+
+- **COMP-02**(최신 component): object fallback·hover item/entity 이름·selector/nbt separator·mannequin description 수집·되쓰기. 반대 계열(Sol) 검토의 M1–M3과 재검토 R3을 고쳤다: 중첩 JSON은 바뀐 문자열 구간만 고쳐 쓰고(구간을 못 찾으면 이전처럼 compact 직렬화, 집계됨) SNBT 따옴표를 유지, 구형 hover `value`/문자열 `contents`는 이전 추출기와 같은 결과, component 종류는 명시한 `type`을 먼저 한 번 정한다. `EXTRACTOR_VERSION` 5. 합성 fixture로 scan→write→reopen→비대상 바이트 보존→baseline SHA-256 복원 확인, 게임 로드 미확인([기록](comp02-component-shapes-2026-10-23.md)).
+- **COMP-03**(chunk별 coverage): DataVersion·압축·상태를 dimension·파일 종류별 개수로만 모아 report와 화면에 보이고, 시험한 최신 DataVersion(4556)보다 새 chunk가 있는 월드는 시작·이어서 하기 전에 한 번 확인하며 core도 확인 없는 요청을 거부한다. 검토 M4·M5·L1·L2와 재검토 R1·R2·R4를 고쳤다: 중단된 작업 이어서 하기 안에서 확인, 파일당 상한을 넘어도 flag·범위 정확, partial 표시 보존, 읽은 chunk는 processed(쓰기 차단 파일은 따로 집계), 시작·재개 한 번에 하나, 오래된 조회 결과 폐기, 이전 checkpoint 읽기 호환.
+- **비용 추정 정가표**: OpenAI·Gemini·Anthropic 공식 가격 페이지에서 2026-10-23에 읽은 값(정확한 모델 ID만, 120일 지나면 unknown, 제공사 목록 가격 우선, Comet·Custom 제외). Sol이 35개 값을 공식 페이지와 다시 대조해 불일치 0. 같은 검토에서 찾은 기존 결함(카탈로그 가격 Infinity/overflow가 $0 추정이 됨)을 고쳤다.
+- **용어집 성능(U21)**: 편집한 줄만 다시 계산하고 200개를 넘으면 화면 밖 줄 layout을 미룬다(Chrome 4배 CPU 제한 2,000개: 입력 약 330→47 ms, "더 보기" 약 970→430 ms). 화면 읽기 프로그램 탐색 모드 영향은 U23으로 남겼다.
+- **문서·도움말**: ko/en/ja 소개 화면 9장 재캡처와 4개 언어 사용 안내 갱신(U13·U14), 도움말에 CometAPI 키 발급 페이지(U19).
+- **Windows native 확인(서명 없음, 공개하지 않음)**: `cd263f2`에서 `pnpm desktop:build`(PyInstaller 6.16.0 sidecar 시작 확인 `system.hello`, release build, NSIS 설치 파일 18 MB) PASS. 설치하지 않은 release 실행 파일로 두 번 실행: 코어가 Job 아래에서 시작해 `app.bootstrap`·`worlds.discover` 응답, 창 닫기(WM_CLOSE)로 종료 코드 0·sidecar 0개, 강제 종료(`taskkill /F`)에서도 sidecar와 그 자식까지 사라짐. 실행이 만든 앱 데이터 폴더(이전에 없던 두 곳)는 확인 후 지웠다. 설치 프로그램 실행·화면 조작(X 확인 창, Alt+F4, 저장 창)·키체인은 하지 않았다.
+
 ## 8. 남은 증거 (이 문서 시점)
 
 - 실제 Windows 창에서 X·Alt+F4·Ctrl+Q 종료 흐름, 설치 프로그램 빌드·설치, 패키지된 sidecar(콘솔/비콘솔)의 JSONL.

@@ -304,7 +304,7 @@ describe('one recovery action at a time, bound to the context it was asked in', 
         });
       }
       if (type === 'settings.set') return ok({ settings: { provider: 'openai', model: 'fixture' }, apiKeyStored: true });
-      if (type === 'world.inspect') return ok({ validJavaWorld: true });
+      if (type === 'world.inspect') return ok({ validJavaWorld: payload.worldDir !== '/worlds/not-a-world' });
       if (type === 'worlds.remember') return ok({ worlds: [] });
       if (type === 'app.bootstrap') return ok({ interruptedJobs: [] });
       return ok({ available: false, backups: [], usage: null });
@@ -402,6 +402,24 @@ describe('one recovery action at a time, bound to the context it was asked in', 
     expect(app.continuation).toBeNull();
     expect(app.newerAccepted).toBe(false);
     expect(sent.some((item) => item.type === 'translate.resume')).toBe(false);
+  });
+
+  it('keeps a recovery lookup when the folder picked meanwhile is not a world', async () => {
+    const { held, gates } = gatedCore();
+    const app = opened();
+    gates.status = true;
+    const pending = app.continueInterrupted(job);
+    await vi.waitFor(() => expect(held.status).toBeTypeOf('function'));
+    // The core answers in order, so the folder is inspected after the held lookup is answered.
+    const picking = app.useWorld('/worlds/not-a-world');
+    held.status!();
+    await pending;
+    await picking;
+    expect(app.banner?.tone).toBe('error');
+    // Nothing changed: the same world, and its saved job waits for the newer-version confirmation.
+    expect(app.worldDir).toBe('/worlds/A');
+    expect(app.continuation?.jobId).toBe('job-A');
+    expect(app.resume?.scanPlanId).toBe('plan-A');
   });
 
   it('does not send a confirmation whose scan no longer matches the one it was asked for', async () => {
