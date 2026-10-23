@@ -128,7 +128,7 @@ def test_model_price_precedence(data_dir: Path) -> None:
         catalog = entry._model_price(saved("openai", "gpt-4o"), data_dir)
         assert catalog == {"input": 1e-6, "output": 2e-6, "perMillionInput": 1e-6 * 1e6, "perMillionOutput": 2e-6 * 1e6, "source": "catalog"}
         # A catalog row whose price cannot be read does not hide the table.
-        for broken in ({"pricing_prompt": "free", "pricing_completion": "1"}, {"pricing_prompt": "-1", "pricing_completion": "1"}, {"pricing_prompt": "nan", "pricing_completion": "1"}):
+        for broken in ({"pricing_prompt": "free", "pricing_completion": "1"}, {"pricing_prompt": "-1", "pricing_completion": "1"}, {"pricing_prompt": "nan", "pricing_completion": "1"}, {"pricing_prompt": "Infinity", "pricing_completion": "1"}, {"pricing_prompt": "1e999", "pricing_completion": "1"}, {"pricing_prompt": "1", "pricing_completion": "1e308"}):
             remember_model_catalog("openai", [{"id": "gpt-4o", **broken}], root=data_dir)
             fallback = entry._model_price(saved("openai", "gpt-4o"), data_dir)
             assert fallback and fallback["source"] == "table", broken
@@ -181,6 +181,11 @@ def test_estimate_carries_the_source(data_dir: Path) -> None:
     with with_today(fresh("gemini") + timedelta(days=EXPIRY_DAYS + 1)):
         stale = entry._estimate(RECORDS, saved("gemini", "gemini-2.5-flash"), data_dir)
         assert stale["price"] is None and stale["cost"] is None
+    # A readable price whose cost overflows a float is not reported as a cost (JSON would make it 0).
+    remember_model_catalog("openrouter", [{"id": "vendor/huge", "pricing_prompt": "1e302", "pricing_completion": "1e302"}], root=data_dir)
+    many = [{"source": "x" * 200} for _ in range(20000)]
+    huge = entry._estimate(many, saved("openrouter", "vendor/huge"), data_dir)
+    assert huge["price"] and huge["cost"] is None
     print("PASS price_table.estimate")
 
 

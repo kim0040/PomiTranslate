@@ -215,7 +215,9 @@ def _model_price(saved: dict, data_dir: Path) -> dict | None:
             completion = float(item.get("pricing_completion"))
         except (TypeError, ValueError):
             break
-        if not (prompt >= 0 and completion >= 0):
+        # Infinity, NaN, negatives and values that overflow per million tokens are not a price.
+        rates = (prompt, completion, prompt * 1e6, completion * 1e6)
+        if not all(math.isfinite(rate) and rate >= 0 for rate in rates):
             break
         return {"input": prompt, "output": completion, "perMillionInput": prompt * 1e6, "perMillionOutput": completion * 1e6, "source": "catalog"}
     return table_price(provider, model)
@@ -242,7 +244,9 @@ def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
     cost = None
     if price and count:
         low = input_tokens * price["input"] + output_tokens * price["output"]
-        cost = {"low": low, "high": low * 2}
+        # A cost that does not fit a float is unknown, never the zero JSON would turn it into.
+        if math.isfinite(low * 2):
+            cost = {"low": low, "high": low * 2}
     return {
         "candidateCount": count,
         "requests": requests,
