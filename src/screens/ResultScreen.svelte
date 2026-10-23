@@ -23,10 +23,15 @@
   const tone = $derived(presentation.tone);
   const titleKey = $derived(`result.${presentation.status}` as MessageKey);
   const bodyKey = $derived(`result.${presentation.status}Body` as MessageKey);
+  const resumable = $derived(!!app.resume && app.isResumeStatus(status));
+  // Nothing was written and no saved progress is left to continue.
+  const noSavedProgress = $derived(!resumable && !(result?.changedFileCount ?? 0));
   const body = $derived(
     presentation.status === 'completed' ? t('result.completedBody', { files: formatNumber(result?.changedFileCount ?? 0, app.locale) })
       // Nothing was written, so there is nothing to check or restore.
       : presentation.status === 'failed' && !result?.changedFileCount ? t('result.failedBodyUnchanged')
+      // These two bodies promise that the saved sentences are continued; with no saved progress that would be untrue.
+      : noSavedProgress && ['needs_retry', 'cancelled'].includes(presentation.status) ? t('result.noSavedProgress')
       : t(bodyKey)
   );
   const stats = $derived(result?.translation ?? {});
@@ -40,18 +45,28 @@
   });
   const failureRows = $derived(failureSummary(result?.translationFailureCodes));
   const showReason = $derived(presentation.showReason);
-  const resumable = $derived(!!app.resume && app.isResumeStatus(status));
   // Nothing written and the scan still on screen: the same reviewed scan can simply be run again.
   const canTranslateAgain = $derived(
     !resumable && !!app.scan && ['failed', 'needs_retry', 'cancelled', 'locked'].includes(status) && !(result?.changedFileCount ?? 0)
   );
+  // What the screen says to do next, matching the main button: continue the saved sentences, or
+  // translate again from the scan that is still on screen.
+  const nextHint = $derived.by(() => {
+    if (primary === 'retry' && presentation.status === 'failed') return t('result.resumeHint', { count: formatNumber(app.resume?.translatedCount ?? 0, app.locale) });
+    if (primary === 'again') return t('result.againHint');
+    return '';
+  });
   const usage = $derived(result?.usage);
-  // The labels are the same for every status: "prepared" counts sentences the provider returned,
-  // "applied" counts the files that were written into the world.
-  // One number leads (what the provider returned); the rest sit quietly beside it, with the same six
-  // labels on every status so a slot never changes meaning between screens.
+  // One number leads (what the provider returned); the rest sit quietly beside it, with the same
+  // labels on every status so a slot never changes meaning between screens. The leading label says
+  // whether those sentences reached the world: "applied" counts files written into it.
   const num = (value: number) => formatNumber(value, app.locale);
-  const primaryStat = $derived<Stat>({ label: t('result.stat.prepared'), value: num(stats.translated ?? 0), tone: status === 'completed' ? 'success' : 'default' });
+  const primaryLabel = $derived(
+    status === 'completed' ? t('result.stat.applied')
+      : (result?.changedFileCount ?? 0) > 0 ? t('result.stat.partlyApplied')
+      : t('result.stat.preparedOnly')
+  );
+  const primaryStat = $derived<Stat>({ label: primaryLabel, value: num(stats.translated ?? 0), tone: status === 'completed' ? 'success' : 'default' });
   const otherStats = $derived<Stat[]>([
     { label: t('result.stat.unchanged'), value: num(stats.unchanged ?? 0) },
     { label: t('result.stat.failed'), value: num(stats.failed ?? 0), tone: (stats.failed ?? 0) > 0 ? 'danger' : 'default' },
@@ -87,7 +102,7 @@
       <span class="hero-icon" aria-hidden="true"><Icon name={heroIcon} size={24} /></span>
       <div class="hero-text">
         <h2>{heroTitle}</h2>
-        <p>{heroBody}{#if showReason && reason}<br />{reason}{/if}{#if status === 'completed'}<br />{t('result.completedNext')}{/if}</p>
+        <p>{heroBody}{#if showReason && reason}<br />{reason}{/if}{#if status === 'completed'}<br />{t('result.completedNext')}{/if}{#if nextHint}<br />{nextHint}{/if}</p>
       </div>
       <div class="hero-actions">
         {#if primary === 'interrupted'}

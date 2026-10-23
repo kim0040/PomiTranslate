@@ -9,6 +9,7 @@
   import StatGrid from '../components/StatGrid.svelte';
   import Pill from '../components/Pill.svelte';
   import SetupNotice from '../components/SetupNotice.svelte';
+  import WorldSummary from '../components/WorldSummary.svelte';
   import { exportDocument } from '../lib/document-export';
   import { clock, holdClock } from '../lib/clock.svelte';
   import { warningText } from '../lib/failures';
@@ -83,6 +84,7 @@
         <ul class="promises">
           <li><Icon name="shield" size={18} /> {t('scan.startHint')}</li>
         </ul>
+        <WorldSummary />
       </div>
       <button type="button" class="btn btn-primary btn-lg" disabled={!app.worldDir || !app.inspection?.validJavaWorld} onclick={() => app.startScan()}>
         {t('scan.run')}
@@ -90,6 +92,13 @@
     </section>
     <SetupNotice />
   {:else}
+    {#if app.resume}
+      <!-- Back from an earlier visit: say what is saved and offer the way on before anything is scanned again. -->
+      <section class="card resumed" aria-labelledby="resumed-title">
+        <h2 id="resumed-title" class="section-title">{t('world.resumeFound')}</h2>
+        <WorldSummary />
+      </section>
+    {/if}
     {#if scan.status !== 'completed' || blockers.length}
       <Callout tone="danger" title={t('scan.blocked')} role="alert">
         <ul class="plain">{#each blockers as code (code)}<li>{blockerLine(code)}</li>{/each}</ul>
@@ -181,9 +190,15 @@
           <Icon name="refresh" size={15} /> {t('scan.again')}
         </button>
         {#if done && !blockers.length && scan.candidateCount > 0}
-          <button type="button" class="btn btn-primary btn-lg" onclick={() => app.goStep('review')}>
+          <!-- A saved job makes "continue" the main way on; reviewing the sentences first stays one click away. -->
+          <button type="button" class="btn {app.resume ? 'btn-secondary' : 'btn-primary'} btn-lg" onclick={() => app.goStep('review')}>
             {t('scan.review')} <Icon name="chevron-right" size={16} />
           </button>
+          {#if app.resume}
+            <button type="button" class="btn btn-primary btn-lg" disabled={app.isBusy} onclick={() => app.goStep('run')}>
+              <Icon name="play" size={16} /> {t('run.resume')}
+            </button>
+          {/if}
         {/if}
       </div>
     </div>
@@ -201,6 +216,7 @@
   .promises { list-style: none; margin: var(--space-2) 0 0; padding: 0; color: var(--text-secondary); font-size: var(--text-sm); }
   .promises li { display: flex; gap: var(--space-2); align-items: flex-start; }
   .promises :global(.icon) { margin-top: 2px; color: var(--success-text); }
+  .resumed { padding: var(--space-4) var(--space-5); }
   .kinds { padding: var(--space-4) var(--space-5); }
   .kinds ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0 var(--space-6); }
   .kinds li { display: flex; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }

@@ -94,7 +94,7 @@ test('a finished translation has one primary next action and a numbers strip', a
   await expect(page.getByRole('heading', { name: '번역 결과', exact: true })).toBeVisible();
   await expect(page.locator('main .btn-primary')).toHaveCount(1);
   await expect(page.getByRole('button', { name: '월드 폴더 열기' })).toBeVisible();
-  await expect(page.getByText('번역문 준비', { exact: true })).toBeVisible();
+  await expect(page.getByText('적용한 번역문', { exact: true })).toBeVisible();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 

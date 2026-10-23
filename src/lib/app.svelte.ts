@@ -220,6 +220,8 @@ export class AppState {
 
   progress = $state<JobProgress>(emptyProgress());
   result = $state<TranslationResult | null>(null);
+  /** When `result` arrived (ms), so a screen can say how long ago it was; 0 when there is none. */
+  resultAt = $state(0);
   resume = $state<ResumeStatus | null>(null);
   /** The recovery snapshot of the last restore, until the next scan or world change replaces the job. */
   lastRestoreId = $state('');
@@ -946,6 +948,7 @@ export class AppState {
     this.overrides = {};
     this.estimate = null;
     this.result = null;
+    this.resultAt = 0;
     this.progress = emptyProgress();
     this.resume = null;
   }
@@ -1299,6 +1302,7 @@ export class AppState {
     this.cancelling = false;
     this.banner = null;
     this.result = null;
+    this.resultAt = 0;
     this.step = 'run';
     this.progress = { ...emptyProgress(), phase: 'collect', startedAt: Date.now() };
     let outcome: TranslationResult | null = null;
@@ -1319,6 +1323,7 @@ export class AppState {
         failurePolicy: this.failurePolicy
       });
       this.result = outcome;
+      this.resultAt = Date.now();
       this.step = 'result';
       await this.loadBackups();
       if (RESUMABLE.includes(outcome.status)) {
@@ -1354,6 +1359,7 @@ export class AppState {
   translateAgain(): void {
     if (!this.scan || this.isBusy || !this.stepReached.run) return;
     this.result = null;
+    this.resultAt = 0;
     this.banner = null;
     this.step = 'run';
   }

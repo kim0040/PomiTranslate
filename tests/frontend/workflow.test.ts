@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resultPresentation, emptyProgress, reduceProgress, SAMPLE_CHARS, SAMPLE_LIMIT } from '../../src/lib/workflow';
+import { resultPresentation, emptyProgress, reduceProgress, remainingSeconds, roundEta, SAMPLE_CHARS, SAMPLE_LIMIT, type JobProgress } from '../../src/lib/workflow';
 import { LOCALES, translate, type MessageKey } from '../../src/lib/i18n/index.svelte';
 
 describe('workflow progress mapping', () => {
@@ -107,5 +107,59 @@ describe('live samples and cost from translation_progress', () => {
     progress = reduceProgress(progress, { ...event, cost: null });
     expect(progress.cost).toBe(0.0123);
     expect(reduceProgress(emptyProgress(), { ...event, cost: Number.NaN }).cost).toBeNull();
+  });
+});
+
+describe('remaining time estimate', () => {
+  const START = 1_000_000;
+  /** A run of 100 sentences that began translating at START; each pair is [seconds after start, sentences done]. */
+  function run(points: [number, number][], total = 100): JobProgress {
+    let progress = reduceProgress({ ...emptyProgress(), startedAt: START }, { event: 'phase_start', phase: 'translate', total }, START);
+    for (const [seconds, done] of points) {
+      progress = reduceProgress(progress, { event: 'translation_progress', completed: done, total }, START + seconds * 1000);
+    }
+    return progress;
+  }
+  const steady: [number, number][] = [[10, 12], [20, 24], [30, 36], [40, 48]];
+
+  it('stays hidden before 10% is done, before 20 seconds, and before enough events', () => {
+    expect(remainingSeconds(run([[5, 5], [8, 8], [9, 9], [10, 9]], 100), START + 10_000)).toBeNull();
+    // 10% and four events, but only 15 s have passed.
+    expect(remainingSeconds(run([[3, 10], [6, 11], [9, 12], [15, 13]]), START + 15_000)).toBeNull();
+    expect(remainingSeconds(run(steady.slice(0, 3)), START + 30_000)).toBeNull();
+    expect(remainingSeconds(emptyProgress(), START)).toBeNull();
+  });
+
+  it('gives the time left at the pace so far and counts down between events', () => {
+    const progress = run(steady);
+    // 48 done in 40 s = 1.2 per second; 52 left = about 43 s.
+    expect(remainingSeconds(progress, START + 40_000)).toBeCloseTo(52 / 1.2, 5);
+    expect(remainingSeconds(progress, START + 50_000)).toBeCloseTo(52 / 1.2 - 10, 5);
+  });
+
+  it('hides the estimate when the recent pace swings away from the overall pace, or the run is overdue', () => {
+    const slowing = run([[10, 20], [20, 40], [30, 41], [40, 42], [50, 43]]);
+    expect(remainingSeconds(slowing, START + 50_000)).toBeNull();
+    const speeding = run([[10, 1], [20, 2], [30, 3], [40, 4], [50, 5], [60, 40], [62, 50], [64, 60], [66, 70]]);
+    expect(remainingSeconds(speeding, START + 66_000)).toBeNull();
+    // The estimate ran out and no event came: no number rather than a zero.
+    expect(remainingSeconds(run(steady), START + 200_000)).toBeNull();
+  });
+
+  it('is silent outside the translate phase and when nothing is left', () => {
+    expect(remainingSeconds({ ...run(steady), phase: 'write' }, START + 40_000)).toBeNull();
+    expect(remainingSeconds(run([[10, 25], [20, 50], [30, 75], [40, 100]]), START + 40_000)).toBeNull();
+  });
+
+  it('restarts the pace when the translate phase starts again', () => {
+    const again = reduceProgress(run(steady), { event: 'phase_start', phase: 'translate', total: 100 }, START + 60_000);
+    expect(again.paceSamples).toEqual([]);
+  });
+
+  it('rounds to numbers that do not flicker', () => {
+    expect(roundEta(3)).toBe(10);
+    expect(roundEta(43.3)).toBe(50);
+    expect(roundEta(599)).toBe(600);
+    expect(roundEta(601)).toBe(660);
   });
 });
