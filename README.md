@@ -49,7 +49,7 @@ Search and filter by kind or state, exclude strings, or enter your own translati
 
 ![Provider, model, reasoning mode and saved-key status](docs/images/locales/en/settings.png)
 
-OpenRouter and Gemini reasoning can follow the **model default**, be **turned off** when supported, or use a **custom effort**. Model support lookup is separate from saving settings, and the save/discard bar stays pinned at the bottom.
+OpenRouter and Gemini reasoning can follow the **model default**, be **turned off** when supported, or use a **custom effort**. Model support lookup is separate from saving settings, and the save/discard bar stays pinned at the bottom. Settings is split into a **Translation** tab (shown here) and an **App** tab; the display language and appearance on the App tab apply the moment you change them.
 
 <details>
 <summary>Pre-run summary</summary>

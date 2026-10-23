@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "capturedOn": "2026-10-02",
-  "environment": "macOS / Playwright Chromium",
+  "capturedOn": "2026-10-23",
+  "environment": "Windows 10 / Playwright Chromium",
   "theme": "light",
   "synthetic": true,
   "externalRequests": 0,
   "paidRequests": 0,
-  "sourceHash": "4859a5540bb056739ffb7f3645c8c2e506405ba2d63b01b0997db46eb130e02e",
+  "sourceHash": "43299199e0a6142e8a1e3568a7c205ff83bee33a6b9d97c3d9fda96b3521ed05",
   "sourceFiles": [
     "package.json",
     "pnpm-lock.yaml",
@@ -14,45 +14,78 @@
     "src/App.svelte",
     "src/app.css",
     "src/components/AppMaintenance.svelte",
+    "src/components/Brand.svelte",
     "src/components/Callout.svelte",
     "src/components/CandidateDetail.svelte",
     "src/components/CandidateTable.svelte",
+    "src/components/CrashScreen.svelte",
+    "src/components/CredentialStoreNotice.svelte",
     "src/components/Dialog.svelte",
+    "src/components/DiscardReviewDialog.svelte",
+    "src/components/ExitDialog.svelte",
     "src/components/ExternalResourcePacks.svelte",
+    "src/components/GlossaryAddDialog.svelte",
+    "src/components/GlossaryImportDialog.svelte",
     "src/components/Icon.svelte",
+    "src/components/InterruptedWork.svelte",
     "src/components/LicensesDialog.svelte",
+    "src/components/ListRow.svelte",
+    "src/components/PageHeader.svelte",
+    "src/components/Pill.svelte",
+    "src/components/Popover.svelte",
     "src/components/ProgressBar.svelte",
+    "src/components/QualityReport.svelte",
     "src/components/ResetDialog.svelte",
     "src/components/ResourcePackSettings.svelte",
     "src/components/ScanScopeSettings.svelte",
+    "src/components/SettingsHint.svelte",
+    "src/components/SetupNotice.svelte",
     "src/components/Sidebar.svelte",
     "src/components/SourceOverrides.svelte",
+    "src/components/StatGrid.svelte",
+    "src/components/StatusScreen.svelte",
     "src/components/Stepper.svelte",
     "src/components/Toasts.svelte",
     "src/components/Tour.svelte",
+    "src/components/WorldCard.svelte",
+    "src/components/WorldSummary.svelte",
     "src/lib/api.ts",
     "src/lib/app.svelte.ts",
-    "src/lib/backend.ts",
+    "src/lib/backups.ts",
     "src/lib/candidates.svelte.ts",
+    "src/lib/clock.svelte.ts",
+    "src/lib/diagnostics.ts",
     "src/lib/document-export.ts",
+    "src/lib/failures.ts",
     "src/lib/format.ts",
+    "src/lib/glossary-casefold.json",
+    "src/lib/glossary.ts",
     "src/lib/i18n/en.ts",
     "src/lib/i18n/index.svelte.ts",
     "src/lib/i18n/ja.ts",
     "src/lib/i18n/ko.ts",
+    "src/lib/landing.ts",
+    "src/lib/licenses.ts",
+    "src/lib/local-prefs.ts",
     "src/lib/motion.ts",
     "src/lib/native.ts",
+    "src/lib/plugins.ts",
     "src/lib/reasoning.ts",
+    "src/lib/recommended-models.ts",
+    "src/lib/reset.ts",
     "src/lib/resource-pack.ts",
+    "src/lib/review.ts",
     "src/lib/settings-import.ts",
     "src/lib/settings.ts",
     "src/lib/theme.ts",
+    "src/lib/tokens.ts",
     "src/lib/version.ts",
     "src/lib/virtual.ts",
     "src/lib/workflow.ts",
     "src/main.ts",
     "src/screens/AboutScreen.svelte",
     "src/screens/BackupsScreen.svelte",
+    "src/screens/GlossaryScreen.svelte",
     "src/screens/HelpScreen.svelte",
     "src/screens/ResultScreen.svelte",
     "src/screens/ReviewScreen.svelte",
@@ -62,6 +95,7 @@
     "src/screens/WorldScreen.svelte",
     "src/styles/base.css",
     "src/styles/components.css",
+    "src/styles/forced-colors.css",
     "src/styles/tokens.css",
     "tests/frontend/preview.html",
     "tests/frontend/tauri-fixture-init.js"
@@ -73,8 +107,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 150451,
-      "sha256": "308f0bcef32db1ebc18c2e14b4fa003c3d344705fad58f55d015b14c521ff549"
+      "bytes": 112105,
+      "sha256": "18baecb76ef65cc2556030c943de64db8489d3dc41c45c1226228e0b7a312e70"
     },
     {
       "path": "locales/ko/settings.png",
@@ -82,8 +116,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 119191,
-      "sha256": "d731f7cc734739c305695f662b26c6062d731003185e9f3e90b0722e0b733d6e"
+      "bytes": 122792,
+      "sha256": "b3d288d793c43e951d72d253820ad56ae71b1af641cd8e485c32a5e359f57e63"
     },
     {
       "path": "locales/ko/run.png",
@@ -91,8 +125,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 138426,
-      "sha256": "d00d4a60f8e2c00ed056df41ca62c985e2335050f3b5d75723c6dcc9033f825d"
+      "bytes": 131685,
+      "sha256": "5cf1db14f62952d9bb3d982ec5a2296b48b66f97b72bdf3403fd4d0e2e9d7fbe"
     },
     {
       "path": "locales/en/review.png",
@@ -100,8 +134,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 155867,
-      "sha256": "4ca560e6d1261acf8f8490118f656e34cd462a8e0a2776c299f8b36c53a00a3e"
+      "bytes": 121830,
+      "sha256": "b273805de827c767bf4e15e6a0d2cd047be8a16702cd97e8d1f5bce4b595a736"
     },
     {
       "path": "locales/en/settings.png",
@@ -109,8 +143,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 121308,
-      "sha256": "bf45a6ca623afe376f977432760474e887f768074d3bbc44637b12d9f7c42948"
+      "bytes": 131699,
+      "sha256": "06bbd68c5e14b90a782d2fa0c1141d79ef45a2cc5da67447957564579dd70f84"
     },
     {
       "path": "locales/en/run.png",
@@ -118,8 +152,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 140993,
-      "sha256": "e1e6019b0ee68e6622a7ab08ea6e5ef18bb30720d2e3274c3d7ef46d6c5b53bd"
+      "bytes": 142897,
+      "sha256": "eb44165f6a694b5b162465a0533090d393726a35d46cf7ff491a2ce27119396c"
     },
     {
       "path": "locales/ja/review.png",
@@ -127,8 +161,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 172428,
-      "sha256": "58702a39079cb9148ec433ba10de4af7f76a5b08316b1f44898d288bae7c0dee"
+      "bytes": 127777,
+      "sha256": "acc80e599fa3a74e124bb2b7c68cfdc9b3fc330c06c6f608ef26b5fc84d6710a"
     },
     {
       "path": "locales/ja/settings.png",
@@ -136,8 +170,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 132261,
-      "sha256": "74b4d411dd5c9325d7ae11f59458381ff0ba80b0ddd0c63e7d5e7b3322712f66"
+      "bytes": 143657,
+      "sha256": "9b76cb19f85da4e4fe64fde01237ad01764f24eaca76ae230fafd063e4b67175"
     },
     {
       "path": "locales/ja/run.png",
@@ -145,8 +179,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 161276,
-      "sha256": "3c82f56913adb24f1bb3d233e15d149a58b4c2d72c96d9410c6ac9cdb399bba6"
+      "bytes": 152366,
+      "sha256": "25e05ff97b4fbfdc5fe57ac4afc446e23ee3593e5e79749e3bcfca73c186dc91"
     }
   ],
   "aliases": {

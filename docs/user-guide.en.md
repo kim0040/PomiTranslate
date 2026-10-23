@@ -12,7 +12,13 @@ Close Minecraft or the server and make an **independent copy of your world**. Au
 
 ## 1. Settings
 
-Settings has two parts. The **Translation** tab (provider, key, model, languages, scope, performance, settings import/export) needs Save, and the bottom save bar appears on this tab only. The **App** tab (appearance, display language, notifications, updates, data, diagnostics, reset) applies the moment you change something and has no Save button. Moving to the App tab with unsaved translation settings first asks whether to save, discard or keep editing. The arrow keys (←→, Home, End) switch tabs.
+Settings has two parts. The **Translation** tab (provider, key, model, languages, scope, performance, settings import/export) needs Save, and the bottom save bar appears on this tab only. The **App** tab (appearance, display language, notifications, updates, data, diagnostics, reset) applies the moment you change something and has no Save button. Moving to the App tab (or to another screen) with unsaved translation settings first asks whether to save, discard or keep editing; leaving without saving drops the changed settings and any API key you typed. The arrow keys (←→, Home, End) switch tabs.
+
+### First-time setup and going back
+
+On the first launch a four-step introduction appears once after you accept the notice; if no API key is saved yet, its last screen offers **Set up an API key**, which opens Settings. While no AI model is chosen or no API key is saved, the World and Scan screens show "AI translation is not set up yet" and the Translate screen shows "Finish the setup to start translating". You can scan and review before the setup. It is only needed before translating, and a job in which you translate every line yourself runs without it.
+
+**Set up in Settings** in these notices (Review has the same button at the bottom when translating is blocked) opens the Translation tab with **Back to** the step name at the top. While you have changes to save, the button on the save bar reads **Save and go back** and returns you to where you were as soon as the settings are saved. Going to another screen without saving shows the save/discard/keep-editing question first.
 
 ### Provider, model and key
 
@@ -20,7 +26,7 @@ Settings has two parts. The **Translation** tab (provider, key, model, languages
 
 - **Provider:** choose OpenAI, Gemini, Anthropic, OpenRouter, Comet or Custom endpoint. Custom requires an endpoint URL and an OpenAI/Anthropic-compatible wire format.
 - **Model:** enter a model ID or choose from the list. When known, input and output prices are shown per million tokens.
-- **Load model list:** OpenRouter's public catalog loads automatically and can be refreshed manually. This lookup does not save settings or send keys or world text. Other providers may require a saved key. Cached information, lookup failures and missing models are distinguished in the UI.
+- **Load model list:** OpenRouter's public catalog loads automatically and can be refreshed manually. This lookup does not save settings or send keys or world text. Other providers may require a saved key. Cached information, lookup failures and missing models are distinguished in the UI. After you save a key (except for OpenRouter) the app loads the model list once with the saved key. If that fails nothing is blocked and you can retry with **Load model list**; without a key you can still type a model ID.
 - **API key:** save your own key for AI translation. Saved keys are represented by their storage status and mode, never their original value. You can change or delete them.
 - **Reasoning (OpenRouter and Gemini):** choose Model default, Disable reasoning or Custom. Verified model information restricts the available effort levels; mandatory reasoning cannot be disabled. For Gemini, refresh support information using a saved key to check thinking support. Gemini 3 models enable thinking by default and can consume many billed output tokens even for short translations. Disable reasoning for translation where possible. Some models cannot turn it off completely; the app adjusts to the lowest accepted level. Thinking tokens are included in reported output usage.
 - **Check OpenRouter usage:** retrieves cumulative credits used by the saved key without translating or saving settings. Other jobs using that key and reporting delays can affect the before/after difference. It may differ from this job's cost.
@@ -51,7 +57,7 @@ Configure concurrency, sentences per batch, requests per minute (RPM), tokens pe
 
 ### Interface and app information
 
-- **Display Language:** Korean, English or Japanese. Changing the UI language does not choose the translation language. Chinese documentation is available; Chinese UI is not implemented.
+- **Display Language:** Korean, English or Japanese. Picking it on the App tab changes the whole interface at once and has no Save button. It does not choose the translation language. Chinese documentation is available; Chinese UI is not implemented.
 - **Appearance:** choose System, Light or Dark in Settings or the View menu. The selection applies immediately and is stored without pressing Save. System follows OS appearance changes. Startup background handling is implemented; current macOS/Windows native appearance checks remain pending.
 - **Zoom:** View offers 75–200%. `Cmd/Ctrl+0` resets to 100%; `Cmd/Ctrl+2` selects 200%.
 - **Menus and shortcuts:** `Cmd/Ctrl+O` opens a world, `Cmd+,` opens Settings on macOS, and `Cmd/Ctrl+F` focuses Review search. Help includes the guide, getting started, shortcuts, licenses and issue reporting. Update checks appear in the macOS app menu or the Help menu elsewhere. Web links open in the default browser.
@@ -60,6 +66,7 @@ Configure concurrency, sentences per batch, requests per minute (RPM), tokens pe
 - **Help/getting started:** open Help from the sidebar, `F1`, or macOS `Cmd+?`. It includes quick start, FAQs, shortcuts and provider key pages. A four-step introduction appears after accepting the first-launch notice and can be reopened from Help.
 - **Updates:** check in Settings. Optional daily automatic checks fetch only GitHub version metadata. Builds containing a signature-verification key can install and restart; other builds open the download page. Installation is blocked during scan, translation and restore. Settings, saved keys and backups are intended to persist. Signed updates are not yet release-validated. If settings have unsaved changes, the app first asks whether to save them, discard them or cancel before it restarts.
 - **Data location:** Settings displays and opens the settings/jobs/backups and encrypted-key directories. Updates and cache cleanup must not delete these directories. See [updates and data preservation (Korean)](updates-and-data.md).
+- **Diagnostics:** under Data location on the App tab, **Copy diagnostics** and **Save diagnostics as a file** prepare what a problem report needs: versions, recent events and the translation core's last output. API keys and world text are not included, and the home folder path is shortened. Saving uses the desktop app's save dialog; if it fails, choose another folder or copy instead (a browser preview can only copy). The error screen shown when the app itself fails to draw has the same two buttons.
 - **Reset:** two confirmations clear settings, recent worlds, resumable jobs, model catalogs and optionally saved API keys, then restart the app. **World backups and original worlds are retained.** If a step cannot be confirmed (for example the OS keychain), the app does not go on with the rest: it shows what is left and you can try again. Entries that stay unconfirmed can be removed by hand: delete the PomiTranslate entries in your system keychain.
 
 ## 2. Select a world and scan
@@ -111,6 +118,8 @@ In Run, check the world, target language, provider/model, strings to send, manua
 | Unsupported | World files are unchanged. |
 
 The first number is named by state: "Translations applied" (written to the world), "partly applied" or "prepared only" (nothing written). The result reports applied/retained/failed/protected strings, changed files, requests, tokens and reported cost, with examples and failure details. Check translations and commands **in game**. Exported reports may contain world paths, source text and translations; inspect them before sharing.
+
+After a failed or partial run, **Retry Remaining Sentences** is the first button of the result screen when translations are still saved. When nothing is left to resume, the world files are unchanged, so **Translate again with the same scan** (it shows the estimated cost again before it starts) comes first; if you changed the world or the settings, use **Scan Again from Scratch**.
 
 ## 5. Restore
 
