@@ -13,8 +13,11 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
+from mwt import gemini_floor
+from mwt.model_filter import filter_translation_models
 from mwt.reasoning import (
     GEMINI_LEVELS,
     gemini_reasoning,
@@ -803,8 +806,8 @@ def _read_limited(response: Any, limit: int, guard: _RequestGuard | None = None)
 
 DEFAULT_OUTPUT_TOKENS = 4096
 GEMINI_MIN_OUTPUT_TOKENS = 32768
-# The lowest thinking level each Gemini model accepted in this process, learned from 400 replies.
-_GEMINI_LEVEL_FLOOR: dict[str, str] = {}
+# The lowest thinking level each Gemini model accepts is learned from 400 replies and kept by
+# mwt.gemini_floor, in this process and in the app data folder.
 
 
 class LLMProviderClient(metaclass=_ClientMeta):
@@ -849,18 +852,20 @@ class LLMProviderClient(metaclass=_ClientMeta):
     def list_models(self) -> list[dict[str, Any]]:
         self.ensure_ready(require_model=False)
         if self.family == "openai_compatible":
-            return self._list_models_openai_compatible()
-        if self.family == "gemini":
-            return self._list_models_gemini()
-        if self.family == "anthropic":
-            return self._list_models_anthropic()
-        raise RuntimeError(f"Unsupported provider family: {self.family}")
+            models = self._list_models_openai_compatible()
+        elif self.family == "gemini":
+            models = self._list_models_gemini()
+        elif self.family == "anthropic":
+            models = self._list_models_anthropic()
+        else:
+            raise RuntimeError(f"Unsupported provider family: {self.family}")
+        return filter_translation_models(self.provider, models, self.model)
 
     def list_public_models(self) -> list[dict[str, Any]]:
         """Read OpenRouter's pinned catalog without authenticating or generating text."""
         if self.provider != "openrouter" or self.base_url != default_base_url("openrouter"):
             raise ValueError("Public catalog is only available at the OpenRouter endpoint")
-        return self._list_models_openai_compatible(public=True)
+        return filter_translation_models(self.provider, self._list_models_openai_compatible(public=True), self.model)
 
     def try_refresh_text_models(self) -> list[dict[str, Any]]:
         """Fetch text models once and pin the configured id to a published model."""
@@ -886,11 +891,11 @@ class LLMProviderClient(metaclass=_ClientMeta):
 
             from mwt.userdata import load_model_catalog
 
-            self._catalog = [
-                item
-                for item in load_model_catalog(self.provider, root=Path(self.data_dir))
-                if item.get("text", True)
-            ]
+            self._catalog = filter_translation_models(
+                self.provider,
+                [item for item in load_model_catalog(self.provider, root=Path(self.data_dir)) if item.get("text", True)],
+                self.model,
+            )
         self._catalog_checked = True
         if self.model and self._catalog:
             match = next((item for item in self._catalog if item.get("id") == self.model), None)
@@ -1318,38 +1323,66 @@ class LLMProviderClient(metaclass=_ClientMeta):
         if expect_json:
             payload["generationConfig"]["responseMimeType"] = "application/json"
         thinking = gemini_thinking_config(self.openrouter_reasoning, self.model, self.model_info)
+        root = Path(self.data_dir) if self.data_dir else None
+        floor_key = gemini_floor.key_for(self.provider, self.base_url, self.model)
+
+        def raise_to_floor(config: dict[str, Any] | None) -> dict[str, Any] | None:
+            current = (config or {}).get("thinkingLevel")
+            known = gemini_floor.floor(floor_key, root) if current else None
+            if current and known and GEMINI_LEVELS.index(known) > GEMINI_LEVELS.index(current):
+                return {"thinkingLevel": known}
+            return config
+
+        thinking = raise_to_floor(thinking)
         level = (thinking or {}).get("thinkingLevel")
-        floor = _GEMINI_LEVEL_FLOOR.get(self.model)
-        if level and floor and GEMINI_LEVELS.index(floor) > GEMINI_LEVELS.index(level):
-            thinking, level = {"thinkingLevel": floor}, floor
-        while True:
-            if thinking is not None:
-                payload["generationConfig"]["thinkingConfig"] = thinking
-            try:
-                response = self._request_json(
-                    "POST",
-                    f"{self.base_url}/{model_name}:generateContent",
-                    headers=self._gemini_headers(),
-                    payload=payload,
-                )
-                break
-            except ProviderError as exc:
-                if exc.parameter == "temperature" and "temperature" not in self._dropped:
-                    # The model takes no temperature: leave it out for the rest of this client's life.
-                    self._dropped.add("temperature")
-                    payload["generationConfig"].pop("temperature", None)
-                    self._note_adapted("temperature")
-                    continue
-                # Models disagree on their lowest level (3.8 flash rejects "minimal"). Use the next
-                # level up rather than failing every batch; "high" is the ceiling.
-                text = exc.detail.lower()
-                if not (exc.status == 400 and level and "thinking level" in text and "not supported" in text):
-                    raise
-                if level == GEMINI_LEVELS[-1]:
-                    raise
-                level = GEMINI_LEVELS[GEMINI_LEVELS.index(level) + 1]
-                thinking = {"thinkingLevel": level}
-                _GEMINI_LEVEL_FLOOR[self.model] = level
+        # One batch finds the lowest level the model takes while the others wait for it, so a job
+        # sends at most one refused request per model however many batches run at once.
+        lock = gemini_floor.probe_lock(floor_key) if level and gemini_floor.needs_probe(floor_key, level) else None
+        held = lock is not None and lock.acquire(timeout=self.timeout + 5)
+        stepped = False
+        try:
+            if held:
+                thinking = raise_to_floor(thinking)
+                level = (thinking or {}).get("thinkingLevel")
+                if not gemini_floor.needs_probe(floor_key, level):
+                    lock.release()
+                    held = False
+            while True:
+                if thinking is not None:
+                    payload["generationConfig"]["thinkingConfig"] = thinking
+                try:
+                    response = self._request_json(
+                        "POST",
+                        f"{self.base_url}/{model_name}:generateContent",
+                        headers=self._gemini_headers(),
+                        payload=payload,
+                    )
+                    break
+                except ProviderError as exc:
+                    if exc.parameter == "temperature" and "temperature" not in self._dropped:
+                        # The model takes no temperature: leave it out for the rest of this client's life.
+                        self._dropped.add("temperature")
+                        payload["generationConfig"].pop("temperature", None)
+                        self._note_adapted("temperature")
+                        continue
+                    # Models disagree on their lowest level (3.8 flash rejects "minimal"). Use the next
+                    # level up rather than failing every batch; "high" is the ceiling.
+                    text = exc.detail.lower()
+                    if not (exc.status == 400 and level and "thinking level" in text and "not supported" in text):
+                        raise
+                    if level == GEMINI_LEVELS[-1]:
+                        raise
+                    level = GEMINI_LEVELS[GEMINI_LEVELS.index(level) + 1]
+                    thinking = {"thinkingLevel": level}
+                    stepped = True
+            if level:
+                gemini_floor.accepted(floor_key, level)
+                if stepped:
+                    # Only a level the model took is remembered, never one it was merely asked to try.
+                    gemini_floor.learned(floor_key, self.base_url, level, root)
+        finally:
+            if held:
+                lock.release()
         candidates = response.get("candidates") or []
         if not candidates:
             reason = (response.get("promptFeedback") or {}).get("blockReason")

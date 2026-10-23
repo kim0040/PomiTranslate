@@ -94,6 +94,10 @@ jobs:
         run: python tests/test_jsonl_channel.py
       - name: Provider redirects, own-key routing, redaction, request budgets
         run: python tests/test_provider_hardening.py
+      - name: Gemini thinking floor is kept across jobs and concurrent batches
+        run: python tests/test_gemini_floor.py
+      - name: Model lists offer only models that can translate text
+        run: python tests/test_model_filter.py
       - name: Formatter and Minecraft placeholder preservation
         run: python tests/test_text_tokens.py
       - name: Legacy web UI token, Host, Origin and JSON checks
