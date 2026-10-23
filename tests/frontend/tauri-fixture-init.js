@@ -435,15 +435,16 @@
       if (keyUnbound()) throw { code: 'CREDENTIAL_ENDPOINT_UNBOUND', message: 'raw shell text that must not be shown' };
       if (current === 'run-progress') {
         // ?progress=nocost: the provider reports no cost (null). ?progress=many: more samples than the list keeps.
-        // ?progress=eta / eta-wobble: 100 sentences with an event every few seconds (run under page.clock) for the remaining-time estimate.
+        // ?progress=eta-retry adds a rate-limit retry notice after the last event. ?progress=eta / eta-wobble: 100 sentences with an event every few seconds (run under page.clock) for the remaining-time estimate.
         const progressMode = new URLSearchParams(location.search).get('progress');
         setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'phase_start', phase: 'translate', total: String(progressMode).startsWith('eta') ? 100 : 6, requests_estimate: 1 } }), 50);
         if (String(progressMode).startsWith('eta')) {
           // [seconds after the start, sentences done]: a steady pace, or one that jumps about.
-          const points = progressMode === 'eta' ? [[5, 6], [10, 12], [15, 18], [20, 24], [25, 30], [30, 36]] : [[5, 1], [10, 2], [15, 3], [20, 4], [25, 5], [28, 60], [30, 90]];
+          const points = progressMode.startsWith('eta') && progressMode !== 'eta-wobble' ? [[5, 6], [10, 12], [15, 18], [20, 24], [25, 30], [30, 36]] : [[5, 1], [10, 2], [15, 3], [20, 4], [25, 5], [28, 60], [30, 90]];
           for (const [seconds, completed] of points) {
             setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_progress', completed, total: 100, failed: 0, batch: 1, batches: 10, requests: 1, cost: 0.0001 } }), seconds * 1000 + 100);
           }
+          if (progressMode === 'eta-retry') setTimeout(() => emit('pomi-progress', { v: 1, id: request.id, type: 'translate.progress', payload: { event: 'translation_batch_error', attempt: 1, max_attempts: 3, failure: 'rate_limit' } }), 33000);
           return new Promise((resolve) => setTimeout(() => resolve(ok(request, resultPayload('completed'))), 600000));
         }
         const sentence = (n) => ({ source: `Sentence ${n} ${'x'.repeat(200)}`, translated: `문장 ${n}` });

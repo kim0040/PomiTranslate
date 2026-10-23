@@ -214,6 +214,45 @@ test.describe('elapsed time and the remaining-time estimate (U11)', () => {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   });
 
+  test('hides the estimate when progress stalls, during a retry and while cancelling, and keeps the clock running', async ({ page }) => {
+    const eta = page.getByText(/^남은 시간 약 /);
+    await runWithClock(page, 'eta-retry');
+    // Events every 5 s up to 36% at 30 s; the estimate is shown just after.
+    await page.clock.runFor(31_000);
+    await expect(eta).toHaveCount(1);
+    // A rate-limit retry is reported at 33 s: no countdown while it lasts.
+    await page.clock.runFor(3_000);
+    await expect(page.getByText(/재시도 중입니다/)).toBeVisible();
+    await expect(eta).toHaveCount(0);
+    // 50 s without progress: still hidden, while the elapsed clock keeps running.
+    const before = (await elapsed(page)).page;
+    await page.clock.runFor(50_000);
+    await expect(eta).toHaveCount(0);
+    expect((await elapsed(page)).page).not.toBe(before);
+  });
+
+  test('hides the estimate once progress is older than three typical gaps, with no retry reported', async ({ page }) => {
+    await runWithClock(page, 'eta');
+    const eta = page.getByText(/^남은 시간 약 /);
+    await page.clock.runFor(31_000);
+    await expect(eta).toHaveCount(1);
+    await page.clock.runFor(10_000);
+    await expect(eta).toHaveCount(1);
+    // Last progress at 30 s; at 50 s the limit (15 s) is long past, yet the old prediction would still show 10 s or more.
+    await page.clock.runFor(10_000);
+    await expect(eta).toHaveCount(0);
+  });
+
+  test('hides the estimate while cancelling', async ({ page }) => {
+    await runWithClock(page, 'eta');
+    const eta = page.getByText(/^남은 시간 약 /);
+    await page.clock.runFor(31_000);
+    await expect(eta).toHaveCount(1);
+    await page.getByRole('button', { name: '번역 취소', exact: true }).click();
+    await expect(page.getByRole('button', { name: /안전하게 정리하고 중단하는 중/ })).toBeDisabled();
+    await expect(eta).toHaveCount(0);
+  });
+
   test('hides the estimate while the pace is jumping about', async ({ page }) => {
     await runWithClock(page, 'eta-wobble');
     await page.clock.runFor(31_000);

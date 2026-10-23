@@ -166,19 +166,36 @@ export const ETA_MIN_ELAPSED_SECONDS = 20;
 export const ETA_MIN_SAMPLES = 4;
 export const ETA_STABLE_RATIO = 2;
 
+/** A stall is no progress for this many typical gaps, but never less than this many seconds. */
+export const ETA_STALL_GAPS = 3;
+export const ETA_STALL_MIN_SECONDS = 15;
+
+function medianGapSeconds(samples: [number, number][]): number {
+  const gaps: number[] = [];
+  for (let at = 1; at < samples.length; at += 1) gaps.push((samples[at][0] - samples[at - 1][0]) / 1000);
+  gaps.sort((a, b) => a - b);
+  const middle = gaps.length >> 1;
+  return gaps.length % 2 ? gaps[middle] : (gaps[middle - 1] + gaps[middle]) / 2;
+}
+
 /**
  * Seconds left, from the pace of the sentences finished so far, or null while there is no honest
  * number: before 10% is done and 20 s have passed, while the pace is still swinging (the recent
- * pace is more than twice faster or slower than the overall one), or when the run is overdue.
- * The estimate counts down between events instead of being recomputed from a longer elapsed time.
+ * pace is more than twice faster or slower than the overall one), when the run is overdue, when the
+ * last progress is older than 3 typical gaps (at least 15 s: a stall), and while a retry is reported
+ * or the run is being cancelled (`paused`). After a stall the number returns only once fresh progress
+ * passes the same checks. The estimate counts down between events instead of being recomputed from a
+ * longer elapsed time.
  */
-export function remainingSeconds(progress: JobProgress, now: number): number | null {
+export function remainingSeconds(progress: JobProgress, now: number, paused: boolean = false): number | null {
+  if (paused || progress.retry) return null;
   if (progress.phase !== 'translate' || progress.total <= 0 || !progress.translateStartedAt) return null;
   if (progress.done / progress.total < ETA_MIN_FRACTION || progress.done >= progress.total) return null;
   if ((now - progress.translateStartedAt) / 1000 < ETA_MIN_ELAPSED_SECONDS) return null;
   const samples = progress.paceSamples;
   if (samples.length < ETA_MIN_SAMPLES) return null;
   const [lastAt, lastDone] = samples[samples.length - 1];
+  if ((now - lastAt) / 1000 > Math.max(ETA_STALL_GAPS * medianGapSeconds(samples), ETA_STALL_MIN_SECONDS)) return null;
   const [firstAt, firstDone] = samples[samples.length - ETA_MIN_SAMPLES];
   const overall = lastDone / ((lastAt - progress.translateStartedAt) / 1000);
   const recent = (lastDone - firstDone) / ((lastAt - firstAt) / 1000);

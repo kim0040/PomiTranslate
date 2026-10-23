@@ -160,6 +160,47 @@ test('menu actions land on the right part', async ({ page }) => {
   await expect(page.getByRole('tab', { name: '번역', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
+test('the Settings menu lands on the translation part also while the app part is open', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await open(page);
+  const translation = page.getByRole('tab', { name: '번역', exact: true });
+  await showApp(page);
+  await page.evaluate(() => (window as any).__pomiEmit('pomi-menu', 'settings'));
+  await expect(translation).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#settings-panel-app')).toBeHidden();
+  // Asking again from the translation part changes nothing.
+  await page.evaluate(() => (window as any).__pomiEmit('pomi-menu', 'settings'));
+  await expect(translation).toHaveAttribute('aria-selected', 'true');
+  // The update check still goes to the app part, and unsaved translation edits are asked about first.
+  await page.locator('#target-language').fill('English');
+  await page.evaluate(() => (window as any).__pomiEmit('pomi-menu', 'updates'));
+  const dialog = page.getByRole('dialog', { name: '저장하지 않은 설정이 있습니다' });
+  await expect(dialog).toBeVisible();
+  await expect(translation).toHaveAttribute('aria-selected', 'true');
+  await dialog.getByRole('button', { name: '계속 편집', exact: true }).click();
+  await expect(translation).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#target-language')).toHaveValue('English');
+});
+
+for (const [name, dismiss] of [
+  ['"Keep editing"', async (page: Page) => page.getByRole('dialog').getByRole('button', { name: '계속 편집', exact: true }).click()],
+  ['Escape', async (page: Page) => page.keyboard.press('Escape')]
+] as const) {
+  test(`after a pointer click on the app part and ${name}, focus is on the translation tab that stays selected`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await open(page);
+    const translation = page.getByRole('tab', { name: '번역', exact: true });
+    await page.locator('#target-language').fill('English');
+    await page.getByRole('tab', { name: '앱', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: '저장하지 않은 설정이 있습니다' })).toBeVisible();
+    await dismiss(page);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(translation).toHaveAttribute('aria-selected', 'true');
+    await expect(translation).toBeFocused();
+    await expect(page.locator('#target-language')).toHaveValue('English');
+  });
+}
+
 test('scrolling moves the highlight and the last section wins at the bottom', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 520 });
   await open(page);
