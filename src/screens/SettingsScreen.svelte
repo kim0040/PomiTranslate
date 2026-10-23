@@ -745,6 +745,7 @@
           <div class="hint" role="status" aria-live="polite">
             {#if visibleModelError}<span class="field-error">{visibleModelError}</span>
             {:else if app.modelsLoading}{t(autoListing ? 'settings.model.autoListing' : 'settings.model.listing')}
+            {:else if reasoningModel?.unsuitable_reason}<span class="model-warning"><Icon name="alert-triangle" size={14} />{t('settings.model.unsuitable')}</span>
             {:else if draft.model.trim() && models.length && !reasoningModel}<span class="model-warning"><Icon name="alert-triangle" size={14} />{t('settings.model.notFound')}</span>
             {:else if reasoningModel}{t('settings.model.verified')}{#if app.modelsCached} · {t('settings.model.cached')}{/if}
             {:else if draft.provider !== 'openrouter' && stored === false && !models.length}{t('settings.model.needKey')}{/if}

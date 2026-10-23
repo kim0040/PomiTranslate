@@ -314,6 +314,8 @@ export type ModelInfo = {
   pricing_prompt?: string;
   pricing_completion?: string;
   context_length?: number;
+  /** Set only on the saved model when the core's list filter says it cannot translate text (`id:tts`, `output:image`). */
+  unsuitable_reason?: string;
 };
 
 export type ProgressEvent = {

@@ -41,6 +41,7 @@ export const ja: Record<MessageKey, string> = {
   "settings.model.saveKeyFirst": "新しいAPIキーを先に保存してください。モデル取得は保存済みのキーのみを使用します。",
   "settings.model.failed": "モデル一覧を取得できませんでした。接続と保存済みのキーを確認して、もう一度読み込んでください。",
   "settings.model.notFound": "このIDはこのプロバイダーのモデル一覧にありません。入力ミスがないか確認してください。そのまま保存して使うこともできます。",
+  "settings.model.unsuitable": "このモデルは文章を生成しないモデル（音声・画像・埋め込みなど）のようで、翻訳に使えない可能性があります。一覧から別のモデルを選ぶことをおすすめします。",
   "settings.model.needKey": "APIキーを保存すると、このプロバイダーのモデル一覧が表示されます。それ以前でもモデルIDを直接入力できます。",
   "settings.model.autoListing": "保存したキーでモデル一覧を読み込み中…",
   "settings.model.verified": "モデルの対応情報を確認済み",

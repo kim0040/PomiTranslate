@@ -89,6 +89,8 @@ test('keyboard moves through a narrow review list without opening the detail she
   await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog')).toBeVisible();
   await expect(page.locator('#manual-translation')).toBeFocused();
+  // One way to close it in the sheet: its "close" button (and Escape), not a second X in the corner.
+  await expect(page.getByRole('dialog').getByRole('button', { name: '닫기' })).toHaveCount(1);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('tr[data-index="1"]')).toBeFocused();

@@ -41,6 +41,7 @@ export const en: Record<MessageKey, string> = {
   "settings.model.saveKeyFirst": "Save the new API key first. Model lookup only uses saved credentials.",
   "settings.model.failed": "Could not load the model list. Check your connection and saved credentials, then load it again.",
   "settings.model.notFound": "This ID is not in this provider's model list. Check it for typos. You can still save and use it.",
+  "settings.model.unsuitable": "This model looks like one that does not write text (speech, image, embedding and the like), so it may not translate. Picking another model from the list is recommended.",
   "settings.model.needKey": "The model list appears once the API key is saved. You can type a model ID before that.",
   "settings.model.autoListing": "Loading the model list with the saved key…",
   "settings.model.verified": "Model support information verified",

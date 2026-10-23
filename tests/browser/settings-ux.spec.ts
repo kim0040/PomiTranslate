@@ -195,6 +195,18 @@ test.describe('model list before and after the key', () => {
     await expect(page.getByText('모델 지원 정보 확인됨')).toBeVisible();
   });
 
+  test('a saved model the list marks as unable to write text is kept and flagged', async ({ page }) => {
+    await fresh(page, '&unsuitableModel=1');
+    await page.locator('#api-key').fill('synthetic-new-openai-key');
+    await page.getByRole('button', { name: '저장', exact: true }).click();
+    await expect.poll(() => requests(page)).toContain('models.list');
+    await page.locator('#model').fill('saved-tts-fixture');
+    await expect(page.getByText('번역에 쓸 수 없을 수 있습니다', { exact: false })).toBeVisible();
+    await expect(page.getByText('이 제공사의 모델 목록에 없는 ID입니다', { exact: false })).toHaveCount(0);
+    await page.locator('#model').fill('mandatory-fixture');
+    await expect(page.getByText('번역에 쓸 수 없을 수 있습니다', { exact: false })).toHaveCount(0);
+  });
+
   test('a failed automatic lookup blocks nothing and the button retries', async ({ page }) => {
     await fresh(page, '&modelError=1');
     await page.locator('#model').fill('typed-model');

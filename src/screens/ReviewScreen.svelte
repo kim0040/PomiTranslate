@@ -232,7 +232,7 @@
 </div>
 
 {#if !wide && selected && detailOpen}
-  <Dialog title={t('review.detail.title')} onClose={() => (detailOpen = false)}>
+  <Dialog title={t('review.detail.title')} showClose={false} onClose={() => (detailOpen = false)}>
     <CandidateDetail candidate={selected} showHeading={false} />
     {#snippet actions()}<button type="button" class="btn btn-primary" onclick={() => (detailOpen = false)}>{t('common.close')}</button>{/snippet}
   </Dialog>

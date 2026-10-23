@@ -41,6 +41,7 @@ export const ko = {
   "settings.model.saveKeyFirst": "새 API 키는 먼저 저장해 주세요. 모델 조회는 저장된 키만 사용합니다.",
   "settings.model.failed": "모델 목록을 불러오지 못했습니다. 네트워크와 저장된 키를 확인한 뒤 다시 불러와 주세요.",
   "settings.model.notFound": "이 제공사의 모델 목록에 없는 ID입니다. 오타가 없는지 확인하세요. 그대로 저장해 쓸 수도 있습니다.",
+  "settings.model.unsuitable": "이 모델은 글을 만들지 않는 모델(음성·이미지·임베딩 등)로 보여 번역에 쓸 수 없을 수 있습니다. 목록의 다른 모델을 고르는 것을 권합니다.",
   "settings.model.needKey": "API 키를 저장하면 이 제공사의 모델 목록이 나타납니다. 그 전에도 모델 ID를 직접 입력할 수 있습니다.",
   "settings.model.autoListing": "저장한 키로 모델 목록을 불러오는 중…",
   "settings.model.verified": "모델 지원 정보 확인됨",

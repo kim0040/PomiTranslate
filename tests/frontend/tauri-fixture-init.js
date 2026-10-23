@@ -420,7 +420,7 @@
     if (type === 'models.list') {
       if (new URLSearchParams(location.search).get('slowModels') === '1') await new Promise((resolve) => setTimeout(resolve, 700));
       if (new URLSearchParams(location.search).get('modelError') === '1') return { v: 1, id: request.id, type: 'response.error', error: { code: 'MODELS_FAILED', message: 'Synthetic metadata lookup failure' } };
-      return ok(request, { cached: new URLSearchParams(location.search).get('cachedModels') === '1', models: [{ id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash' }, { id: 'deepseek/deepseek-v4.1-flash', supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'high', supported_efforts: ['max', 'high', 'low'] } }, { id: 'mandatory-fixture', reasoning: { mandatory: true, supported_efforts: ['high'] } }] });
+      return ok(request, { cached: new URLSearchParams(location.search).get('cachedModels') === '1', models: [{ id: 'xiaomi/mimo-v2.6-flash', display_name: 'MiMo V2.6 Flash' }, { id: 'deepseek/deepseek-v4.1-flash', supported_parameters: ['reasoning'], reasoning: { mandatory: false, default_enabled: true, default_effort: 'high', supported_efforts: ['max', 'high', 'low'] } }, { id: 'mandatory-fixture', reasoning: { mandatory: true, supported_efforts: ['high'] } }, ...(new URLSearchParams(location.search).get('unsuitableModel') === '1' ? [{ id: 'saved-tts-fixture', unsuitable_reason: 'id:tts' }] : [])] });
     }
     if (type === 'prompt.enhance') return ok(request, { enhancedPrompt: '중세 판타지 분위기에 맞추어 짧고 자연스럽게 번역하세요.' });
     if (type === 'scan.start') {

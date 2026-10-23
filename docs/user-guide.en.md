@@ -110,7 +110,7 @@ In Run, check the world, target language, provider/model, strings to send, manua
 | World changed | Writes stopped because files changed after the scan. Scan again. |
 | Unsupported | World files are unchanged. |
 
-The result reports prepared/applied/retained/failed/protected strings, changed files, requests, tokens and reported cost, with examples and failure details. Check translations and commands **in game**. Exported reports may contain world paths, source text and translations; inspect them before sharing.
+The first number is named by state: "Translations applied" (written to the world), "partly applied" or "prepared only" (nothing written). The result reports applied/retained/failed/protected strings, changed files, requests, tokens and reported cost, with examples and failure details. Check translations and commands **in game**. Exported reports may contain world paths, source text and translations; inspect them before sharing.
 
 ## 5. Restore
 
