@@ -98,6 +98,10 @@
     const spent = formatUsd(p.cost, app.locale);
     return estimate?.cost ? t('run.cost.spentOf', { spent, high: formatUsd(estimate.cost.high, app.locale) }) : spent;
   });
+  // A price from the dated list-price table says when it was read and links the page it came from.
+  const tablePrice = $derived(estimate?.cost && estimate.price?.source === 'table' && estimate.price.checkedOn ? estimate.price : null);
+  const tableUrl = $derived(tablePrice?.sourceUrl?.startsWith('https://') ? tablePrice.sourceUrl : '');
+  const TABLE_PROVIDERS = ['openai', 'gemini', 'anthropic'];
   const costText = $derived.by(() => {
     if (app.manualOnly || estimate?.requests === 0) return t('run.cost.free');
     if (!estimate) return app.estimateLoading ? t('run.cost.calculating') : t('run.cost.unknown');
@@ -235,7 +239,10 @@
           <!-- While a new estimate is on its way its lines keep their place, so nothing below jumps. -->
           {#if (estimate && estimate.requests > 0) || (!estimate && app.estimateLoading && !app.manualOnly)}
             <span class="sub">{estimate ? t('run.summary.tokens', { input: formatCompact(estimate.inputTokens, app.locale), output: formatCompact(estimate.outputTokens, app.locale) }) : '\u00a0'}</span>
-            <span class="sub">{estimate ? (estimate.cost ? t('run.cost.note') : t('run.cost.unknownWhy')) : '\u00a0'}</span>
+            <span class="sub">{estimate ? (estimate.cost ? t('run.cost.note') : t(TABLE_PROVIDERS.includes(app.settings.provider) ? 'run.cost.unknownTable' : 'run.cost.unknownWhy')) : '\u00a0'}</span>
+            {#if tablePrice}
+              <span class="sub" data-testid="cost-table-note">{t('run.cost.table', { date: tablePrice.checkedOn ?? '' })}{#if tableUrl} <a href={tableUrl} target="_blank" rel="noreferrer">{t('run.cost.tableLink')}</a>{/if} {t('run.cost.tableBill')}</span>
+            {/if}
             {#if REASONING_PROVIDERS.includes(app.settings.provider) && app.settings.openrouter_reasoning !== 'disabled'}<span class="sub">{t('run.reasoning.cost')}</span>{/if}
           {/if}
         </div>
@@ -316,6 +323,7 @@
   .col > .group-title { margin: 0; }
   .group-title { font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary); margin: 0 0 6px var(--space-1); }
   .cost { padding: var(--space-4); display: grid; gap: 2px; }
+  .cost a { color: var(--accent-text); text-decoration: underline; }
   .cost-head { font-size: var(--text-xl); font-weight: 600; letter-spacing: -0.01em; min-height: 1.4em; }
   .detail-line { margin: 0; min-height: 1.4em; font-size: var(--text-sm); display: flex; gap: var(--space-3); }
   .file { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }

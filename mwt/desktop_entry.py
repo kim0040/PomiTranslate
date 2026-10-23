@@ -195,7 +195,12 @@ def _request_estimate(candidate_count: int, batch_size: int) -> int:
 
 
 def _model_price(saved: dict, data_dir: Path) -> dict | None:
-    """Per-token price from the model catalog the provider itself published, when it published one."""
+    """Per-token price: the provider's own published model list first, else the dated list-price table.
+
+    The table (mwt/price_table.py) covers only OpenAI, Gemini and Anthropic and ignores prices older
+    than its expiry. Comet and Custom are never priced from it, so an unknown price stays unknown.
+    """
+    from mwt.price_table import table_price
     from mwt.userdata import load_model_catalog
 
     provider = str(saved.get("provider") or "")
@@ -209,11 +214,11 @@ def _model_price(saved: dict, data_dir: Path) -> dict | None:
             prompt = float(item.get("pricing_prompt"))
             completion = float(item.get("pricing_completion"))
         except (TypeError, ValueError):
-            return None
-        if prompt < 0 or completion < 0:
-            return None
-        return {"input": prompt, "output": completion, "perMillionInput": prompt * 1e6, "perMillionOutput": completion * 1e6}
-    return None
+            break
+        if not (prompt >= 0 and completion >= 0):
+            break
+        return {"input": prompt, "output": completion, "perMillionInput": prompt * 1e6, "perMillionOutput": completion * 1e6, "source": "catalog"}
+    return table_price(provider, model)
 
 
 def _estimate(records: list[dict], saved: dict, data_dir: Path) -> dict:
