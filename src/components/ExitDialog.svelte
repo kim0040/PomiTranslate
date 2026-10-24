@@ -5,8 +5,10 @@
 
   // The one question the desktop shell asks before the app ends (window close, Alt+F4, Quit, Cmd+Q).
   // A running job and unsaved settings are different questions: a job offers "cancel and quit" or
-  // "keep working"; unsaved settings offer save, discard or stay. An update that restarts the app
-  // asks the settings question in its own words (reason "update"): going on lets the install finish.
+  // "keep working"; unsaved settings offer save, discard or stay; unsaved translation edits (nothing
+  // to save, they reach the world only through the apply confirmation) offer stay or discard. An
+  // update that restarts the app asks the same question in its own words (reason "update"): going
+  // on lets the install finish.
   const prompt = $derived(app.exitPrompt);
   let working = $state(false);
 
@@ -30,6 +32,15 @@
         <button type="button" class="btn btn-danger-solid" disabled={working} onclick={() => run(() => app.exitNow())}>{t('exit.quitNow')}</button>
       {/snippet}
     </Dialog>
+  {:else if prompt.reason === 'update' && app.reviewOnlyDirty}
+    <!-- Edits to the translation table have no draft to save; applying them is its own confirmation. -->
+    <Dialog showClose={false} title={t('exit.updateTitle')} onClose={() => app.exitStay()}>
+      <p>{t('exit.updateReviewBody')}</p>
+      {#snippet actions()}
+        <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.exitStay()}>{t('exit.reviewStay')}</button>
+        <button type="button" class="btn btn-danger-solid" disabled={working} onclick={() => run(() => app.exitQuit())}>{t('exit.updateReviewDiscard')}</button>
+      {/snippet}
+    </Dialog>
   {:else if prompt.reason === 'update'}
     <Dialog showClose={false} title={t('exit.updateTitle')} onClose={() => app.exitStay()}>
       <p>{t('exit.updateBody')}</p>
@@ -46,6 +57,15 @@
       {#snippet actions()}
         <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.exitStay()}>{t('exit.keepWorking')}</button>
         <button type="button" class="btn btn-danger-solid" disabled={working} onclick={() => run(() => app.exitQuit())}>{t('exit.cancelAndQuit')}</button>
+      {/snippet}
+    </Dialog>
+  {:else if app.reviewOnlyDirty}
+    <!-- Edits to the translation table are written to the world only by the apply confirmation, never from here. -->
+    <Dialog showClose={false} title={t('exit.reviewTitle')} onClose={() => app.exitStay()}>
+      <p>{t('exit.reviewBody')}</p>
+      {#snippet actions()}
+        <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.exitStay()}>{t('exit.reviewStay')}</button>
+        <button type="button" class="btn btn-danger-solid" disabled={working} onclick={() => run(() => app.exitQuit())}>{t('exit.reviewDiscard')}</button>
       {/snippet}
     </Dialog>
   {:else}

@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install pinned dependencies
@@ -140,3 +140,21 @@ jobs:
         run: python tests/test_eof_shutdown.py
       - name: Review drafts and backup administration through the desktop dispatch
         run: python tests/test_desktop_dispatch.py
+      - name: Review before apply and reapply
+        run: python tests/test_review_apply.py
+      - name: Model suitability
+        run: python tests/test_model_suitability.py
+      - name: Sidecar process boundary (UTF-8 pipes, stop requests, parent loss)
+        run: python tests/test_sidecar_process.py
+      - name: Implied API keys stay with their provider and endpoint
+        run: python tests/test_provider_key_fallback.py
+      - name: text components
+        run: python tests/test_text_components.py
+      - name: locking
+        run: python tests/test_locking.py
+      - name: backup restore safety
+        run: python tests/test_backup_restore_safety.py
+      - name: Bounded hashing and retry regressions
+        run: python tests/test_core_safety_merge.py
+      - name: Merge review fixes (glossary scale, resume, spending cap, restore)
+        run: python tests/test_merge_review_fixes.py

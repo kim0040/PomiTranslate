@@ -6,6 +6,8 @@ export const SAMPLE_LIMIT = 5;
 export const EVENT_SAMPLE_LIMIT = 3;
 export const SAMPLE_CHARS = 160;
 export const PACE_SAMPLE_LIMIT = 12;
+/** The review-before-apply feed and tests call the same limit by this name. */
+export const RECENT_SAMPLES = SAMPLE_LIMIT;
 export type ProgressSample = { source: string; translated: string };
 
 export type JobProgress = {
@@ -85,6 +87,8 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
         next.total = event.total ?? 0;
         next.done = 0;
         next.requestsEstimate = event.requests_estimate ?? 0;
+        next.translateStartedAt = now;
+        next.samples = [];
       } else if (event.phase === 'write') {
         next.phase = 'write';
         next.fileIndex = 0;
@@ -115,6 +119,10 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
         next.samples = [...next.samples, { source: event.source, translated: event.translated }].slice(-SAMPLE_LIMIT);
       }
       break;
+    case 'translation_sample':
+      if (typeof event.source !== 'string' || typeof event.translated !== 'string') return current;
+      next.samples = [...current.samples, { source: event.source, translated: event.translated }].slice(-SAMPLE_LIMIT);
+      break;
     case 'translation_batch_error':
       next.retry = { attempt: event.attempt ?? 1, max: event.max_attempts ?? 1, code: event.failure ?? event.code };
       break;
@@ -132,7 +140,7 @@ export function reduceProgress(current: JobProgress, event: ProgressEvent, now: 
 
 export type ResultTone = 'success' | 'warning' | 'danger' | 'info';
 export type ResultPresentation = {
-  status: 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'locked' | 'invalidated' | 'unsupported';
+  status: 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'budget_stopped' | 'locked' | 'invalidated' | 'unsupported';
   tone: ResultTone;
   showReason: boolean;
 };
@@ -144,6 +152,7 @@ export function resultPresentation(status: string): ResultPresentation {
     case 'partial': return { status, tone: 'warning', showReason: true };
     case 'needs_retry': return { status, tone: 'warning', showReason: true };
     case 'cancelled': return { status, tone: 'info', showReason: false };
+    case 'budget_stopped': return { status, tone: 'warning', showReason: false };
     case 'invalidated': return { status, tone: 'warning', showReason: false };
     case 'unsupported': return { status, tone: 'danger', showReason: false };
     case 'locked': return { status, tone: 'warning', showReason: true };
@@ -215,4 +224,28 @@ export function milestone(percent: number | null): number | null {
 export function roundEta(seconds: number): number {
   if (seconds < 600) return Math.max(10, Math.ceil(seconds / 10) * 10);
   return Math.ceil(seconds / 60) * 60;
+}
+
+/** A job whose translations are saved but that can still be continued from its checkpoint. */
+export const RESUMABLE_STATUSES = ['awaiting_review', 'budget_stopped', 'reapply_interrupted', 'cancelled', 'needs_retry', 'failed'];
+
+/** The reasons the translation table can show for an edit the sidecar refused. */
+export type EditReason = 'tokens' | 'empty' | 'too_long' | 'invalid';
+
+/** Per-row refusals from an `EDITS_INVALID` error. Unknown shapes are ignored. */
+export function editErrors(details: unknown): Record<string, EditReason> {
+  const rows = (details as { rows?: unknown } | null)?.rows;
+  const out: Record<string, EditReason> = {};
+  if (!Array.isArray(rows)) return out;
+  for (const row of rows) {
+    const { id, reason } = (row ?? {}) as { id?: unknown; reason?: unknown };
+    if (typeof id !== 'string') continue;
+    out[id] = (['tokens', 'empty', 'too_long', 'invalid'] as const).find((item) => item === reason) ?? 'invalid';
+  }
+  return out;
+}
+
+/** True when the estimate's upper bound is above a nonzero cap. Unknown prices never block. */
+export function exceedsCap(estimate: { cost: { high: number } | null } | null | undefined, cap: number | undefined): boolean {
+  return !!estimate?.cost && (cap ?? 0) > 0 && estimate.cost.high > (cap ?? 0);
 }

@@ -7,7 +7,8 @@
   let {
     title,
     dismissible = true,
-    showClose = dismissible,
+    hideClose = false,
+    showClose = dismissible && !hideClose,
     size = 'normal',
     tone = 'normal',
     onClose,
@@ -17,12 +18,15 @@
     title: string;
     /** Escape (and the X, unless hidden) closes the dialog; when false the X, if shown, is disabled. */
     dismissible?: boolean;
+    /** Shorthand for `showClose={false}` (the wizard and the review dialogs use this name). */
+    hideClose?: boolean;
     /**
      * The X in the corner. A dialog that asks a question with its own buttons ("Keep" / "Discard")
      * hides it: a second way out that does not say which choice it makes is only confusing.
      */
     showClose?: boolean;
-    size?: 'normal' | 'wide';
+    /** 'fit' is as wide as 'wide' but only as tall as its content (up to the window). */
+    size?: 'normal' | 'wide' | 'fit';
     tone?: 'normal' | 'danger';
     onClose: () => void;
     children?: Snippet;
@@ -56,10 +60,10 @@
   }
 </script>
 
-<dialog bind:this={dialog} class="dialog" class:wide={size === 'wide'} class:danger={tone === 'danger'} aria-labelledby={titleId} oncancel={handleCancel}>
+<dialog bind:this={dialog} class="dialog" class:wide={size === 'wide'} class:fit={size === 'fit'} class:danger={tone === 'danger'} aria-labelledby={titleId} oncancel={handleCancel}>
   <div class="head">
     <h2 id={titleId}>{title}</h2>
-    {#if showClose}
+    {#if showClose && !hideClose}
       <button type="button" class="btn btn-quiet btn-icon btn-sm close" aria-label={t('common.close')} disabled={!dismissible} onclick={onClose}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
       </button>
@@ -84,6 +88,10 @@
   .dialog.wide { width: min(760px, calc(100% - 32px)); height: min(720px, calc(100dvh - 32px)); }
   .dialog.wide[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
   .dialog.wide .body { min-height: 0; overflow: auto; }
+  /* As wide, but only as tall as its content (up to the window), so a short step has no empty lower half. */
+  .dialog.fit { width: min(680px, calc(100% - 32px)); }
+  .dialog.fit[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+  .dialog.fit .body { min-height: 0; overflow: auto; }
   .dialog.danger h2 { color: var(--danger-text); }
   .dialog::backdrop { background: var(--scrim); animation: pomi-fade var(--dur-base) var(--ease-out); }
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }

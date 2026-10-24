@@ -190,6 +190,12 @@ test.describe('First-run tour', () => {
       await boot(page, `scenario=first-run&locale=${locale}`);
       const notice = page.getByRole('dialog');
       await notice.locator('.btn-primary').first().click();
+      // The setup wizard follows the accepted notice; Escape is its "later". The tour never starts by
+      // itself after "later": it is opened from Help (here the native menu's "시작 안내").
+      await expect(page.locator('[name="setup-provider"]').first()).toBeAttached();
+      await page.keyboard.press('Escape');
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      await page.evaluate(() => (window as any).__pomiEmit('pomi-menu', 'tour'));
       const tour = page.getByRole('dialog');
       await expect(tour).toContainText(welcome);
       const count = tour.locator('.count');

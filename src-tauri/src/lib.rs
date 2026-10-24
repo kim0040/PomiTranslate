@@ -51,6 +51,7 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "world.inspect",
     "worlds.discover",
     "resume.status",
+    "resume.discard",
     "models.list",
     "prompt.enhance",
     "provider.usage",
@@ -59,6 +60,10 @@ const ALLOWED_REQUESTS: &[&str] = &[
     "estimate.get",
     "translate.start",
     "translate.resume",
+    "translate.apply",
+    "translate.reapply",
+    "translate.retry_failed",
+    "translations.page",
     "backups.list",
     "restore.start",
     // Unfinished-job recovery and backup maintenance write to worlds or the backup store; they run
@@ -90,6 +95,7 @@ const CREDENTIAL_OWNER_REQUESTS: &[&str] = &[
     "scan.start",
     "translate.start",
     "translate.resume",
+    "translate.retry_failed",
 ];
 
 /// Requests that need the stored API key, which Rust reads and puts in the payload.
@@ -99,10 +105,38 @@ const KEY_INJECTED_REQUESTS: &[&str] = &[
     "provider.usage",
     "translate.start",
     "translate.resume",
+    "translate.retry_failed",
 ];
 
 fn is_allowed_request(kind: &str) -> bool {
     ALLOWED_REQUESTS.contains(&kind)
+}
+
+/// A key typed but not saved yet (setup and the key check), accepted for a model list only: a new
+/// user can check a key and list models before anything is stored.
+const DRAFT_KEY_FIELD: &str = "draftApiKey";
+const MAX_DRAFT_KEY_CHARS: usize = 4096;
+
+/// Take the draft key out of the payload. The field is removed from every request so it never
+/// reaches the core under its own name; only `models.list` may use the value.
+fn take_draft_key(
+    kind: &str,
+    payload: &mut serde_json::Map<String, Value>,
+) -> Result<Option<zeroize::Zeroizing<String>>, IpcError> {
+    let mut value = match payload.remove(DRAFT_KEY_FIELD) {
+        Some(Value::String(value)) => value,
+        Some(Value::Null) | None => return Ok(None),
+        Some(_) => return Err(IpcError::new(code::INVALID_REQUEST, "API key must be text")),
+    };
+    let key = zeroize::Zeroizing::new(value.trim().to_string());
+    zeroize::Zeroize::zeroize(&mut value);
+    if kind != "models.list" || key.is_empty() {
+        return Ok(None);
+    }
+    if key.chars().count() > MAX_DRAFT_KEY_CHARS {
+        return Err(IpcError::new(code::INVALID_REQUEST, "API key is too long"));
+    }
+    Ok(Some(key))
 }
 
 /// Only the pinned, public OpenRouter catalog can bypass credential access.
@@ -421,6 +455,10 @@ async fn handle_request(
             payload.insert("credentialOwner".into(), Value::String("rust".into()));
         }
     }
+    let draft_key = match request.get_mut("payload").and_then(Value::as_object_mut) {
+        Some(payload) => take_draft_key(&kind, payload)?,
+        None => None,
+    };
     // (mode, key the person typed, endpoint the key is for) to commit after the core saved.
     let mut pending_credential = None;
     if kind == "settings.set" {
@@ -472,7 +510,12 @@ async fn handle_request(
         // A false claim receives no key and cannot enable an authenticated API call.
         let manual_only = matches!(kind.as_str(), "translate.start" | "translate.resume")
             && payload.get("manualOnly").and_then(Value::as_bool) == Some(true);
-        if !manual_only && !is_public_catalog(&kind, payload) {
+        if let (false, Some(mut draft)) =
+            (manual_only || is_public_catalog(&kind, payload), draft_key)
+        {
+            // The typed key replaces the stored one, which is then never read.
+            payload.insert("apiKey".into(), Value::String(std::mem::take(&mut *draft)));
+        } else if !manual_only && !is_public_catalog(&kind, payload) {
             let endpoint = provider_boundary::bound_endpoint(payload);
             let target = provider.clone();
             let secret = vault(app, move |credentials, root| {
@@ -816,6 +859,8 @@ pub fn run() {
             desktop_links::open_external,
             desktop_links::data_locations,
             desktop_links::reveal_data_folder,
+            desktop_links::reveal_world_folder,
+            desktop_links::reveal_quarantine_folder,
             update_check,
             update_install,
             update_cancel,
@@ -861,6 +906,43 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draft_key_is_taken_from_every_request_and_kept_only_for_model_lists() {
+        let body = |value: Value| value.as_object().unwrap().clone();
+        let mut list = body(serde_json::json!({"provider":"openai","draftApiKey":"  sk-draft  "}));
+        assert_eq!(
+            take_draft_key("models.list", &mut list)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("sk-draft")
+        );
+        assert!(!list.contains_key(DRAFT_KEY_FIELD));
+        for kind in [
+            "translate.start",
+            "settings.set",
+            "prompt.enhance",
+            "translate.retry_failed",
+        ] {
+            let mut other = body(serde_json::json!({"draftApiKey":"sk-draft"}));
+            assert!(
+                take_draft_key(kind, &mut other).unwrap().is_none(),
+                "{kind}"
+            );
+            assert!(
+                !other.contains_key(DRAFT_KEY_FIELD),
+                "{kind} still carries the draft field"
+            );
+        }
+        let mut none = body(serde_json::json!({"provider":"openai"}));
+        assert!(take_draft_key("models.list", &mut none).unwrap().is_none());
+        let mut malformed = body(serde_json::json!({"draftApiKey": 7}));
+        assert!(take_draft_key("models.list", &mut malformed).is_err());
+        let mut long =
+            body(serde_json::json!({"draftApiKey": "k".repeat(MAX_DRAFT_KEY_CHARS + 1)}));
+        assert!(take_draft_key("models.list", &mut long).is_err());
+    }
 
     #[test]
     fn public_catalog_bypass_is_limited_to_openrouter_model_reads() {
@@ -917,6 +999,12 @@ mod tests {
             "glossary.import",
             "glossary.export",
             "credentials.delete",
+            "translate.apply",
+            "translate.reapply",
+            "translate.retry_failed",
+            "translations.page",
+            // "Discard" on the resume offer: refused before 2026-10-24, so the button did nothing.
+            "resume.discard",
         ] {
             assert!(is_allowed_request(kind), "{kind} must be allowed");
         }
@@ -937,7 +1025,15 @@ mod tests {
         for kind in ALLOWED_REQUESTS {
             let job = sidecar::lane(kind) == sidecar::Lane::Job;
             // Backup maintenance, recovery and restore never need the provider key.
-            if job && !matches!(*kind, "translate.start" | "translate.resume" | "scan.start") {
+            if job
+                && !matches!(
+                    *kind,
+                    "translate.start"
+                        | "translate.resume"
+                        | "translate.retry_failed"
+                        | "scan.start"
+                )
+            {
                 assert!(!KEY_INJECTED_REQUESTS.contains(kind), "{kind}");
                 assert!(!CREDENTIAL_OWNER_REQUESTS.contains(kind), "{kind}");
             }

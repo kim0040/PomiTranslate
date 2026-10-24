@@ -1,7 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
-  import { formatNumber, formatDuration, baseName, middleEllipsis } from '../lib/format';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { formatNumber, formatDuration, formatRequestEstimate, baseName, middleEllipsis } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
@@ -52,10 +52,12 @@
   const notScanned = $derived(coverage.filter((item) => !item.scanned));
   const blockerLine = (code: string) => {
     const [kind, file] = code.split(': ');
-    return file ? t('scan.blockedFile', { file: fileLabel(file) }) : (knownBlockers.includes(kind) ? t(`world.blocked.${kind}` as MessageKey) : t('world.blocked.unknown'));
+    return file ? t('scan.blockedFile', { file: fileLabel(file) }) : (knownBlockers.includes(kind) ? labelFor('world.blocked', kind) : t('world.blocked.unknown'));
   };
   const knownBlockers = ['bedrock', 'mcr', 'linear', 'world_in_use', 'not_writable', 'not_readable', 'missing'];
   const requestEstimate = $derived(app.estimate?.requests ?? scan?.estimate?.requests ?? scan?.requestEstimate);
+  // A range ("12-15") when batching depends on the provider's answers, else one number.
+  const requestEstimateObject = $derived(app.estimate ?? scan?.estimate ?? (requestEstimate === undefined ? undefined : { requests: requestEstimate }));
 </script>
 
 <div class="page">
@@ -95,7 +97,8 @@
       <div class="copy">
         <h2>{app.worldDir ? baseName(app.worldDir) : t('world.title')}</h2>
         <ul class="promises">
-          <li><Icon name="shield" size={18} /> {t('scan.startHint')}</li>
+          <li><Icon name="shield" size={18} /> {t('scan.startExplain')}</li>
+          <li><Icon name="clock" size={18} /> {t('scan.startHint')}</li>
         </ul>
         <WorldSummary />
       </div>
@@ -132,7 +135,7 @@
           primary={{ value: formatNumber(scan.candidateCount, app.locale), label: t('scan.summary.texts') }}
           stats={[
             { value: formatNumber(scan.occurrenceCount ?? scan.candidateCount, app.locale), label: t('scan.summary.places') },
-            { value: requestEstimate === undefined ? t('common.unknown') : formatNumber(requestEstimate, app.locale), label: t('scan.summary.requests') }
+            { value: requestEstimate === undefined ? t('common.unknown') : formatRequestEstimate(requestEstimateObject, app.locale), label: t('scan.summary.requests') }
           ]}
         />
 
@@ -141,7 +144,7 @@
             <h2 id="kinds-title" class="section-title">{t('scan.summary.kinds')}</h2>
             <ul>
               {#each kinds as [kind, count] (kind)}
-                <li><span class="kn">{t(`kind.${kind}` as MessageKey)}</span><span class="kc num">{formatNumber(count, app.locale)}</span></li>
+                <li><span class="kn">{labelFor('kind', kind)}</span><span class="kc num">{formatNumber(count, app.locale)}</span></li>
               {/each}
             </ul>
           </section>
@@ -179,7 +182,7 @@
           <div>
             <h3><span class="pill pill-success"><Icon name="check" size={12} /> {t('coverage.scanned')}</span></h3>
             <ul>
-              {#each scanned as item (item.id)}<li><Icon name="check" size={14} /> <span>{t(`coverage.${item.id}` as MessageKey)}</span></li>{/each}
+              {#each scanned as item (item.id)}<li><Icon name="check" size={14} /> <span>{labelFor('coverage', item.id)}</span></li>{/each}
             </ul>
           </div>
           <div>
@@ -189,7 +192,7 @@
                 <li>
                   <Icon name="minus" size={14} />
                   <span>
-                    {t(`coverage.${item.id}` as MessageKey)}
+                    {labelFor('coverage', item.id)}
                     {#if item.scopeOption}<span class="tag">{t('coverage.disabled')}</span>
                     {:else if item.present && item.count !== undefined}<span class="tag num">{t(item.id === 'datapacks' ? 'coverage.packCount' : 'common.files', { count: item.count })}</span>
                     {:else if item.present}<span class="tag">{t('coverage.detected')}</span>

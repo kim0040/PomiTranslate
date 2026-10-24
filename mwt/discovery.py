@@ -45,11 +45,20 @@ def saves_dirs(home: Path | None = None, *, platform: str | None = None, env: di
                     if (game / "saves").is_dir():
                         found.append(game / "saves")
                         break
+    # On case-insensitive file systems (the macOS and Windows defaults) "instances" and "Instances"
+    # are one folder, so compare what the paths point at rather than how they are spelled.
     unique: list[Path] = []
     for item in found:
-        if item.is_dir() and item not in unique:
+        if item.is_dir() and not any(_same_dir(item, kept) for kept in unique):
             unique.append(item)
     return unique
+
+
+def _same_dir(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return left == right
 
 
 def _level_summary(level_dat: Path) -> dict[str, Any]:

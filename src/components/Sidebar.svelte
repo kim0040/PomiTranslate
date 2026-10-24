@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app, type Page } from '../lib/app.svelte';
-  import { t } from '../lib/i18n/index.svelte';
+  import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatDuration } from '../lib/format';
   import { clock, holdClock } from '../lib/clock.svelte';
   import { milestone, percentDone } from '../lib/workflow';
@@ -19,7 +19,7 @@
   const startupSafe: Page[] = ['help', 'about'];
   function showUpdate(): void {
     app.helpSection = 'updates';
-    app.settingsTabRequest = 'app';
+    app.settingsTab = 'app';
     app.goto('settings');
   }
 
@@ -40,12 +40,19 @@
   });
   const now = $derived(clock.now);
 
+  // What a screen reader hears: the state, the phase, and then every 10% — not every sentence that
+  // finishes. The percent and the clock change often and stay visual.
+  const PHASES = ['collect', 'translate', 'write'] as const;
+  const phaseText = $derived(
+    app.isBusy && !app.cancelling && (PHASES as readonly string[]).includes(app.progress.phase)
+      ? t(`run.phase.${app.progress.phase}` as MessageKey) : ''
+  );
   const taskPage = $derived<Page>(app.busy === 'restore' ? 'backups' : 'workspace');
-  // Screen readers hear the phase, and then every 10% — not every sentence that finishes.
   const announcement = $derived.by(() => {
     if (!app.isBusy) return status;
+    const head = phaseText ? `${status} · ${phaseText}` : status;
     const step = milestone(percentDone(app.progress));
-    return step === null ? status : `${status} ${step}%`;
+    return step === null ? head : `${head} ${step}%`;
   });
   const percent = $derived(
     app.busy === 'translate' && app.progress.phase === 'translate' && app.progress.total > 0
@@ -86,11 +93,11 @@
     <span class="sr-only" role="status" aria-live="polite">{announcement}</span>
     <div class="state" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy}>
       <img class="pomi" src="/images/pomi.png" alt="" width="32" height="32" />
-      <div class="text">
+      <div class="text" aria-hidden="true">
         <span class="dot" class:busy={app.isBusy} class:failed={app.startupFailed && !app.isBusy} aria-hidden="true"></span>
         <span class="status-text">{status}{percent !== null ? ` ${percent}%` : ''}</span>
         {#if app.isBusy && app.progress.startedAt}
-          <span class="sub num" role="timer" aria-live="off">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
+          <span class="sub num">{formatDuration((now - app.progress.startedAt) / 1000, app.locale)}</span>
         {/if}
       </div>
     </div>

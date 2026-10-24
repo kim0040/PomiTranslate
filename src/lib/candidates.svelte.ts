@@ -1,4 +1,5 @@
 import { BackendError, callBackend, type Candidate, type CandidatePage } from './api';
+import { describeError } from './errors';
 import { pagesFor } from './virtual';
 
 export const PAGE_SIZE = 200;
@@ -33,7 +34,7 @@ export class CandidateSource {
   private describe: (cause: unknown) => string;
 
   /** `describe` turns a failure into text in the display language; the raw message is never kept. */
-  constructor(ids: () => { excluded: string[]; manual: string[] }, describe: (cause: unknown) => string = () => '') {
+  constructor(ids: () => { excluded: string[]; manual: string[] }, describe: (cause: unknown) => string = describeError) {
     this.ids = ids;
     this.describe = describe;
   }

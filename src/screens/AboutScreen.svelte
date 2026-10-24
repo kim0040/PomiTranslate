@@ -131,6 +131,8 @@
       </summary>
       <div class="panel notice">
         <p class="required" lang="en">{UNOFFICIAL}</p>
+        <!-- The required English line, in the reader's language (English readers already have it). -->
+        {#if app.locale !== 'en'}<p>{t('notice.officialLocal')}</p>{/if}
         <p>{t('about.unofficial')}</p>
         <p>{t('notice.item1')}</p>
         <p>{t('notice.item2')}</p>

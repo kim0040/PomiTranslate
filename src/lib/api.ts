@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { Locale } from './i18n/locale';
 
 export type CredentialMode = 'local' | 'session' | 'keychain';
 export type CredentialStatus = { mode: CredentialMode; stored: boolean };
@@ -9,8 +10,6 @@ export type CredentialStoreError = 'VAULT_PERMISSIONS' | 'VAULT_SCHEMA' | 'VAULT
 export type CredentialState = { mode?: CredentialMode; stored?: boolean; error?: CredentialStoreError };
 
 export type Provider = 'openai' | 'gemini' | 'anthropic' | 'openrouter' | 'comet' | 'custom';
-export type Locale = 'ko' | 'en' | 'ja';
-
 export type ScanFlag = 'translate_signs' | 'translate_books' | 'translate_custom_names' | 'translate_item_names' |
   'translate_lore' | 'translate_titles' | 'translate_filtered_titles' | 'translate_command_output' |
   'translate_text_displays' | 'skip_command_like_text';
@@ -20,6 +19,7 @@ export type ScanOptions = Record<ScanFlag, boolean> & {
   component_translate_key_prefixes: string[];
 };
 export type ResourcePackOptions = { source_lang_files: string[]; target_lang_file: string; skip_if_target_exists: boolean };
+export type CustomPrice = { input: number; output: number; updatedAt?: string };
 
 export type Settings = {
   provider: Provider | string;
@@ -39,6 +39,11 @@ export type Settings = {
   max_batch_retries?: number;
   max_file_write_retries?: number;
   continue_on_file_error?: boolean;
+  /** Stop after translating so the result can be read and corrected before anything is written. */
+  review_before_apply?: boolean;
+  /** Spending cap in USD; 0 means no cap. */
+  max_cost_usd?: number;
+  custom_prices?: Record<string, CustomPrice>;
   source_overrides?: Record<string, string>;
   concurrency?: number;
   resource_pack_enabled?: boolean;
@@ -143,6 +148,7 @@ export type RecoveryResult = {
 export type CandidateLocation = {
   kind?: string;
   holder?: string;
+  dimension?: string;
   pos?: [number, number, number] | null;
   detail?: string;
   chunk?: [number, number];
@@ -212,12 +218,21 @@ export type ChunkCoverage = {
 export type Estimate = {
   candidateCount: number;
   requests: number;
+  requestRange?: { low: number; high: number };
+  glossaryRetryRequests?: number;
+  glossaryPromptChars?: number;
   sourceChars: number;
   inputTokens: number;
   outputTokens: number;
-  // 'catalog' is the provider's own model list; 'table' is the dated list-price table, which also says when and where.
-  price: { input: number; output: number; perMillionInput: number; perMillionOutput: number; source?: 'catalog' | 'table'; checkedOn?: string; sourceUrl?: string } | null;
+  inputTokensHigh?: number;
+  outputTokensHigh?: number;
+  // 'catalog' is the provider's own model list; 'table' is the dated list-price table, which also says when and where;
+  // 'user' is a price the person entered for a model that has none.
+  price: { input: number; output: number; perMillionInput: number; perMillionOutput: number; source?: 'catalog' | 'table' | 'user'; checkedOn?: string; sourceUrl?: string } | null;
+  priceSource?: 'catalog' | 'table' | 'user' | null;
   cost: { low: number; high: number } | null;
+  /** True when the high end already includes an allowance for reasoning tokens. */
+  reasoningIncluded?: boolean;
 };
 
 export type BackendWarning = { code: string; file?: string; count?: number; message?: string; compression?: number[]; dropped_translations?: number };
@@ -260,6 +275,7 @@ export type ScanResult = {
   coverage?: CoverageItem[];
   chunkCoverage?: ChunkCoverage;
   candidates?: Candidate[];
+  lastScan?: LastScan | null;
 };
 
 export type CandidatePage = {
@@ -282,29 +298,101 @@ export type CandidateQuery = {
   overrideCandidateIds?: string[];
 };
 
-/** Why one sentence could not be translated; the raw provider text stays in the exported report only. */
-export type FailureCode = 'timeout' | 'auth' | 'rate_limit' | 'quota' | 'bad_request' | 'unsupported_model' |
-  'format_mismatch' | 'provider_unavailable' | 'cancelled' | 'other';
+export type TranslationStats = { unique: number; translated: number; failed: number; kept_original: number; unchanged: number; /** Strings no request answered before the run stopped. */ pending?: number };
 
-export type TranslationStats = { unique: number; translated: number; failed: number; kept_original: number; unchanged: number };
+/**
+ * Why one sentence could not be translated; the raw provider text stays in the exported report only.
+ * The core's two generations of codes are both accepted: a code this build does not know reads as "other".
+ */
+export type FailureCode =
+  | 'timeout' | 'auth' | 'rate_limit' | 'quota' | 'bad_request' | 'unsupported_model' |
+  'format_mismatch' | 'provider_unavailable' | 'cancelled' | 'other'
+  | 'invalid_response' | 'content_filter' | 'network' | 'provider_error' | 'unknown'
+  // Never sent to the AI because the run stopped first (the cost cap, or a cancel): not a failure of the AI.
+  | 'budget_unsent' | 'unsent';
+
+export type TranslationFailure = { source: string; reason: FailureCode | string; code?: FailureCode; detail?: string };
+
+/** What the whole job has used so far, `requests` included, however many runs it took. */
+export type TranslationUsage = { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean; requests?: number; adapted_parameters?: string[] };
 
 export type TranslationResult = {
-  status: 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'locked' | 'invalidated' | 'unsupported' | string;
+  status: 'awaiting_review' | 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | 'budget_stopped' | 'locked' | 'invalidated' | 'unsupported' | string;
   candidateCount: number;
   changedFileCount: number;
+  /** Requests of this call only; `jobProviderRequests` counts every run of the job, like `usage`. */
   providerRequests?: number;
+  jobProviderRequests?: number;
+  glossaryMismatchCount?: number;
+  glossaryMismatches?: { source: string; reason: 'glossary_mismatch' }[];
+  priceSource?: 'catalog' | 'user' | null;
+  /** False when the run had a spending limit that could not be enforced (the model had no price and the person agreed). */
+  costCapEnforced?: boolean;
   backupSetId?: string;
+  recoverySetId?: string;
   errors?: { scope?: string; code?: string; message?: string; file?: string }[];
   warnings?: BackendWarning[];
   translation?: Partial<TranslationStats>;
-  translationFailures?: { source: string; reason: string; code?: FailureCode }[];
+  translationFailures?: TranslationFailure[];
   translationFailureCodes?: Partial<Record<FailureCode, number>>;
   translationSamples?: { source: string; translated: string }[];
   keptOriginalSamples?: string[];
   /** Per-string quality warnings by code (glossary_mismatch, format_residue). Absent from an older core. */
   translationWarnings?: Record<string, number>;
   translationWarningSamples?: TranslationWarningSample[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number; cost_reported?: boolean; adapted_parameters?: string[] };
+  usage?: TranslationUsage;
+};
+
+export type TranslationState = 'all' | 'translated' | 'failed' | 'kept' | 'edited' | 'glossary_mismatch';
+
+export type TranslationRow = {
+  id: string;
+  source: string;
+  translated: string;
+  status: Exclude<TranslationState, 'all'>;
+  /** A saved user override exists, regardless of the row's current review status. */
+  edited: boolean;
+  /** The current output fails the active glossary check, independently of edit origin. */
+  glossaryMismatch: boolean;
+  glossaryStale?: boolean;
+  kind: string;
+  occurrences: number;
+  /** The unedited AI answer, empty when there is none. Used to revert an edit. */
+  ai: string;
+  reason?: FailureCode | string;
+  detail?: string;
+};
+
+/** `failed` is every row a retry would send; `unsent` of them were never sent and `errored` are the rest. */
+export type TranslationCounts = Record<TranslationState, number> & { unsent?: number; errored?: number };
+
+export type TranslationPageMeta = {
+  status: string;
+  /** True once the job has been written to the world: only `translate.reapply` may write it again. */
+  applied: boolean;
+  backupSetId: string;
+  recoverySetId?: string;
+  failedCount: number;
+  /** Rows sent by a normal retry: failed plus glossary-stale rows. */
+  retryCount: number;
+  /** Failed rows that were never sent (a cost cap or cancel stopped the run first). */
+  unsentCount?: number;
+  usage: TranslationUsage;
+  retryEstimate: Estimate | null;
+  glossaryRefreshCount?: number;
+  glossaryActive?: boolean;
+  glossaryStaleCount?: number;
+  glossaryRefreshEstimate?: Estimate | null;
+  glossaryRefreshed?: boolean;
+};
+
+export type TranslationPage = {
+  rows: TranslationRow[];
+  offset: number;
+  total: number;
+  hasMore: boolean;
+  counts: TranslationCounts;
+  meta: TranslationPageMeta;
 };
 
 export type ResumeStatus = {
@@ -324,6 +412,21 @@ export type ResumeStatus = {
   translatedCount?: number;
   reason?: string;
   backupSetId?: string;
+  recoverySetId?: string;
+  lastJob?: LastJob | null;
+  lastScan?: LastScan | null;
+};
+
+export type LastScan = { at: number; candidateCount: number };
+
+export type LastJob = {
+  world: string;
+  at: number;
+  status: 'completed' | 'partial' | 'needs_retry' | 'failed' | 'cancelled' | string;
+  translated: number;
+  failed: number;
+  changedFiles: number;
+  candidateCount: number;
 };
 
 /** App state kept with the settings file (not in the web view's storage, which cleaners can clear). */
@@ -331,11 +434,15 @@ export type AppPrefs = {
   theme: 'system' | 'light' | 'dark';
   notice_accepted: boolean;
   tutorial_seen: boolean;
+  /** The setup wizard was finished or put off, so it does not open again by itself. */
+  setup_dismissed: boolean;
   update_auto_check: boolean;
   update_last_check: number;
   update_skipped_version: string;
   /** Absent from an older core: treated as on. */
   notify_on_finish?: boolean;
+  /** Text size in percent: 100, 115 or 130. */
+  font_scale?: number;
 };
 
 export type BootstrapPayload = {
@@ -351,6 +458,8 @@ export type BootstrapPayload = {
   resume: ResumeStatus;
   /** Absent from an older core: treated as none. */
   interruptedJobs?: InterruptedJob[];
+  lastJob?: LastJob | null;
+  lastScan?: LastScan | null;
 };
 
 export type ProviderUsage = {
@@ -363,11 +472,13 @@ export type ModelInfo = {
   reasoning?: { mandatory?: boolean; default_enabled?: boolean; default_effort?: string; supported_efforts?: string[] | null };
   id: string;
   display_name?: string;
-  pricing_prompt?: string;
-  pricing_completion?: string;
+  pricing_prompt?: string | null;
+  pricing_completion?: string | null;
   context_length?: number;
   /** Set only on the saved model when the core's list filter says it cannot translate text (`id:tts`, `output:image`). */
   unsuitable_reason?: string;
+  /** False for models made for something other than translating text (image, audio, embeddings...). */
+  suitable?: boolean;
 };
 
 export type ProgressEvent = {
@@ -403,18 +514,26 @@ export type ProgressEvent = {
   dropped_translations?: number;
 };
 
+/**
+ * A failed call. `code` says what went wrong and is what the screens turn into catalog text; the
+ * message is only the code too, so no English or Korean sentence from the shell or core reaches a
+ * screen. The text they sent stays in `diagnostic` for the log and the diagnostics export.
+ */
 export class BackendError extends Error {
   code: string;
   /** A second code that says why (for example the VAULT_* reason behind CREDENTIAL_UNAVAILABLE). */
   detail: string;
   /** "shell" for errors made by the desktop shell: their English text is never shown to people. */
   origin: 'shell' | 'core';
-  constructor(message: string, code = '', detail = '', origin: 'shell' | 'core' = 'core') {
+  /** Structured facts the core attached to the error (the rows an edit was refused for, a recovery set id). */
+  details?: unknown;
+  constructor(message: string, code = '', detail = '', origin: 'shell' | 'core' = 'core', details?: unknown) {
     super(message);
     this.name = 'BackendError';
     this.code = code;
     this.detail = detail;
     this.origin = origin;
+    this.details = details;
   }
 }
 
@@ -496,15 +615,15 @@ export function callBackend<T>(type: string, payload: Record<string, unknown> = 
       // its single-operation BUSY guard.
       throw fromShellError(cause);
     }
-    if (response.id !== id) throw new BackendError('The translation core answered a different request.', 'TRANSPORT');
+    if (response.id !== id) throw new BackendError('The translation core answered a different request.', 'TRANSPORT', '', 'shell');
     if (response.type === 'response.error') {
       const code = response.error?.code || '';
       // These four are made by the shell itself, so their English text is never shown.
       const origin = SHELL_RESPONSE_CODES.includes(code) ? 'shell' : 'core';
-      throw new BackendError(response.error?.message || code || 'Translation core error', code, response.error?.detail || '', origin);
+      throw new BackendError(response.error?.message || code || 'Translation core error', code, response.error?.detail || '', origin, response.error?.details);
     }
     if (response.type !== 'response.ok' || !response.payload) {
-      throw new BackendError('The translation core response was incomplete.', 'TRANSPORT');
+      throw new BackendError('The translation core sent an incomplete response.', 'TRANSPORT', '', 'shell');
     }
     return response.payload;
   };

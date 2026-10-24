@@ -6,7 +6,7 @@ type Locale = 'ko' | 'en' | 'ja';
 
 async function scanned(page: Page, chunks: string, locale: Locale = 'ko') {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
-  await page.goto(`/?scenario=selected&chunks=${chunks}&locale=${locale}`);
+  await page.goto(`/?review=0&scenario=selected&chunks=${chunks}&locale=${locale}`);
   await expect(page.locator('.boot')).toHaveCount(0);
   await page.getByRole('button', { name: /^(스캔 시작|Start Scan|スキャン開始)$/ }).click();
   await expect(page.locator('.action-bar')).toBeVisible();
@@ -60,18 +60,18 @@ test('zero candidates with skipped chunks never reads as "this world has no text
 
 test('an older core without chunk coverage keeps the earlier screen', async ({ page }) => {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
-  await page.goto('/?scenario=selected');
+  await page.goto('/?review=0&scenario=selected');
   await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
   await expect(page.locator('.action-bar')).toBeVisible();
   await expect(card(page)).toHaveCount(0);
   await expect(page.getByTestId('newer-version-notice')).toHaveCount(0);
-  await goStep(page, /^후보 검토/);
+  await goStep(page, /^번역할 문장 고르기/);
   await expect(page.getByTestId('chunk-coverage-compact')).toHaveCount(0);
 });
 
 test('the review header carries the one-line version summary', async ({ page }) => {
   await scanned(page, 'mixed');
-  await goStep(page, /^후보 검토/);
+  await goStep(page, /^번역할 문장 고르기/);
   const line = page.getByTestId('chunk-coverage-compact');
   await expect(line).toContainText('혼합');
   await expect(line).toContainText('4189–4556');
@@ -91,7 +91,7 @@ test('newer chunks: warned on the scan, confirmed once on the run step, then sen
   await expect(card(page).getByTestId('chunk-versions')).toContainText('검증된 버전보다 새로움');
   await axe(page);
 
-  await goStep(page, /^번역 진행/);
+  await goStep(page, /^번역 준비/);
   const start = page.getByRole('button', { name: '번역 시작', exact: true });
   const confirm = page.getByRole('checkbox', { name: /내용을 이해했으며/ });
   await expect(start).toBeDisabled();
@@ -111,7 +111,7 @@ test('newer chunks: warned on the scan, confirmed once on the run step, then sen
 test('a covered world is never asked, and its request carries no confirmation', async ({ page }) => {
   await scanned(page, 'clean');
   await expect(page.getByTestId('chunk-versions')).toHaveText('4189');
-  await goStep(page, /^번역 진행/);
+  await goStep(page, /^번역 준비/);
   await expect(page.getByRole('checkbox', { name: /내용을 이해했으며/ })).toHaveCount(0);
   await page.getByRole('button', { name: '번역 시작', exact: true }).click();
   await expect(page.getByRole('heading', { name: '번역 결과', exact: true })).toBeVisible();
@@ -143,13 +143,13 @@ test('the summary does not make the page scroll sideways at a narrow width', asy
 
 test('dark theme keeps the summary, the warning and the confirmation readable', async ({ page }) => {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
-  await page.goto('/?scenario=selected&chunks=newer&theme=dark');
+  await page.goto('/?review=0&scenario=selected&chunks=newer&theme=dark');
   await expect(page.locator('.boot')).toHaveCount(0);
   await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
   await expect(card(page)).toBeVisible();
   await card(page).locator('summary').click();
   await axe(page);
-  await goStep(page, /^번역 진행/);
+  await goStep(page, /^번역 준비/);
   await expect(page.getByRole('checkbox', { name: /내용을 이해했으며/ })).toBeVisible();
   await axe(page);
 });
@@ -177,7 +177,7 @@ test('a scan continued from an old checkpoint with no candidates says finished f
 test.describe('continuing an interrupted job of a newer world after a restart', () => {
   async function restarted(page: Page) {
     await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
-    await page.goto('/?scenario=interrupted-partial&chunks=newer&locale=en');
+    await page.goto('/?review=0&scenario=interrupted-partial&chunks=newer&locale=en');
     await expect(page.locator('.boot')).toHaveCount(0);
     await page.reload(); // the app starts again: the job and its saved plan come back from the core
     await expect(page.locator('.boot')).toHaveCount(0);
@@ -224,9 +224,9 @@ test.describe('continuing an interrupted job of a newer world after a restart', 
     await restarted(page);
     await page.getByRole('button', { name: 'Continue the remaining work' }).click();
     await confirmBox(page).check();
-    await goStep(page, /^Translate/);
+    await goStep(page, /^Prepare Translation/);
     await expect(page.getByRole('checkbox', { name: /I understand/ })).toBeChecked();
-    await goStep(page, /^Select World/);
+    await goStep(page, /^Choose World/);
     await page.getByRole('button', { name: 'Continue the remaining work' }).click();
     await expect.poll(() => resumes(page)).toEqual(['translate.resume']);
   });

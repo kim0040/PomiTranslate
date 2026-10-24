@@ -3,6 +3,12 @@ import { resolve } from 'node:path';
 import { copyFile } from 'node:fs/promises';
 import AxeBuilder from '@axe-core/playwright';
 
+// Reasoning, the user-entered price, key storage and the style prompt sit in the closed "고급 번역 옵션" section of the 번역 tab.
+async function translateAdvanced(page: Page) {
+  const toggle = page.locator('#translate-advanced > .head > .toggle');
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
+
 async function boot(page: Page, scenario: string) {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
   await page.goto(`/?scenario=${scenario}`);
@@ -12,7 +18,7 @@ async function step(page: Page, name: string) {
   await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: new RegExp(`^${name}`) }).click();
 }
 async function run(page: Page) {
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   const start = page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ });
   await start.click();
 }
@@ -37,7 +43,7 @@ test('manual browser preview uses synthetic candidates without provider requests
     if (/^https?:/.test(request.url()) && new URL(request.url()).hostname !== '127.0.0.1') externalRequests.push(request.url());
   });
   await page.goto('/tests/frontend/preview.html?scenario=review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await expect(page.locator('tr[data-index="0"]')).toContainText('Welcome to Roguefire');
   await page.locator('tr[data-index="0"]').click();
   await expect(page.locator('#manual-translation')).toBeVisible();
@@ -46,7 +52,7 @@ test('manual browser preview uses synthetic candidates without provider requests
 
 test('review overview and selected detail have full usable editor width', async ({ page }) => {
   await boot(page, 'review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await expect(page.locator('tr[data-index="0"]')).toBeVisible();
   await page.screenshot({ path: 'output/playwright/05-review.png', fullPage: true });
   await page.locator('tr[data-index="0"]').click();
@@ -82,7 +88,7 @@ test('result to backup restore returns to a valid scan step', async ({ page }) =
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.screenshot({ path: 'output/playwright/restore-rescan-notice.png' });
   await notice.getByRole('button', { name: '월드 스캔으로' }).click();
-  await expect(page.getByRole('heading', { name: '월드 스캔', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '번역할 문장 찾기', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: '번역 결과', exact: true })).toHaveCount(0);
   await expect(page.getByRole('status').filter({ hasText: '이전 스캔·검토 결과를 지웠습니다' })).toBeVisible();
   await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
@@ -102,8 +108,9 @@ for (const scenario of ['result-success']) {
 }
 
 const resultCases = [
-  { scenario: 'result-needs_retry', title: '번역이 완료되지 않아 작업을 중단했습니다', body: '월드 파일은 변경되지 않았습니다.', action: '남은 문장만 이어서 시도', stat: '준비만 된 번역문' },
-  { scenario: 'result-partial', title: '일부 텍스트만 번역되었습니다', body: '번역되지 않은 문장은 원문 그대로 유지되었습니다. 아래 상세 내역을 확인해 주세요.', action: '처음부터 다시 스캔', stat: '일부 적용된 번역문' },
+  // A run with a saved table offers the failed-only retry first; one without (result-failed) translates the same scan again.
+  { scenario: 'result-needs_retry', title: '번역이 완료되지 않아 작업을 중단했습니다', body: '월드 파일은 변경되지 않았습니다.', action: '실패한 6개만 다시 번역', stat: '준비만 된 번역문' },
+  { scenario: 'result-partial', title: '일부 텍스트만 번역되었습니다', body: '번역되지 않은 문장은 원문 그대로 유지되었습니다. 아래 상세 내역을 확인해 주세요.', action: '실패한 2개만 다시 번역', stat: '일부 적용된 번역문' },
   { scenario: 'result-failed', title: '월드 파일은 바뀌지 않았습니다', body: '번역이 끝나지 못했습니다.', action: '같은 스캔으로 다시 번역', stat: '준비만 된 번역문' },
   { scenario: 'result-cancelled', title: '번역을 취소했습니다', body: '이미 번역된 문장은 안전하게 저장되어 있어 언제든 이어서 진행할 수 있습니다.', action: '남은 문장만 이어서 시도', stat: '일부 적용된 번역문' },
   { scenario: 'result-invalidated', title: '스캔 이후 월드 파일이 변경되었습니다', body: '데이터 무결성 보호를 위해 저장을 중단했습니다. 월드를 다시 스캔해 주세요.', action: '처음부터 다시 스캔', stat: '준비만 된 번역문' },
@@ -149,11 +156,11 @@ for (const pageName of ['백업 관리', '환경 설정', '정보']) {
 for (const scenario of ['empty', 'selected', 'scan-running', 'scanned', 'run', 'run-progress', 'dark-review']) {
   test(`representative ${scenario} screen`, async ({ page }) => {
     await boot(page, scenario);
-    if (scenario === 'selected') await step(page, '월드 선택');
+    if (scenario === 'selected') await step(page, '월드 고르기');
     if (scenario === 'scan-running') await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-    if (scenario === 'run') await step(page, '번역 진행');
+    if (scenario === 'run') await step(page, '번역 준비');
     if (scenario === 'run-progress') await run(page);
-    if (scenario === 'dark-review') await step(page, '후보 검토');
+    if (scenario === 'dark-review') await step(page, '번역할 문장 고르기');
     if (scenario === 'scan-running' || scenario === 'run-progress') {
       await expect(page.getByRole('progressbar')).toBeVisible();
       expect(await page.locator('main').innerText()).not.toMatch(/translation_batch_start|phase_start|file_start/);
@@ -177,6 +184,7 @@ test('sidebar elapsed time ticks while waiting for an in-flight request', async 
 test('OpenRouter reasoning separates mode and supported effort and persists choices', async ({ page }) => {
   await boot(page, 'selected&model=deepseek/deepseek-v4.1-flash');
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await translateAdvanced(page);
   await expect(page.getByText('모델 기본값: 켜짐 · 강하게 (high)', { exact: true })).toBeVisible();
   await expect(page.getByRole('radio', { name: '모델 기본값', exact: true })).toBeChecked();
   await expect(page.locator('#openrouter-reasoning')).toHaveCount(0);
@@ -186,9 +194,11 @@ test('OpenRouter reasoning separates mode and supported effort and persists choi
   await select.selectOption('max');
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await expect(select).toHaveValue('max');
-  await expect(page.getByText('저장된 설정과 같습니다', { exact: true })).toBeVisible();
+  await expect(page.locator('.save-bar')).toHaveCount(0);
   await page.getByRole('button', { name: '정보', exact: true }).click();
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  // A returning visit starts with Advanced closed; it stays open once opened, even after the forced-open reason is fixed.
+  await translateAdvanced(page);
   await expect(select).toHaveValue('max');
   await page.locator('#model').fill('mandatory-fixture');
   await expect(page.getByRole('radio', { name: '추론 끄기', exact: true })).toBeDisabled();
@@ -207,7 +217,7 @@ for (const width of [1440, 840, 320]) {
     await page.getByRole('tab', { name: '앱', exact: true }).click();
     const sidebar = page.locator('.sidebar');
     const before = await sidebar.boundingBox();
-    await page.locator('.danger-zone').scrollIntoViewIfNeeded();
+    await page.locator('main').evaluate((pane) => pane.scrollTo(0, pane.scrollHeight));
     const after = await sidebar.boundingBox();
     expect(after?.y).toBeCloseTo(before!.y, 0);
     expect(after?.height).toBeCloseTo(before!.height, 0);

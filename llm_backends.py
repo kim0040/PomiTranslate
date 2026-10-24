@@ -161,26 +161,61 @@ def infer_provider(provider: str | None, base_url: str) -> str:
     return "custom" if lowered else "comet"
 
 
-def resolve_api_key(provider: str, current: str) -> str:
-    """The key for exactly this provider: the given one, its own environment variable, its own keyring entry.
+# Implicit keys (environment variables and the OS keyring) are a CLI convenience. The desktop
+# JSONL entry turns them off: there the shell supplies the key, or there is none.
+_IMPLICIT_KEYS_ENABLED = True
+# normalize_config() resolves the endpoint and then the key without passing the endpoint along;
+# remember the endpoint resolved last on this thread so the key resolver can check it.
+_LAST_ENDPOINT = threading.local()
 
-    Another provider's key is never borrowed, and a Custom endpoint has to be given its own key.
+
+def disable_implicit_api_keys() -> None:
+    global _IMPLICIT_KEYS_ENABLED
+    _IMPLICIT_KEYS_ENABLED = False
+
+
+def _same_endpoint(left: str, right: str) -> bool:
+    return bool(left) and bool(right) and left.strip().rstrip("/").lower() == right.strip().rstrip("/").lower()
+
+
+def resolve_api_key(provider: str, current: str, base_url: str | None = None) -> str:
+    """Return the explicit key, or a key implied for this provider and endpoint.
+
+    An implied key never crosses providers and never leaves the endpoint it belongs to:
+    - the provider's own environment variable is used for its default endpoint, or for the endpoint
+      set in the same provider's base-URL environment variable (both come from the user's shell);
+    - a stored OS-keyring key is used only for the provider's default (public) endpoint.
+    A Custom or other non-default endpoint therefore gets no implied key from env or keyring.
     """
     if current:
         return current
+    if not _IMPLICIT_KEYS_ENABLED:
+        return ""
+    spec = provider_spec(provider)
+    if base_url is None:
+        remembered = getattr(_LAST_ENDPOINT, "value", None)
+        # Without a known endpoint, assume the worst: nothing implied is sent.
+        if not remembered or remembered[0] != provider:
+            return ""
+        base_url = remembered[1]
+    default_endpoint = spec["base_url"]
+    env_endpoint = os.getenv(spec["base_url_env_var"], "")
+    on_default = _same_endpoint(base_url, default_endpoint)
+    on_env_endpoint = _same_endpoint(base_url, env_endpoint)
 
-    env_name = provider_spec(provider)["env_var"]
-    if os.getenv(env_name):
-        return os.getenv(env_name, "")
+    if on_default or on_env_endpoint:
+        env_key = os.getenv(spec["env_var"], "")
+        if env_key:
+            return env_key
+    if on_default:
+        try:
+            from mwt.secrets import load_api_key
 
-    try:
-        from mwt.secrets import load_api_key
-
-        stored = load_api_key(provider)
-        if stored:
-            return stored
-    except Exception:
-        pass
+            stored = load_api_key(provider)
+            if stored:
+                return stored
+        except Exception:
+            pass
     return ""
 
 
@@ -190,9 +225,12 @@ def default_base_url(provider: str) -> str:
 
 def resolve_base_url(provider: str, current: str) -> str:
     if current:
-        return current
-    spec = provider_spec(provider)
-    return os.getenv(spec["base_url_env_var"], spec["base_url"])
+        resolved = current
+    else:
+        spec = provider_spec(provider)
+        resolved = os.getenv(spec["base_url_env_var"], spec["base_url"])
+    _LAST_ENDPOINT.value = (provider, resolved)
+    return resolved
 
 
 def resolve_model(provider: str, current: str) -> str:
@@ -272,6 +310,22 @@ _NON_TEXT_TOKENS = (
     "realtime",
     "audio-only",
 )
+
+
+def is_translation_suitable(model_id: str, item: dict[str, Any] | None = None) -> bool:
+    """Use the verified model filter for both catalog flags and run validation."""
+    from mwt.model_filter import unsuitable_reason
+    record = dict(item or {})
+    outputs = _output_modalities(record)
+    if outputs:
+        record["output_modalities"] = outputs
+    return not unsuitable_reason("", model_id, record)
+
+
+def annotate_suitability(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Recompute capability flags, including catalogs cached before filtering was introduced."""
+    return [{**item, "suitable": item.get("suitable") is not False and item.get("text") is not False and is_translation_suitable(str(item.get("id", "")), item)}
+            for item in models]
 
 
 class ModelCatalogError(RuntimeError):
@@ -516,6 +570,7 @@ def _model_record(model_id: str, item: dict[str, Any], *, display_name: str, des
         "pricing_completion": str(pricing.get("completion", "")),
         "supported_parameters": [str(parameter) for parameter in parameters],
         "text": text,
+        "suitable": text and is_translation_suitable(model_id, item),
         "reasoning": model_reasoning(item.get("reasoning")),
     }
 
@@ -975,6 +1030,8 @@ class LLMProviderClient(metaclass=_ClientMeta):
         # The model a person already chose. Lists keep it (marked when unsuitable) whatever ``model`` is:
         # a list request leaves ``model`` blank so that the saved one is not validated against the list.
         self.keep_model = ""
+        self.catalog_cached = False
+        self.request_guard = None
 
     def _stop_requested(self) -> bool:
         try:
@@ -1009,11 +1066,43 @@ class LLMProviderClient(metaclass=_ClientMeta):
             return self._list_models_anthropic()
         raise RuntimeError(f"Unsupported provider family: {self.family}")
 
+    def check_connection(self) -> list[dict[str, Any]]:
+        """List the full catalog with the key, failing loudly: no cache and no silent empty list.
+
+        OpenRouter publishes its catalog without authentication, so listing alone would call a wrong
+        key fine. Its ``/key`` endpoint is what actually checks the key.
+        """
+        self.ensure_ready(require_model=False)
+        if self.provider == "openrouter":
+            self._request_json("GET", f"{self.base_url}/key", headers=self._openai_headers())
+        return self.annotate_catalog(self.fetch_models())
+
+    def try_refresh_model_catalog(self) -> list[dict[str, Any]]:
+        """Catalog view retains non-text records; only the run path filters them out."""
+        from pathlib import Path
+        from mwt.userdata import load_model_catalog, remember_model_catalog
+
+        self.catalog_cached = False
+        try:
+            models = self.fetch_models()
+        except Exception:
+            models = load_model_catalog(self.provider, root=Path(self.data_dir)) if self.data_dir else []
+            self.catalog_cached = bool(models)
+        else:
+            if self.data_dir and models:
+                remember_model_catalog(self.provider, models, root=Path(self.data_dir))
+        return self.annotate_catalog(models)
+
     def fetch_public_models(self) -> list[dict[str, Any]]:
         """OpenRouter's pinned catalog, read without authenticating or generating text; not filtered."""
         if self.provider != "openrouter" or self.base_url != default_base_url("openrouter"):
             raise ValueError("Public catalog is only available at the OpenRouter endpoint")
         return self._list_models_openai_compatible(public=True)
+
+    def annotate_catalog(self, models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        visible = {item["id"]: item for item in self.filter_models(models)}
+        return [{**{key: value for key, value in record.items() if key != "unsuitable_reason"}, **visible.get(record.get("id"), {})}
+                for record in annotate_suitability(models)]
 
     def filter_models(self, models: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The models offered for translating. The chosen one stays, marked when it cannot translate text."""
@@ -1238,6 +1327,8 @@ class LLMProviderClient(metaclass=_ClientMeta):
     ) -> Any:
         if method == "POST":
             self._check_stop()  # the last look before a paid request, whichever step of a retry or adaptation it is
+            if getattr(self, "request_guard", None) is not None:
+                self.request_guard()
         body = None
         if payload is not None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1286,6 +1377,12 @@ class LLMProviderClient(metaclass=_ClientMeta):
             accounting = _current_accounting()
             accounting.request_count = 0
             accounting.usage = dict(_EMPTY_USAGE)
+
+    @property
+    def accounting(self) -> "_Accounting":
+        """The totals of the job that built this client. Worker threads of that job read them here: the module-level
+        ``LLMProviderClient.usage`` / ``.request_count`` resolve through the *calling* thread and are empty in a pool thread."""
+        return self._accounting
 
     @classmethod
     def record_usage(cls, response: Any, accounting: _Accounting | None = None) -> None:
@@ -1445,8 +1542,6 @@ class LLMProviderClient(metaclass=_ClientMeta):
 
     def _list_models_openai_compatible(self, *, public: bool = False) -> list[dict[str, Any]]:
         url = f"{self.base_url}/models"
-        if self.provider == "openrouter":
-            url = f"{url}?output_modalities=text"
         response = self._request_json("GET", url, headers={"Accept": "application/json"} if public else self._openai_headers())
         data = response.get("data") or []
         models: list[dict[str, Any]] = []
@@ -1630,6 +1725,8 @@ class LLMProviderClient(metaclass=_ClientMeta):
             )
             # The filter leaves out what cannot be called with generateContent (embedding, Live API, ...).
             record["generation_methods"] = [str(method) for method in methods] if isinstance(methods, list) else []
+            if "generateContent" not in methods:
+                record.update(text=False, suitable=False, output_modalities=[])
             thinking = gemini_reasoning(model_id, item.get("thinking"))
             if thinking is not None:
                 record["reasoning"] = thinking
@@ -1683,6 +1780,8 @@ class LLMProviderClient(metaclass=_ClientMeta):
         data = response.get("data") or []
         models: list[dict[str, Any]] = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
             model_id = str(item.get("id", "")).strip()
             if not model_id:
                 continue

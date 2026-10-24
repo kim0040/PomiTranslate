@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { app } from './lib/app.svelte';
-  import { LOCALES, t, type Locale } from './lib/i18n/index.svelte';
+  import { t } from './lib/i18n/index.svelte';
   import CrashScreen from './components/CrashScreen.svelte';
   import DiscardReviewDialog from './components/DiscardReviewDialog.svelte';
   import { applyTheme, storedTheme, watchSystemTheme } from './lib/theme';
@@ -9,7 +9,7 @@
   import { baseName } from './lib/format';
   import Sidebar from './components/Sidebar.svelte';
   import Stepper from './components/Stepper.svelte';
-  import Dialog from './components/Dialog.svelte';
+  import SetupWizard from './components/SetupWizard.svelte';
   import Callout from './components/Callout.svelte';
   import StatusScreen from './components/StatusScreen.svelte';
   import Toasts from './components/Toasts.svelte';
@@ -26,6 +26,7 @@
   import HelpScreen from './screens/HelpScreen.svelte';
   import Tour from './components/Tour.svelte';
   import LicensesDialog from './components/LicensesDialog.svelte';
+  import Dialog from './components/Dialog.svelte';
   import ExitDialog from './components/ExitDialog.svelte';
 
   let pane: HTMLElement | undefined = $state();
@@ -128,9 +129,9 @@
     });
   });
 
-  // The shell holds a window close or Quit while settings or glossary edits are unsaved, so it must know.
-  $effect(() => { void setSettingsDirty(app.settingsDirty || app.glossaryDirty); });
-
+  // The shell holds a window close or Quit while anything typed is unsaved (settings, glossary, the
+  // setup wizard, edits in the translation review), so it must know.
+  $effect(() => { void setSettingsDirty(app.guards.unsaved); });
 </script>
 
 <svelte:boundary onerror={(error) => app.reportCrash(error)}>
@@ -156,7 +157,24 @@
       </header>
     {/if}
 
-    <main id="main-content" tabindex="-1" bind:this={pane} class:review-page={app.page === 'workspace' && app.step === 'review'}>
+    <!-- Outside the scrolling pane, so an error stays in view whatever the page is scrolled to. -->
+    <div class="banners" class:empty={!app.banners.length || app.startupFailed}>
+      {#if !app.startupFailed}
+        {#each app.banners as banner (banner.id)}
+          <Callout tone={banner.tone === 'error' ? 'danger' : 'warning'} title={t('error.title')} role="alert">
+            {banner.message}{#if banner.count > 1} <span class="times num">({t('error.times', { count: banner.count })})</span>{/if}
+            {#snippet actions()}
+              {#if banner.action === 'enter-key'}
+                <button type="button" class="btn btn-secondary btn-sm" onclick={() => { app.dismissBanner(banner.id); app.enterKeyAgain(); }}>{t('error.enterKeyAgain')}</button>
+              {/if}
+              <button type="button" class="btn btn-quiet btn-sm" onclick={() => app.dismissBanner(banner.id)}>{t('error.dismiss')}</button>
+            {/snippet}
+          </Callout>
+        {/each}
+      {/if}
+    </div>
+
+    <main id="main-content" tabindex="-1" bind:this={pane} class:review-page={app.page === 'workspace' && (app.step === 'review' || (app.reviewOpen && !app.isBusy && (app.step === 'run' || app.step === 'result')))}>
       {#if !app.ready}
         <div class="boot" role="status" aria-live="polite">
           <span class="spin" aria-hidden="true"><Icon name="refresh" size={24} /></span>
@@ -188,20 +206,6 @@
           </StatusScreen>
         {/if}
       {:else}
-        {#if app.banner}
-          <div class="banner">
-            <Callout tone={app.banner.tone === 'error' ? 'danger' : 'warning'} title={t('error.title')} role="alert">
-              {app.banner.message}
-              {#snippet actions()}
-                {#if app.banner?.action === 'enter-key'}
-                  <button type="button" class="btn btn-secondary btn-sm" onclick={() => { app.banner = null; app.enterKeyAgain(); }}>{t('error.enterKeyAgain')}</button>
-                {/if}
-                <button type="button" class="btn btn-quiet btn-sm" onclick={() => (app.banner = null)}>{t('error.dismiss')}</button>
-              {/snippet}
-            </Callout>
-          </div>
-        {/if}
-
         {#if app.page === 'workspace'}
           {#if app.step === 'world'}<WorldScreen />
           {:else if app.step === 'scan'}<ScanScreen />
@@ -226,40 +230,12 @@
 
 <ExitDialog />
 
-{#if app.showNotice && app.notices}
-  <Dialog title={t('notice.title')} dismissible={false} onClose={() => {}}>
-    <div class="notice-brand" aria-hidden="true"><img src="/images/pomi.png" alt="" width="72" height="72" /></div>
-    <ul class="notice-list">
-      <li><span class="mark"><Icon name="shield" size={18} /></span> <span>{t('notice.item1')}</span></li>
-      <li><span class="mark"><Icon name="language" size={18} /></span> <span>{t('notice.item2')}</span></li>
-      <li><span class="mark"><Icon name="info" size={18} /></span> <span>{t('notice.item3')}</span></li>
-    </ul>
-    <div class="first-run">
-      <div class="field">
-        <span class="label" id="first-lang">{t('firstRun.language')}</span>
-        <div class="segmented" role="group" aria-labelledby="first-lang">
-          {#each LOCALES as locale (locale)}
-            <button type="button" lang={locale} aria-pressed={app.settings.ui_language === locale}
-              onclick={() => app.chooseFirstRunLanguage(locale as Locale)}>{locale === 'ko' ? '한국어' : locale === 'ja' ? '日本語' : 'English'}</button>
-          {/each}
-        </div>
-      </div>
-      <div class="field">
-        <label class="label" for="first-target">{t('firstRun.target')}</label>
-        <input id="first-target" class="input" type="text" autocomplete="off" value={app.settings.target_language}
-          aria-describedby="first-target-help" oninput={(event) => app.setFirstRunTarget(event.currentTarget.value)} />
-        <span id="first-target-help" class="hint">{t('firstRun.targetHelp')}</span>
-      </div>
-    </div>
-    {#snippet actions()}
-      <button type="button" class="btn btn-primary btn-lg accept" data-autofocus onclick={() => app.acceptNotice()}>{t('notice.accept')}</button>
-      <!-- Required wording, kept exactly as written; it is set quietly below the choice instead of shouting above it. -->
-      <p class="required" lang="en">NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</p>
-    {/snippet}
-  </Dialog>
+<!-- First run: the setup wizard carries the legal notice and the display-language choice on its first step. -->
+{#if app.showWizard && app.ready && !app.startupFailed}
+  <SetupWizard />
 {/if}
 
-{#if app.showTour && !app.showNotice && app.ready}
+{#if app.showTour && !app.showWizard && !app.showNotice && app.ready}
   <Tour />
 {/if}
 
@@ -277,6 +253,17 @@
 
 <Toasts />
 
+<!-- Leaving the translation review (or replacing the job) while it holds unsaved edits. -->
+{#if app.pendingReviewLeave}
+  <Dialog title={t('translationReview.draftsClose.title')} showClose={false} onClose={() => app.resolveReviewLeave(false)}>
+    <p>{t('translationReview.draftsClose.body')}</p>
+    {#snippet actions()}
+      <button type="button" class="btn btn-secondary" data-autofocus onclick={() => app.resolveReviewLeave(false)}>{t('translationReview.draftsClose.stay')}</button>
+      <button type="button" class="btn btn-danger" onclick={() => app.resolveReviewLeave(true)}>{t('translationReview.draftsClose.discard')}</button>
+    {/snippet}
+  </Dialog>
+{/if}
+
 {#snippet failed(_error: unknown, reset: () => void)}
   <CrashScreen {reset} />
 {/snippet}
@@ -292,7 +279,15 @@
   /* One window-sized grid: the sidebar and toolbar stay put, only the content pane scrolls. */
   .shell { height: 100vh; height: 100dvh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); overflow: hidden; }
   .shell.rail { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
-  .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--bg-page); }
+  /* Toolbar, error banners, pane. The toolbar is drawn only when it has something to hold, so each part
+     names its row and an absent toolbar leaves an empty auto row. */
+  .workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); background: var(--bg-page); }
+  .workspace > .toolbar { grid-row: 1; }
+  .workspace > .banners { grid-row: 2; }
+  .workspace > main { grid-row: 3; }
+  .banners { display: grid; gap: var(--space-2); max-height: 40vh; overflow: auto; padding: var(--space-3) clamp(var(--space-4), 2.6vw, var(--space-6)) 0; background: var(--bg-page); }
+  .banners.empty { height: 0; padding: 0; overflow: hidden; }
+  .times { font-weight: 400; color: var(--text-secondary); }
   .toolbar {
     z-index: 20; min-width: 0; min-height: var(--toolbar-height); display: flex; align-items: center; gap: var(--space-3); overflow-x: auto; overflow-y: hidden;
     padding: 0 clamp(var(--space-3), 2.4vw, var(--space-6));
@@ -312,14 +307,6 @@
   main.review-page { --pane-pad-bottom: var(--space-3); padding-block-end: var(--space-3); }
   .boot { min-height: 50vh; display: flex; align-items: center; justify-content: center; gap: var(--space-3); color: var(--text-secondary); }
   .banner { margin-block-end: var(--space-4); }
-  .notice-brand { display: grid; place-items: center; }
-  .notice-brand img { width: 72px; height: 72px; object-fit: contain; outline: 1px solid var(--image-outline); outline-offset: -1px; border-radius: var(--radius-xl); }
-  .notice-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
-  .notice-list li { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: var(--space-3); font-size: var(--text-md); }
-  .notice-list .mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent-text); }
-  .accept { flex: 1 1 100%; }
-  .required { flex: 1 1 100%; margin: 0; text-align: center; font-size: var(--text-xs); font-weight: 400; color: var(--text-secondary); }
-  .first-run { display: grid; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border); }
   .drop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 3px dashed var(--accent); outline-offset: -12px; pointer-events: none; animation: pomi-fade var(--dur-fast) var(--ease-out); }
   .drop-card { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-radius: var(--radius-xl); background: var(--bg-surface); color: var(--accent-text); font-weight: 600; box-shadow: var(--shadow-pop); }
 

@@ -102,6 +102,16 @@
     closeRestore();
     if (backupSetId) await app.restore(backupSetId);
   }
+
+  // The id is what a support request or a recovery note refers to; copying it beats retyping it.
+  async function copyBackupId(backupSetId: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(backupSetId);
+      app.notify(t('backups.copiedId'), 'success');
+    } catch {
+      app.notify(t('backups.copyFailed'), 'error');
+    }
+  }
 </script>
 
 <div class="page">
@@ -182,6 +192,7 @@
                 {#if expanded.has(backup.backupSetId)}
                   <span id={`backup-more-${backup.backupSetId}`} class="more-body">
                     <code class="backup-id" title={backup.backupSetId}>{t('backups.id')}: {backup.backupSetId}</code>
+                    <button type="button" class="more copy" onclick={() => copyBackupId(backup.backupSetId)}><Icon name="copy" size={12} /> {t('backups.copyId')}</button>
                     {#if backup.externalTargets?.length}<span class="muted">{t('backups.externalCount', { count: backup.externalTargets.length })}</span>{/if}
                   </span>
                 {/if}
@@ -323,7 +334,8 @@
   .delete { color: var(--danger-text); }
   @media (hover: hover) { .delete:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger-text); } }
   .more { margin-inline-start: var(--space-2); padding: 0; border: 0; background: none; color: var(--accent-text); font: inherit; font-size: var(--text-xs); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
-  .more-body { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); padding-block: 2px; }
+  .more-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); padding-block: 2px; }
+  .more.copy { margin-inline-start: 0; display: inline-flex; align-items: center; gap: 4px; }
   .prune { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); font-size: var(--text-sm); }
   .prune .input { width: 80px; min-height: 30px; }
   .understand { margin-top: var(--space-2); }

@@ -77,7 +77,7 @@ def test_public_catalog() -> None:
         with patch.dict(os.environ, {"POMI_API_KEY": "synthetic-inherited-key"}), patch("mwt.secrets.load_api_key", side_effect=AssertionError("public lookup must not read keys")), patch.object(LLMProviderClient, "_request_json", return_value=catalog) as network, patch.object(entry, "emit") as emit:
             entry.handle(request, data / "reports", data)
             method, url = network.call_args.args
-            assert method == "GET" and url == "https://openrouter.ai/api/v1/models?output_modalities=text"
+            assert method == "GET" and url == "https://openrouter.ai/api/v1/models"
             assert "Authorization" not in network.call_args.kwargs["headers"]
             reply = emit.call_args.args[0]
             assert reply["type"] == "response.ok" and reply["payload"]["cached"] is False
@@ -100,7 +100,7 @@ def test_public_catalog() -> None:
         with patch.object(LLMProviderClient, "_request_json", return_value=catalog), patch.object(entry, "emit") as emit:
             entry.handle({"v": 1, "id": "kept", "type": "models.list", "payload": body}, data / "reports", data)
             models = emit.call_args.args[0]["payload"]["models"]
-        ids = [item["id"] for item in models]
+        ids = [item["id"] for item in models if item.get("suitable") is not False or item.get("unsuitable_reason")]
         assert "text-fixture" in ids and "google/gemini-robotics-fixture" in ids and "other/robotics-fixture-2" not in ids, ids
         assert next(item for item in models if item["id"] == "google/gemini-robotics-fixture").get("unsuitable_reason")
     print("PASS desktop_provider.public_catalog_no_credentials_no_settings_write_cache_and_retry")
@@ -120,7 +120,7 @@ def _models_list(data: Path, body: dict, *, network, saved: dict | None = None) 
 
 def _marks(reply: dict) -> dict:
     assert reply["type"] == "response.ok", reply
-    return {item["id"]: item.get("unsuitable_reason") for item in reply["payload"]["models"]}
+    return {item["id"]: item.get("unsuitable_reason") for item in reply["payload"]["models"] if item.get("suitable") is not False or item.get("unsuitable_reason")}
 
 
 def test_saved_model_on_every_list_path() -> None:

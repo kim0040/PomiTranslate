@@ -16,9 +16,9 @@
   const step = $derived(steps[index]);
   const last = $derived(index === steps.length - 1);
 
-  function finish(toSettings = false): void {
+  function finish(toSetup = false): void {
     app.finishTour();
-    if (toSettings) app.goto('settings');
+    if (toSetup) app.openWizard();
   }
 </script>
 

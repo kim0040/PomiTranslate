@@ -429,7 +429,21 @@ def _view(scope: str, document: dict, **extra: Any) -> dict:
 
 def get_glossary(payload: dict, data_dir: Path) -> dict:
     scope, world = _scope(payload)
-    return _view(scope, read_document(_document_path(data_dir, scope, world)))
+    path = _document_path(data_dir, scope, world)
+    if path.exists():
+        return _view(scope, read_document(path))
+    # No store file yet: show what an older version kept in the settings, so saving (revision 0) carries it over.
+    # A row the store cannot hold (a 201-500 character target, a bad row) is listed in legacyInvalid; it is
+    # still used by a translation until this scope is saved, and never disappears without the user seeing it.
+    usable, problems = legacy_scope(data_dir, scope, world)
+    fitting = [row for row in usable if row["fitsStore"]]
+    problems += [{"index": None, "source": row["source"], "reason": "too_long"} for row in usable if not row["fitsStore"]]
+    view = _view(scope, _empty_document())
+    if fitting:
+        view["entries"] = _legacy_ids([{key: value for key, value in row.items() if key != "fitsStore"} for row in fitting])
+    if problems:
+        view["legacyInvalid"] = problems
+    return view
 
 
 def set_glossary(payload: dict, data_dir: Path) -> dict:
@@ -649,19 +663,15 @@ def merge_entries(global_entries: list[dict], world_entries: list[dict]) -> list
 
 
 def load_merged(data_dir: Path, world_dir: str | Path | None) -> list[dict]:
-    """The entries a translation of this world uses. Never raises: a glossary that cannot be read is empty."""
-    entries: list[dict] = []
     try:
-        entries = read_document(_document_path(data_dir, "global", None))["entries"]
+        global_entries = read_scope_entries(data_dir, "global")
     except Exception:
-        entries = []
-    world_entries: list[dict] = []
-    if world_dir:
-        try:
-            world_entries = read_document(_document_path(data_dir, "world", world_dir))["entries"]
-        except Exception:
-            world_entries = []
-    return merge_entries(entries, world_entries)
+        global_entries = []
+    try:
+        world_entries = read_scope_entries(data_dir, "world", world_dir) if world_dir else []
+    except Exception:
+        world_entries = []
+    return merge_entries(global_entries, world_entries)
 
 
 @lru_cache(maxsize=4096)
@@ -879,3 +889,158 @@ class Glossary:
 
 def _quoted(text: str) -> str:
     return json.dumps(text, ensure_ascii=False)
+
+
+# ------------------------------------------------ adapters for the translation side
+# A saved job and a review page ask the same glossary about many texts. Building a ``Glossary`` costs
+# about as much as matching a few hundred texts, so the adapters share one per distinct entry list.
+_FORMAT_CODE = re.compile(r"§[0-9a-fk-orx]", re.IGNORECASE)
+_SHARED_MAX = 8
+_shared: dict[tuple, "Glossary"] = {}
+_shared_lock = threading.Lock()
+
+
+def shared_glossary(entries: Any) -> "Glossary":
+    """The ``Glossary`` of ``entries``, built once per distinct list (a small LRU; a ``Glossary`` is immutable)."""
+    if isinstance(entries, Glossary):
+        return entries
+    key = tuple(
+        (item.get("id"), item.get("source"), item.get("target", ""), item.get("mode"), item.get("caseSensitive") is True)
+        for item in (entries or []) if isinstance(item, dict)
+    )
+    with _shared_lock:
+        found = _shared.pop(key, None)
+        if found is None:
+            found = Glossary(entries)
+            while len(_shared) >= _SHARED_MAX:
+                _shared.pop(next(iter(_shared)))
+        _shared[key] = found
+        return found
+
+
+def matching_entries(texts: list[str], entries: list[dict]) -> list[dict]:
+    return shared_glossary(entries).matching(texts)
+
+
+def output_matches(source: str, answer: str, entries: list[dict]) -> bool:
+    glossary = shared_glossary(entries)
+    return not glossary.misses(source, answer, glossary.matching([source]))
+
+
+def prompt_block(entries: list[dict]) -> str:
+    return Glossary.prompt_block(entries)
+
+
+def entries_hash(entries: list[dict]) -> str:
+    canonical = sorted((item["source"], item.get("target", ""), item.get("mode", "translate"), item.get("caseSensitive") is True)
+                       for item in entries)
+    return hashlib.sha256(json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def source_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def row_hashes(texts: list[str], entries: list[dict[str, Any]], *, cache: dict[str, str] | None = None) -> dict[str, str]:
+    """Snapshots contain only hashes, never a copy of glossary terms in a job/report.
+
+    One ``Glossary`` serves every text. ``cache`` (text -> row hash, owned by the caller for one entry list)
+    keeps a checkpoint that is saved many times from matching the same text again.
+    """
+    glossary = shared_glossary(entries)
+    by_match: dict[tuple, str] = {}
+    result: dict[str, str] = {}
+    for text in texts:
+        known = cache.get(text) if cache is not None else None
+        if known is None:
+            matched = glossary.matching([text])
+            key = tuple(id(item) for item in matched)
+            known = by_match.get(key)
+            if known is None:
+                known = by_match[key] = entries_hash(matched)
+            if cache is not None:
+                cache[text] = known
+        result[source_hash(text)] = known
+    return result
+
+
+# ------------------------------------------ settings written by versions before the revisioned store
+# Read-only. Old ``settings.json`` / ``world-glossaries.json`` rows had no ids and allowed 500-character
+# targets and notes; the store allows 200 and 300. Such a row stays usable for a translation, but it cannot
+# be saved into the store, so ``get_glossary`` reports it (``legacyInvalid``) instead of dropping it silently.
+LEGACY_MAX_TARGET_CHARS = 500
+LEGACY_MAX_NOTE_CHARS = 500
+
+
+def _legacy_ids(entries: list[dict]) -> list[dict]:
+    return [{**entry, "id": hashlib.sha256((entry["source"] + str(entry.get("caseSensitive"))).encode("utf-8")).hexdigest()[:20]}
+            for entry in entries]
+
+
+def _legacy_rows(raw: Any) -> tuple[list[dict], list[dict]]:
+    """``(usable, problems)`` of an old entry list. A usable row carries ``fitsStore``; a problem says why a row is unusable."""
+    usable: list[dict] = []
+    problems: list[dict] = []
+    if not isinstance(raw, list):
+        return usable, problems
+    seen: list[tuple[str, bool]] = []
+    for index, item in enumerate(raw[:MAX_ENTRIES]):
+        if not isinstance(item, dict):
+            problems.append({"index": index, "source": "", "reason": "not_an_entry"})
+            continue
+        text = item.get("source")
+        source = text.strip() if isinstance(text, str) else ""
+        label = source[:MAX_SOURCE_CHARS]
+        target, mode = item.get("target", ""), item.get("mode", "translate")
+        note, sensitive = item.get("note", ""), item.get("caseSensitive", False)
+        reason = None
+        if not source or len(source) > MAX_SOURCE_CHARS:
+            reason = "source_invalid"
+        elif not isinstance(target, str) or len(target) > LEGACY_MAX_TARGET_CHARS:
+            reason = "target_invalid"
+        elif mode not in MODES or (mode == "translate" and not target.strip()):
+            reason = "mode_invalid"
+        elif not isinstance(note, str) or len(note) > LEGACY_MAX_NOTE_CHARS or type(sensitive) is not bool:
+            reason = "note_invalid"
+        elif _FORMAT_CODE.search(source) or _FORMAT_CODE.search(target):
+            reason = "format_code"
+        elif any(source == prior or (source.casefold() == prior.casefold() and (not sensitive or not prior_sensitive))
+                 for prior, prior_sensitive in seen):
+            reason = "duplicate"
+        if reason:
+            problems.append({"index": index, "source": label, "reason": reason})
+            continue
+        seen.append((source, sensitive))
+        usable.append({
+            "source": source, "target": target.strip(), "mode": mode, "note": note.strip(), "caseSensitive": sensitive,
+            "fitsStore": len(target.strip()) <= MAX_TARGET_CHARS and len(note.strip()) <= MAX_NOTE_CHARS,
+        })
+    return usable, problems
+
+
+def _legacy_source(data_dir: Path, scope: str, world_dir: Any) -> Any:
+    from mwt.userdata import load_user_settings, _read_settings_file
+    if scope == "global":
+        return load_user_settings(data_dir).get("glossary", [])
+    saved = _read_settings_file(data_dir / "world-glossaries.json") or {}
+    return (saved.get("worlds") or {}).get(str(Path(world_dir).expanduser().resolve()), [])
+
+
+def legacy_scope(data_dir: Path, scope: str, world_dir: Any = None) -> tuple[list[dict], list[dict]]:
+    """``(usable, problems)`` of the old settings for a scope that has no store file yet."""
+    if scope == "world" and not world_dir:
+        return [], []
+    try:
+        return _legacy_rows(_legacy_source(data_dir, scope, world_dir))
+    except (OSError, ValueError):
+        return [], []
+
+
+def read_scope_entries(data_dir: Path, scope: str, world_dir=None) -> list[dict]:
+    if scope == "world" and not world_dir:
+        return []
+    path = _document_path(data_dir, scope, world_dir)
+    if path.exists():
+        return read_document(path)["entries"]
+    usable, _problems = legacy_scope(data_dir, scope, world_dir)
+    return _legacy_ids([{key: value for key, value in row.items() if key != "fitsStore"} for row in usable])

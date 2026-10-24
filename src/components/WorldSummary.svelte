@@ -9,7 +9,8 @@
   let { resume = true, showEmpty = true }: { resume?: boolean; showEmpty?: boolean } = $props();
 
   const summary = $derived(landingSummary({
-    scan: app.scan, scanAt: app.scanAt, result: app.result, resultAt: app.resultAt, backups: app.backups, resume: app.resume
+    scan: app.scan, scanAt: app.scanAt, result: app.result, resultAt: app.resultAt, backups: app.backups, resume: app.resume,
+    lastScan: app.lastScan, lastJob: app.lastJob
   }));
   const dateText = (at: number) => (at > 0 ? formatDate(new Date(at).toISOString(), app.locale) : '');
   const scanText = $derived.by(() => {

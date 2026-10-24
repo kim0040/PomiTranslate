@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -33,6 +34,14 @@ MAX_FILE_WRITE_RETRIES = 10
 MAX_SOURCE_OVERRIDES = 5000
 MAX_SOURCE_OVERRIDE_CHARS = 32_000
 MAX_SOURCE_OVERRIDES_BYTES = 1_048_576
+MAX_CUSTOM_PRICES = 1_000
+UI_LANGUAGES = frozenset({"ko", "en", "ja", "zh"})
+
+
+def normalize_ui_language(value: Any, *, field: str = "ui_language") -> str:
+    if not isinstance(value, str) or value not in UI_LANGUAGES:
+        raise ValueError(f"{field} must be one of: {', '.join(sorted(UI_LANGUAGES))}")
+    return value
 
 RESOURCE_PACK_OPTION_KEYS = frozenset(
     {"source_lang_files", "target_lang_file", "skip_if_target_exists"}
@@ -73,6 +82,47 @@ def normalize_source_overrides(value: Any, *, field: str = "sourceOverrides") ->
         raise ValueError(f"{field} contains invalid Unicode") from exc
     if len(encoded) > MAX_SOURCE_OVERRIDES_BYTES:
         raise ValueError(f"{field} exceeds {MAX_SOURCE_OVERRIDES_BYTES} UTF-8 bytes")
+    return normalized
+
+
+def normalize_custom_prices(value: Any, *, field: str = "customPrices") -> dict[str, dict[str, Any]]:
+    """Validate user-supplied USD-per-token prices indexed by provider/model."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    if len(value) > MAX_CUSTOM_PRICES:
+        raise ValueError(f"{field} can contain at most {MAX_CUSTOM_PRICES} provider/model prices")
+    from llm_backends import PROVIDER_SPECS  # the one list of providers; a price can exist for each of them
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or "/" not in key:
+            raise ValueError(f"{field} keys must be provider/model")
+        provider, model = key.split("/", 1)
+        if provider not in PROVIDER_SPECS or not model.strip():
+            raise ValueError(f"{field} contains an invalid provider/model key")
+        if not isinstance(raw, dict):
+            raise ValueError(f"{field}.{key} must be an object")
+        values: dict[str, float] = {}
+        for name in ("input", "output"):
+            item = raw.get(name)
+            if isinstance(item, bool):
+                raise ValueError(f"{field}.{key}.{name} must be between 0 and 1000 USD per 1M tokens")
+            try:
+                number = float(item)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field}.{key}.{name} must be between 0 and 1000 USD per 1M tokens") from exc
+            if not 0 <= number <= 1000:
+                raise ValueError(f"{field}.{key}.{name} must be between 0 and 1000 USD per 1M tokens")
+            values[name] = number
+        updated_at = raw.get("updatedAt")
+        if isinstance(updated_at, str):
+            try:
+                datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{field}.{key}.updatedAt must be an ISO timestamp") from exc
+        else:
+            updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        normalized[key] = {**values, "updatedAt": updated_at}
     return normalized
 
 

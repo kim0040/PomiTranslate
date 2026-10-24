@@ -1,6 +1,6 @@
 <script lang="ts">
   import { app } from '../lib/app.svelte';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t } from '../lib/i18n/index.svelte';
   import { baseName, formatDate, middleEllipsis } from '../lib/format';
   import Icon from '../components/Icon.svelte';
   import Callout from '../components/Callout.svelte';
@@ -26,7 +26,7 @@
   });
   // "Overworld · The Nether · The End +1": one chip, not one chip per dimension.
   const dimensionText = $derived.by(() => {
-    const names = dimensions.map((dim) => t(`world.dim.${dim}` as MessageKey));
+    const names = dimensions.map((dim) => labelFor('world.dim', dim));
     return names.length > 3 ? `${names.slice(0, 3).join(' · ')} +${names.length - 3}` : names.join(' · ');
   });
   // The discovered list knows the world's own icon.png; the selected card borrows it.
@@ -35,8 +35,7 @@
   const dataVersion = $derived(app.inspection?.dataVersions?.find((item) => item.dataVersion)?.dataVersion ?? null);
   const blockers = $derived(app.inspection?.writeBlockers ?? []);
   const blockerText = (code: string) => {
-    const key = `world.blocked.${code}` as MessageKey;
-    try { return t(key); } catch { return t('world.blocked.unknown'); }
+    return knownBlockers.includes(code) ? labelFor('world.blocked', code) : t('world.blocked.unknown');
   };
   const knownBlockers = ['bedrock', 'mcr', 'linear', 'world_in_use', 'not_writable', 'not_readable', 'missing', 'unsafe_path'];
   const name = $derived(app.worldDir ? baseName(app.worldDir) : '');
@@ -63,7 +62,7 @@
       {/snippet}
 
       <ul class="facts">
-        <li><Pill tone="accent">{t(`world.kind.${kind}` as MessageKey)}</Pill></li>
+        <li><Pill tone="accent">{labelFor('world.kind', kind)}</Pill></li>
         {#if dimensionText}<li><Pill>{dimensionText}</Pill></li>{/if}
         {#if app.inspection?.resourcePacks?.length}<li><Pill>{t('world.resourcePack')}</Pill></li>{/if}
         <li><Pill>{t('world.backupsCount', { count: app.backups.length })}</Pill></li>

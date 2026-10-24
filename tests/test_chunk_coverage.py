@@ -528,6 +528,8 @@ def test_translate_start_needs_confirmation_for_newer_chunks(tmp: Path, base_url
         stale = send("translate.start", {**request, "fingerprint": "0" * 64}, data_dir)
         assert stale["error"]["code"] == "PLAN_INVALIDATED"
 
+        from mwt.userdata import remember_user_settings
+        remember_user_settings({"review_before_apply": False}, data_dir)
         accepted = send("translate.start", {**request, "acceptNewerVersion": True}, data_dir)
         assert accepted["type"] == "response.ok", accepted
         assert accepted["payload"]["status"] == "completed"
@@ -557,6 +559,8 @@ def test_confirmation_is_not_asked_for_covered_versions_or_old_plans(tmp: Path, 
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         plan.pop("chunkCoverage")
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        from mwt.userdata import remember_user_settings
+        remember_user_settings({"review_before_apply": False}, data_dir)
         done = send(
             "translate.start",
             {"worldDir": str(world), "fingerprint": scan["fingerprint"], "scanPlanId": scan["scanPlanId"]},

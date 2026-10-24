@@ -32,6 +32,7 @@ from llm_backends import (  # noqa: E402
     ProviderError,
     RequestStopped,
     infer_provider,
+    default_base_url,
     parse_retry_after,
     resolve_api_key,
 )
@@ -218,20 +219,20 @@ def test_only_the_selected_providers_key_is_used() -> None:
         "mwt.secrets.load_api_key", side_effect=stored
     ):
         for borrower in ("gemini", "anthropic", "openrouter", "custom", "custom_openai", "custom_anthropic"):
-            assert resolve_api_key(borrower, "") == "", f"{borrower} borrowed a key"
-        assert resolve_api_key("openai", "") == "openai-env-key"
-        assert resolve_api_key("comet", "") == "comet-env-key"
+            assert resolve_api_key(borrower, "", default_base_url(borrower)) == "", f"{borrower} borrowed a key"
+        assert resolve_api_key("openai", "", default_base_url("openai")) == "openai-env-key"
+        assert resolve_api_key("comet", "", default_base_url("comet")) == "comet-env-key"
         assert resolve_api_key("gemini", "given") == "given"
         assert set(looked_up) <= {"gemini", "anthropic", "openrouter", "custom", "custom_openai", "custom_anthropic"}
     with patch.dict(os.environ, {**cleared, "GEMINI_API_KEY": "gemini-env-key", "CUSTOM_API_KEY": "custom-env-key"}), patch(
         "mwt.secrets.load_api_key", return_value=None
     ):
-        assert resolve_api_key("gemini", "") == "gemini-env-key"
-        assert resolve_api_key("custom", "") == "custom-env-key"
-        assert resolve_api_key("openai", "") == ""
+        assert resolve_api_key("gemini", "", default_base_url("gemini")) == "gemini-env-key"
+        assert resolve_api_key("custom", "", "https://custom.example.test/v1") == ""
+        assert resolve_api_key("openai", "", default_base_url("openai")) == ""
     with patch.dict(os.environ, cleared), patch("mwt.secrets.load_api_key", side_effect=lambda account: f"stored-{account}"):
-        assert resolve_api_key("gemini", "") == "stored-gemini"
-        assert resolve_api_key("custom", "") == "stored-custom"
+        assert resolve_api_key("gemini", "", default_base_url("gemini")) == "stored-gemini"
+        assert resolve_api_key("custom", "", default_base_url("custom")) == ""
     # An address the app does not know is a Custom endpoint, so it can never be handed Comet's key.
     assert infer_provider("auto", "https://llm.example.internal/v1") == "custom"
     assert infer_provider(None, "") == "comet"

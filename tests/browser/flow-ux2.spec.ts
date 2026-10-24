@@ -10,7 +10,7 @@ async function open(page: Page, query: string) {
 const requests = (page: Page) => page.evaluate(() => (window as unknown as { __pomiRequests: { type: string }[] }).__pomiRequests.map((request) => request.type));
 const count = async (page: Page, type: string) => (await requests(page)).filter((item) => item === type).length;
 async function toRun(page: Page) {
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
 }
 async function runAndFinish(page: Page) {
   await toRun(page);
@@ -33,7 +33,7 @@ test.describe('a failed run with nothing to resume (U17)', () => {
 
     // The button goes to the run step with its cost; nothing is sent until Start is pressed.
     await hero(page).getByRole('button', { name: '같은 스캔으로 다시 번역' }).click();
-    await expect(page.getByRole('heading', { level: 1, name: '번역 진행', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '번역 준비', exact: true })).toBeVisible();
     await expect(page.getByText('예상 비용')).toBeVisible();
     // (The first run of the fixture continued a saved job, so it was the one translate.resume.)
     expect(await count(page, 'translate.start')).toBe(0);
@@ -48,7 +48,7 @@ test.describe('a failed run with nothing to resume (U17)', () => {
     await open(page, 'scenario=result-failed');
     await runAndFinish(page);
     await hero(page).getByRole('button', { name: '처음부터 다시 스캔' }).click();
-    await expect(page.getByRole('heading', { level: 1, name: '월드 스캔', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '번역할 문장 찾기', exact: true })).toBeVisible();
   });
 
   test('a stopped run without saved progress does not promise to continue the saved sentences', async ({ page }) => {
@@ -61,8 +61,20 @@ test.describe('a failed run with nothing to resume (U17)', () => {
 });
 
 test.describe('a failed run that kept a checkpoint (U17)', () => {
-  test('offers to continue the remaining sentences, and the text matches', async ({ page }) => {
+  // Since the 2026-10-24 merge a readable saved table makes "retry only the failed sentences" the main action
+  // (review-apply.spec); continuing the remaining sentences leads when the job can be resumed but its table
+  // cannot be read (?notable=1).
+  test('offers the failed-only retry first when the saved table can be read', async ({ page }) => {
     await open(page, 'scenario=result-failed-resume');
+    await runAndFinish(page);
+    await expect(page.locator('main .btn-primary')).toHaveCount(1);
+    await expect(page.locator('main .btn-primary')).toHaveText(/^\s*실패한 \d+개만 다시 번역$/);
+    await expect(page.getByRole('button', { name: '같은 스캔으로 다시 번역' })).toHaveCount(0);
+    await expect(hero(page)).not.toContainText('남은 문장만 이어서 번역합니다');
+  });
+
+  test('offers to continue the remaining sentences, and the text matches', async ({ page }) => {
+    await open(page, 'scenario=result-failed-resume&notable=1');
     await runAndFinish(page);
     await expect(hero(page)).toContainText('저장된 번역 2개는 그대로 쓰고 남은 문장만 이어서 번역합니다.');
     await expect(page.locator('main .btn-primary')).toHaveCount(1);
@@ -80,8 +92,9 @@ test.describe('a failed run that kept a checkpoint (U17)', () => {
 
 test.describe('the scan step on a return visit (U7)', () => {
   test('summarises the last translation without starting a scan', async ({ page }) => {
-    await open(page, 'scenario=selected');
-    await expect(page.getByRole('heading', { level: 1, name: '월드 스캔', exact: true })).toBeVisible();
+    // history=none: the core keeps no job record, so the summary falls back to the newest backup.
+    await open(page, 'scenario=selected&history=none');
+    await expect(page.getByRole('heading', { level: 1, name: '번역할 문장 찾기', exact: true })).toBeVisible();
     const summary = page.locator('main .summary');
     await expect(summary).toContainText('마지막 번역');
     await expect(summary).toContainText('번역 백업');
@@ -94,9 +107,20 @@ test.describe('the scan step on a return visit (U7)', () => {
   });
 
   test('says there is nothing saved for a world that was never translated', async ({ page }) => {
-    await open(page, 'scenario=selected&backups=none');
+    await open(page, 'scenario=selected&backups=none&history=none');
     await expect(page.locator('main .summary-empty')).toContainText('저장된 스캔 결과나 번역 기록이 없습니다');
     await expect(page.locator('main .summary')).toHaveCount(0);
+  });
+
+  test('the core record of the last job and scan is summarised when there is one', async ({ page }) => {
+    await open(page, 'scenario=selected');
+    const summary = page.locator('main .summary');
+    await expect(summary).toContainText('스캔 결과');
+    await expect(summary).toContainText('번역 후보 6개');
+    await expect(summary).toContainText('마지막 번역');
+    await expect(summary).toContainText('일부만 번역됨');
+    await expect(summary).toContainText('변경한 파일 4개');
+    expect(await requests(page)).not.toContain('scan.start');
   });
 
   test('a saved job shows what is saved and makes "continue" the main action', async ({ page }) => {
@@ -112,13 +136,13 @@ test.describe('the scan step on a return visit (U7)', () => {
     expect(await requests(page)).not.toContain('scan.start');
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     await page.locator('main .btn-primary').click();
-    await expect(page.getByRole('heading', { level: 1, name: '번역 진행', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '번역 준비', exact: true })).toBeVisible();
   });
 
   test('after a run in this session the world step reports its status and changed files', async ({ page }) => {
     await open(page, 'scenario=result-partial');
     await runAndFinish(page);
-    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^월드 선택/ }).click();
+    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^월드 고르기/ }).click();
     const summary = page.locator('main .summary');
     await expect(summary).toContainText('일부만 번역됨');
     await expect(summary).toContainText('변경한 파일 4개');
@@ -186,7 +210,7 @@ test.describe('elapsed time and the remaining-time estimate (U11)', () => {
     await expect(page.getByRole('progressbar')).toBeVisible();
   }
   const elapsed = (page: Page) => page.evaluate(() => ({
-    side: document.querySelector('.sidebar .state [role="timer"]')?.textContent?.trim() ?? '',
+    side: document.querySelector('.sidebar .state .sub')?.textContent?.trim() ?? '',
     page: (document.querySelector('main [role="timer"]')?.textContent ?? '').replace(/^[^:：]*[:：]\s*/, '').trim()
   }));
 

@@ -4,6 +4,7 @@
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
   import { appVersion, isMac, openExternal } from '../lib/native';
   import { APP_VERSION } from '../lib/version';
+  import { PROVIDER_CARDS, keyPageFor } from '../lib/providers';
   import Icon, { type IconName } from '../components/Icon.svelte';
   import ListRow from '../components/ListRow.svelte';
   import PageHeader from '../components/PageHeader.svelte';
@@ -16,6 +17,10 @@
   ];
   const faq: { id: string; q: MessageKey; a: MessageKey }[] = [
     { id: 'cost', q: 'help.faq.cost.q', a: 'help.faq.cost.a' },
+    { id: 'cap', q: 'help.faq.cap.q', a: 'help.faq.cap.a' },
+    { id: 'edit-before', q: 'help.faq.editBefore.q', a: 'help.faq.editBefore.a' },
+    { id: 'edit-after', q: 'help.faq.editAfter.q', a: 'help.faq.editAfter.a' },
+    { id: 'glossary', q: 'help.faq.glossary.q', a: 'help.faq.glossary.a' },
     { id: 'restore', q: 'help.faq.restore.q', a: 'help.faq.restore.a' },
     { id: 'missing', q: 'help.faq.missing.q', a: 'help.faq.missing.a' },
     { id: 'keys', q: 'help.faq.keys.q', a: 'help.faq.keys.a' },
@@ -32,14 +37,9 @@
     { keys: [mod, '+ / − / 0'], label: 'help.shortcut.zoom' },
     { keys: ['Esc'], label: 'help.shortcut.close' }
   ];
-  const keyPages = [
-    { name: 'OpenRouter', url: 'https://openrouter.ai/settings/keys' },
-    { name: 'Google Gemini', url: 'https://aistudio.google.com/app/apikey' },
-    { name: 'OpenAI', url: 'https://platform.openai.com/api-keys' },
-    { name: 'Anthropic', url: 'https://console.anthropic.com/settings/keys' },
-    // CometAPI's own key guide and quickstart point to this console page (checked 2026-10-23).
-    { name: 'CometAPI', url: 'https://www.cometapi.com/console/token' }
-  ];
+  // The same table as the setup wizard and settings: one list of providers and where their keys come from.
+  const keyPages = PROVIDER_CARDS.filter((card) => card.id !== 'custom')
+    .map((card) => ({ name: card.label, url: keyPageFor(card.id) ?? '' }));
 
   let version = $state(APP_VERSION);
   onMount(() => { void appVersion(APP_VERSION).then((value) => (version = value)); });
@@ -78,10 +78,11 @@
 
 {#snippet tourAction()}
   <button type="button" class="btn btn-secondary btn-sm" onclick={() => (app.showTour = true)}><Icon name="play" size={12} /> {t('help.tourButton')}</button>
+  <button type="button" class="btn btn-secondary btn-sm" onclick={() => app.openWizard()}><Icon name="sliders" size={12} /> {t('help.wizardButton')}</button>
 {/snippet}
 
 <div class="page help">
-  <!-- The tour walks into settings, which needs a started core. -->
+  <!-- The tour and the setup assistant walk into settings, which needs a started core. -->
   <PageHeader title={t('help.title')} lead={t('help.lead')} actions={app.startupFailed ? undefined : tourAction} />
 
   <section aria-labelledby="start-title">

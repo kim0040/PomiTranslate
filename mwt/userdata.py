@@ -392,10 +392,14 @@ APP_PREF_DEFAULTS: dict = {
     "theme": "system",
     "notice_accepted": False,
     "tutorial_seen": False,
+    "setup_dismissed": False,
     "update_auto_check": True,
     "update_last_check": 0,
     "update_skipped_version": "",
+    # An OS notification when a long scan or translation ends while the window is in the background.
     "notify_on_finish": True,
+    # Text size in percent (100, 115 or 130), applied app-wide through a root CSS variable.
+    "font_scale": 100,
 }
 
 
@@ -404,10 +408,14 @@ def _valid_pref(key: str, value):
         if not isinstance(value, str) or value not in {"system", "light", "dark"}:
             raise ValueError("theme must be system, light or dark")
         return value
-    if key in {"notice_accepted", "tutorial_seen", "update_auto_check", "notify_on_finish"}:
+    if key in {"notice_accepted", "tutorial_seen", "setup_dismissed", "update_auto_check", "notify_on_finish"}:
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false")
         return value
+    if key == "font_scale":
+        if isinstance(value, bool) or value not in (100, 115, 130):
+            raise ValueError("font_scale must be 100, 115 or 130")
+        return int(value)
     if key == "update_last_check":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             raise ValueError("update_last_check must be a timestamp")
@@ -417,6 +425,68 @@ def _valid_pref(key: str, value):
             raise ValueError("update_skipped_version must be a short version string")
         return value
     raise ValueError(f"Unknown app preference: {key}")
+
+
+LAST_JOBS_KEY = "last_jobs"
+MAX_LAST_JOBS = 20
+LAST_JOB_STATUSES = {"completed", "partial", "needs_retry", "failed", "cancelled", "budget_stopped"}
+
+
+def _job_key(world: Path | str) -> str:
+    return str(Path(world).expanduser().resolve())
+
+
+def _count(value) -> int:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def remember_last_job(world: Path | str, report: dict, root: Path | None = None, *, now: float | None = None) -> dict | None:
+    """Keep a short summary of the last translation of a world, so the start screen can show it.
+
+    Only the time, the outcome and counts are kept: no text, no key, no report body. Older worlds fall
+    off after MAX_LAST_JOBS.
+    """
+    import time
+
+    status = str(report.get("status") or "")
+    if status not in LAST_JOB_STATUSES:
+        return None
+    translation = report.get("translation") if isinstance(report.get("translation"), dict) else {}
+    summary = {
+        "at": float(now if now is not None else time.time()),
+        "status": status,
+        "translated": _count(translation.get("translated")),
+        "failed": _count(translation.get("failed")),
+        "changedFiles": _count(report.get("changed_file_count")),
+        "candidateCount": _count(report.get("candidate_text_count")),
+    }
+    with _settings_lock(root):
+        current = load_user_settings(root)
+        jobs = current.get(LAST_JOBS_KEY)
+        jobs = dict(jobs) if isinstance(jobs, dict) else {}
+        jobs[_job_key(world)] = summary
+        newest = sorted(jobs.items(), key=lambda item: float((item[1] or {}).get("at") or 0), reverse=True)
+        current[LAST_JOBS_KEY] = dict(newest[:MAX_LAST_JOBS])
+        current["schema"] = SCHEMA
+        _write_user_settings(current, root)
+    return summary
+
+
+def load_last_job(world: Path | str, root: Path | None = None) -> dict | None:
+    """The summary written by remember_last_job for this world, with its folder name added."""
+    jobs = load_user_settings(root).get(LAST_JOBS_KEY)
+    saved = jobs.get(_job_key(world)) if isinstance(jobs, dict) else None
+    if not isinstance(saved, dict) or saved.get("status") not in LAST_JOB_STATUSES:
+        return None
+    return {
+        "world": Path(_job_key(world)).name,
+        "at": float(saved.get("at") or 0),
+        "status": saved["status"],
+        "translated": _count(saved.get("translated")),
+        "failed": _count(saved.get("failed")),
+        "changedFiles": _count(saved.get("changedFiles")),
+        "candidateCount": _count(saved.get("candidateCount")),
+    }
 
 
 def load_app_prefs(root: Path | None = None) -> dict:
@@ -447,9 +517,9 @@ def remember_app_prefs(updates: dict, root: Path | None = None) -> dict:
 
 
 # What a reset removes. Backups are never in this list: they are the only way back for a world.
-RESET_FILES = ("settings.json", "settings.backup.json", "settings.json.tmp", "settings.backup.json.tmp")
+RESET_FILES = ("settings.json", "settings.backup.json", "settings.json.tmp", "settings.backup.json.tmp", "world-glossaries.json", "world-glossaries.json.tmp")
 # Review drafts hold manual translations, which are world text, so a reset removes them too.
-RESET_DIRS = ("models", "scans", "jobs", "review-drafts")
+RESET_DIRS = ("models", "scans", "jobs", "review-drafts", "glossary")
 
 
 # IsReparseTagNameSurrogate: the reparse point names another place (symbolic links, junctions and

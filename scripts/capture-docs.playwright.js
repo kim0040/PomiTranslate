@@ -1,5 +1,5 @@
 // Run with playwright-cli run-code --filename scripts/capture-docs.playwright.js.
-// Start Vite on 127.0.0.1:5199 and create docs/images/locales/{ko,en,ja} first.
+// Start Vite on 127.0.0.1:5199 and create docs/images/locales/{ko,en,ja,zh} first.
 // The preview entry is synthetic: never read credentials or press Start translation.
 async (page) => {
   const settle = async () => {
@@ -13,6 +13,7 @@ async (page) => {
     ko: { review: '후보 검토', settings: '환경 설정', workflow: '번역 작업', run: '번역 진행', custom: '직접 설정', save: '저장', manual: '잃어버린 열쇠 상점' },
     en: { review: 'Review', settings: 'Settings', workflow: 'Translate', run: 'Translate', custom: 'Custom', save: 'Save', manual: 'The Lost Key Shop' },
     ja: { review: '候補の確認', settings: '設定', workflow: '翻訳作業', run: '翻訳実行', custom: '指定する', save: '保存', manual: '失われた鍵の店' },
+    zh: { review: '候选文本检查', settings: '设置', workflow: '翻译', run: '翻译', custom: '自定义', save: '保存', manual: '失落的钥匙商店' },
   };
   const externalRequests = [];
   const onRequest = (request) => {

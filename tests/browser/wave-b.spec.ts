@@ -13,14 +13,14 @@ async function open(page: Page, query: string) {
 
 async function scanAndReview(page: Page) {
   await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-  await page.getByRole('button', { name: /^후보 검토/ }).last().click();
+  await page.getByRole('button', { name: /^번역할 문장 고르기/ }).last().click();
   await expect(page.getByRole('grid')).toBeVisible();
   await expect(page.locator('tr[data-index="0"]')).toBeVisible();
 }
 
 // Opens the run step and starts (or continues) the translation, answering the first-send question if asked.
 async function startRun(page: Page) {
-  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   const consent = page.getByRole('dialog');
   if (await consent.count()) await consent.getByRole('button', { name: /전송|보내|번역 시작|계속/ }).last().click();
@@ -78,7 +78,7 @@ test.describe('review draft (FL-01)', () => {
   test('an older core without draft commands keeps working', async ({ page }) => {
     await open(page, 'scenario=no-draft-support');
     await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-    await page.getByRole('button', { name: /^후보 검토/ }).last().click();
+    await page.getByRole('button', { name: /^번역할 문장 고르기/ }).last().click();
     await page.locator('tr[data-index="0"] input[type="checkbox"]').uncheck();
     await expect(page.locator('tr[data-index="0"] input[type="checkbox"]')).not.toBeChecked();
     await expect(page.getByRole('alert')).toHaveCount(0);
@@ -89,7 +89,7 @@ test.describe('backups (FL-04)', () => {
   test('a backup is deleted only after a confirm and the list and size update', async ({ page }) => {
     await open(page, 'scenario=backups-many');
     await page.getByRole('navigation', { name: '주 메뉴' }).getByRole('button', { name: '백업 관리' }).click();
-    const before = await page.locator('.backup-row, [data-backup-row]').count();
+    const before = await page.locator('.backup-list > li').count();
     await page.getByRole('button', { name: /백업 삭제$/ }).last().click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
@@ -99,7 +99,7 @@ test.describe('backups (FL-04)', () => {
     await page.getByRole('button', { name: /백업 삭제$/ }).last().click();
     await page.getByRole('dialog').getByRole('button', { name: '삭제', exact: true }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__pomiDeleted?.length ?? 0)).toBe(1);
-    if (before) expect(await page.locator('.backup-row, [data-backup-row]').count()).toBe(before - 1);
+    if (before) expect(await page.locator('.backup-list > li').count()).toBe(before - 1);
   });
 
   test('keep latest N lists what would go and prunes only that', async ({ page }) => {
@@ -221,8 +221,9 @@ test.describe('results by failure code (U15/U16)', () => {
   test('a failed run explains the code in the catalog, not the core message', async ({ page }) => {
     await open(page, 'scenario=translate-fails&consent=ask');
     await startRun(page);
-    await expect(page.locator('main')).toContainText('API 키 인증에 실패했습니다');
-    await expect(page.locator('main')).not.toContainText('RAW provider text');
+    // Errors are one banner stack above the page (not inside <main>); the text is the catalog's, never the core's.
+    await expect(page.getByRole('alert').filter({ hasText: 'API 키 인증에 실패했습니다' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('RAW provider text');
   });
 });
 
@@ -231,8 +232,8 @@ test.describe('translation refused until interrupted work is settled', () => {
     await open(page, 'scenario=recovery-required');
     await startRun(page);
     await expect(page.getByRole('heading', { name: /중단된 번역 적용/ })).toBeVisible();
-    await expect(page.locator('main')).toContainText('끝나지 않은 작업이 있어 번역을 시작하지 않았습니다');
-    await expect(page.locator('main')).not.toContainText('raw core text');
+    await expect(page.getByRole('alert').filter({ hasText: '끝나지 않은 작업이 있어 번역을 시작하지 않았습니다' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText('raw core text');
   });
 });
 
@@ -249,7 +250,7 @@ test.describe('run screen', () => {
 
   test('a missing credential store is explained with a link to Settings', async ({ page }) => {
     await open(page, 'scenario=run&vault=corrupt');
-    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
     await expect(page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ })).toBeDisabled();
     await expect(page.locator('main')).toContainText('API 키 저장소를 열 수 없어');
     await expect(page.getByRole('button', { name: '환경 설정에서 설정하기' })).toBeVisible();
@@ -261,7 +262,7 @@ test.describe('notifications (FL-05)', () => {
     await page.addInitScript(() => { Document.prototype.hasFocus = () => false; });
     await open(page, 'scenario=selected&notify=granted');
     await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-    await expect(page.getByRole('button', { name: /^후보 검토/ }).last()).toBeVisible();
+    await expect(page.getByRole('button', { name: /^번역할 문장 고르기/ }).last()).toBeVisible();
     await expect.poll(() => page.evaluate(() => (window as any).__pomiNotifications?.length ?? 0)).toBe(1);
     const sent = await page.evaluate(() => (window as any).__pomiNotifications[0]);
     expect(JSON.stringify(sent)).not.toMatch(/Roguefire|Welcome|\/private\//);
@@ -311,7 +312,7 @@ test.describe('errors (ST-01, AY-03)', () => {
 
   test('the table keeps exactly one tabbable row and rows say their state', async ({ page }) => {
     await open(page, 'scenario=review');
-    await page.getByRole('button', { name: /^후보 검토/ }).click();
+    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
     await expect(page.locator('tr[data-index="0"]')).toBeVisible();
     expect(await page.locator('tbody tr[tabindex="0"]').count()).toBe(1);
     await expect(page.locator('tr[data-index="0"]')).toHaveAttribute('aria-label', /번역 대상|제외됨|직접 번역/);

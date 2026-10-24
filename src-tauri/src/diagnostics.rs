@@ -388,6 +388,7 @@ const CORE_MODULES: &[&str] = &[
     "mwt/desktop_prompt.py",
     "mwt/desktop_provider.py",
     "mwt/desktop_resource_packs.py",
+    "mwt/desktop_review.py",
     "mwt/desktop_settings.py",
     "mwt/desktop_usage.py",
     "mwt/discovery.py",
@@ -491,6 +492,7 @@ const BUILTIN_EXCEPTIONS: &[&str] = &[
 const CORE_EXCEPTIONS: &[&str] = &[
     "BackupAdminError",
     "BackupError",
+    "BudgetStopped",
     "ChunkTooLarge",
     "CommittedWriteError",
     "DiskFull",
@@ -507,6 +509,7 @@ const CORE_EXCEPTIONS: &[&str] = &[
     "PlanInvalidated",
     "ProviderError",
     "ProviderUnavailable",
+    "RequestRefused",
     "RequestStopped",
     "ResetIncomplete",
     "RegionError",

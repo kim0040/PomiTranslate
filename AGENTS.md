@@ -22,11 +22,17 @@
 
 ## 현재 재개 상태
 
+**2026-10-24 최신(병합):** 브랜치 `improve/commercial-readiness`(2026-10-02~10-23의 172 commit, 병합 전 상태는 `backup/commercial-readiness-pre-merge`)에 main의 2026-10-04 UX 개편과 아래 2026-10-11 리뷰 수정 WIP 3개를 `integrate/main-wip-2026-10-24`로 합쳤다. 충돌은 commercial-readiness 구조(onedir sidecar, Rust 소유 자격 증명, `exit_gate`, UPPER_SNAKE 오류 코드)를 기준으로 풀었고 UI 언어는 ko/en/ja/zh다. **병합됨, 병합된 소스에서 검증됨**(자동 검사 69/69·browser 419 PASS(1 skip)·Windows 설치본 native E2E PASS, 독립 리뷰의 High 2·Medium 8 수정)이며 아직 push하지 않았다. 아래 PASS 수치와 WIP 문단은 병합 전 각 갈래의 기록이다. 병합된 소스에서 실행한 검사 결과만 PASS로 쓰고, 작업 시작 전 [병합 기록](docs/history/merge-main-wip-2026-10-24.md)과 [추후 작업](docs/follow-up-work.md)의 0번을 읽는다. WIP 브랜치와 `origin` 백업은 병합이 main에 올라가기 전까지 지우거나 rebase·force-push하지 않는다.
+
+**2026-10-11 최신:** 리뷰 수정 WIP가 브랜치 `wip/2026-10-11-{core-safety,native-security,ui-ux}`에 있다(로컬과 `origin` 모두). main에는 통합하지 않았다. 검증과 리뷰가 끝나지 않아 그대로 merge하거나 PR을 열 수 없다. 작업 시작 전 [리뷰 수정 인계](docs/history/review-fixes-pause-2026-10-11.md)를 읽고 그 통합 순서를 먼저 따른다. 통합 내용이 main에 들어가기 전까지는 WIP 브랜치를 지우거나, rebase하거나, force-push하지 않는다.
+
 2026-10-02 main 통합: Phase2 개발 환경 gate 완료 / Phase3 진행 중(COMP-01 완료) / release-ready 아님. 원격 `claude/review-and-plan-2026-10-01`의 7개 commit을 `c26fcd7`→`e97261c`로 fast-forward했다. SNBT·Gemini·native UX·도움말/Tour·license 뷰어·업데이트 연결·초기화·설정 내구성·화면 모드가 구현됐다. [통합·잔여 대조](docs/history/main-integration-2026-10-02.md), [후속 구현](docs/history/native-ux-and-compat-2026-10-01.md), [업데이트·데이터](docs/updates-and-data.md)를 읽는다.
 
 Linux Python23/Rust30/frontend62/browser114 PASS는 브랜치의 기존 기록이며 이번 통합에서 새로 실행한 결과가 아니다. 후속 변경의 macOS native, clean-machine/각 OS keychain·permission, 게임 버전 표본/로드, signed updater/release·SBOM/최종 license gate는 남아 있다. 빈 updater 공개키·latest.json 게시와 공개 릴리스는 RELEASE-01 승인 경계다. 다음 순서는 [추후 작업](docs/follow-up-work.md)의 UX-NATIVE-01 → PROVIDER-01 → COMP-02/03/04 → QUALITY-01이다.
 
 Phase2 이력은 `docs/history/phase2-completion-2026-10-01.md`와 `docs/history/sample-startup-validation-2026-10-01.md`를 따른다. Python20/frontend58/Rust28·native .mcc hash 복원·OpenRouter 최소 E2E는 당시 범위이며 후속 source의 native 증거로 복사하지 않는다. Desktop 항상 백업·앱 관리 backup/checkpoint, Legacy 유지, schema2 호환/schema3 부재 marker 복원을 유지한다.
+
+2026-10-04 상용 수준 UX 개편을 main에 통합했다: 적용 전 번역 검토·수정 재적용·실패만 재시도·비용 한도·용어집·설정 도우미·설정 탭·닫기 보호·OS 완료 알림·창 복원·중국어 간체 UI. browser fixture·Python·Rust·browser260 PASS이며 native 창·알림·실제 제공사·서명은 확인하지 않았다. UI 언어는 이제 ko/en/ja/zh다. [기록](docs/history/ux-overhaul-2026-10-04.md)
 
 ## 문서 정리 후 진입점
 
@@ -38,4 +44,4 @@ Phase2 이력은 `docs/history/phase2-completion-2026-10-01.md`와 `docs/history
 
 원격 URL은 2026-10-01 기존/새 주소의 동일 main SHA를 확인한 `https://github.com/kim0040/PomiTranslate.git`다. 원격 rename을 새로 실행한 것이 아니다. 로컬 checkout 폴더와 내부 mwt 이름은 유지한다.
 
-2026-10-02 현지화: README/사용 안내/개인정보/면책은 ko/en/ja/zh 문서를 제공한다. UI 언어는 여전히 ko/en/ja이며 zh는 영어 UI 화면을 사용하는 문서 언어다. [현지화 관리](docs/localization.md)의 catalog·SVG/PNG 생성·언어별 screenshot/manifest를 함께 갱신한다. 제품명·공식 부제·license 원문은 공통으로 보존한다. [작업 기록](docs/history/localization-2026-10-02.md)
+2026-10-02 현지화: README/사용 안내/개인정보/면책은 ko/en/ja/zh 문서를 제공한다. (2026-10-04부터 zh UI도 제공한다.) [현지화 관리](docs/localization.md)의 catalog·SVG/PNG 생성·언어별 screenshot/manifest를 함께 갱신한다. 제품명·공식 부제·license 원문은 공통으로 보존한다. [작업 기록](docs/history/localization-2026-10-02.md)

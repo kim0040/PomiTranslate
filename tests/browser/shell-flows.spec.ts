@@ -14,7 +14,7 @@ const emit = (page: Page, name: string, payload: unknown) => page.evaluate(([n, 
 const shell = (page: Page): Promise<string[]> => page.evaluate(() => (window as any).__pomiShell ?? []);
 const calls = (page: Page): Promise<{ command: string; args: { intent: number } }[]> => page.evaluate(() => (window as any).__pomiCalls ?? []);
 const requests = (page: Page, type: string): Promise<number> => page.evaluate((t) => (window as any).__pomiRequests.filter((r: { type: string }) => r.type === t).length, type);
-const toRun = (page: Page) => page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+const toRun = (page: Page) => page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
 const openSettings = (page: Page) => page.getByRole('button', { name: '환경 설정', exact: true }).click();
 // Updates, data and reset live in the "App" part, which applies at once and has nothing unsaved.
 const openAppSettings = async (page: Page) => {
@@ -138,14 +138,16 @@ test.describe('the update question (3, 4, 8)', () => {
       await page.getByRole('button', { name: '지금 확인' }).click();
       await page.getByRole('button', { name: '설치하고 다시 시작' }).click();
       await expect(page.locator('#updates .status')).toContainText(text);
-      await expect(page.getByRole('heading', { name: '업데이트', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1, name: '환경 설정' })).toBeVisible();
+      await expect(page.getByRole('tab', { name: '앱', exact: true })).toHaveAttribute('aria-selected', 'true');
+      await expect(page.locator('#updates')).toBeVisible();
     });
   }
 });
 
 test.describe('a Custom key saved by an older version (5)', () => {
   test('explains it, leads to the key field, and typing the key again lets the translation go on', async ({ page }) => {
-    await boot(page, 'scenario=run&provider=custom&key=unbound');
+    await boot(page, 'scenario=run&provider=custom&key=unbound&review=0');
     await toRun(page);
     await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
     const banner = page.getByRole('alert').filter({ hasText: '서버 주소와 연결되어 있지 않아' });
@@ -224,7 +226,9 @@ test.describe('the live feed (6)', () => {
 test('a key that cannot be deleted from the system keychain says to try again or remove the entry by hand', async ({ page }) => {
   await boot(page, 'scenario=selected&delete=unconfirmed');
   await openSettings(page);
-  await page.locator('#key-management > summary').click();
+  // Key management sits in the closed "고급 번역 옵션" section of the 번역 tab.
+  await page.locator('#translate-advanced > .head > .toggle').click();
+  await page.locator('#key-management > .head > .toggle').click();
   await page.getByRole('button', { name: '저장된 키 삭제', exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: '저장된 키 삭제', exact: true }).click();
   const alert = page.getByRole('alert').filter({ hasText: '키체인의 항목을 삭제하지 못했습니다' });

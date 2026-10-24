@@ -77,7 +77,7 @@ test.describe('unsaved settings', () => {
   async function dirty(page: Page) {
     await boot(page);
     await openSettings(page);
-    await page.locator('#target-language').fill('English');
+    await page.locator('#target-language').selectOption('English');
     // The shell is told, so it can hold the window close.
     await expect.poll(() => page.evaluate(() => (window as any).__pomiDirty)).toBe(true);
   }
@@ -113,7 +113,7 @@ test.describe('unsaved settings', () => {
   test('settings that cannot be saved keep the app open', async ({ page }) => {
     await dirty(page);
     // An out-of-range batch size blocks saving.
-    await page.locator('#batch-size').evaluate((input) => { (input.closest('details') as HTMLDetailsElement).open = true; });
+    await page.getByRole('tab', { name: '고급', exact: true }).click();
     await page.locator('#batch-size').fill('999');
     await emit(page, 'pomi-exit-confirm', { job: false, dirty: true, reason: 'quit', intent: 3 });
     await page.getByRole('button', { name: '저장하고 종료', exact: true }).click();

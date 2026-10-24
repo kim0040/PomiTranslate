@@ -5,7 +5,7 @@ import AxeBuilder from '@axe-core/playwright';
 async function review(page: Page) {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
   await page.goto('/?scenario=review');
-  await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await expect(page.locator('tr[data-index="0"]')).toBeVisible();
 }
 
@@ -26,8 +26,8 @@ for (const viewport of [
     if (await page.getByRole('dialog').count()) await expect(page.getByRole('dialog')).toHaveCSS('opacity', '1');
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (await page.getByRole('dialog').count()) await page.keyboard.press('Escape');
-    await page.getByRole('button', { name: '번역 진행 단계로 이동' }).click();
-    await expect(page.getByRole('heading', { level: 1, name: '번역 진행', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '번역 준비 단계로 이동' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: '번역 준비', exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `output/playwright/run-${viewport.width}x${viewport.height}.png`, fullPage: true });
   });
@@ -53,7 +53,7 @@ for (const locale of ['en', 'ja']) {
   test(`${locale} review and settings fit a short narrow window in dark mode`, async ({ page }) => {
     await review(page);
     await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-    await page.getByRole('tab', { name: '앱', exact: true }).click();
+    await page.getByRole('tab', { name: '앱' }).click();
     await page.locator('#application-settings').getByRole('radio', { name: '다크' }).check();
     // The display language applies at once, like the appearance: no Save step.
     await page.locator('#ui-language').selectOption(locale);

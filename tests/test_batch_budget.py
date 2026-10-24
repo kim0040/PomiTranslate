@@ -57,7 +57,7 @@ def test_format_errors_stay_inside_the_budget() -> None:
     assert set(batch.failed) == set(texts)
     assert set(batch.failed_codes.values()) == {"format_mismatch"}
     # Before the cap this fanned out to hundreds of requests for one batch.
-    assert fake.requests <= 2 * len(texts) + 3, fake.requests
+    assert fake.requests <= len(texts) + 3, fake.requests
     assert fake.requests > 3, "splitting still happens while budget remains"
 
 

@@ -201,6 +201,8 @@ class BackupSet:
                     backup_id = str(json.loads(pointer.read_text(encoding="utf-8"))["backupSetId"])
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     raise BackupError("The latest-backup pointer is damaged") from exc
+            if backup_id.endswith("-recovery"):
+                backup_id = default_restore_backup_id(self.world_dir, [self.store])
         if not re.fullmatch(r"[A-Za-z0-9_-]+", backup_id):
             raise BackupError("Invalid backup set ID")
         self.backup_id = backup_id
@@ -246,6 +248,8 @@ class BackupSet:
     def publish_latest(self, *, verify: bool = True) -> None:
         """Point ``latest.json`` at this set. ``verify=False`` skips the full re-hash when the
         caller verifies once at a better moment (every entry is already checked when added)."""
+        if self.backup_id.endswith("-recovery"):
+            return  # Recovery sets are restored explicitly, never as the default.
         self.commit()
         if verify:
             self.verify()
@@ -287,6 +291,32 @@ class BackupSet:
             raise BackupError(f"Backup hash mismatch for {relative}")
         self._append({"path": relative, "sha256": original, "size": str(destination.stat().st_size), **target})
         if commit:
+            self.commit()
+
+    def add_many(self, paths: list[Path]) -> None:
+        for path in paths:
+            self.add(path, commit=False)
+        self.commit()
+
+    def record_new_external_chunks(self, paths: list[Path]) -> None:
+        # Validate one combined manifest and publish it once.
+        fresh = []
+        seen = set(self._index)
+        empty = hashlib.sha256(b"").hexdigest()
+        for path in paths:
+            absolute = Path(os.path.abspath(path))
+            if not absolute.resolve().is_relative_to(self.world_dir):
+                raise BackupError("Absent targets must be inside the selected world")
+            relative = absolute.relative_to(self.world_dir).as_posix()
+            if relative not in seen:
+                if absolute.exists():
+                    raise BackupError("A target recorded as absent already exists")
+                seen.add(relative)
+                fresh.append({"path": relative, "sha256": empty, "size": "0", "restoreAction": "remove_created"})
+        if fresh:
+            checked = self._validated_manifest_entries({"files": [*self.entries, *fresh]})
+            for entry in checked[len(self.entries):]:
+                self._append(entry)
             self.commit()
 
     def entry_for(self, path: Path) -> dict[str, str] | None:
@@ -362,7 +392,7 @@ class BackupSet:
             self._written.add(resolved.relative_to(self.world_dir).as_posix() if resolved.is_relative_to(self.world_dir) else self._external_archive_path(resolved))
 
     def restore(self, recovery_store: Path | None = None, *, hold_guards: bool = True, lock_dir: Path | None = None,
-                stores: list[Path] | None = None) -> str:
+                stores: list[Path] | None = None, before_restore=None) -> str:
         """Put the backed-up files back. The files they replace are kept as a recovery set first.
 
         The world write lock, the game's session locks and the lock of every external pack are
@@ -377,14 +407,14 @@ class BackupSet:
         it is refused with ``RECOVERY_REQUIRED``.
         """
         if not hold_guards:
-            return self._restore(recovery_store, stores)
+            return self._restore(recovery_store, stores, before_restore)
         from mwt.locking import hold_world
 
         with hold_world(self.world_dir, "restore", external_targets=[Path(path) for path in self.external_files],
                         lock_dir=lock_dir):
-            return self._restore(recovery_store, stores)
+            return self._restore(recovery_store, stores, before_restore)
 
-    def _restore(self, recovery_store: Path | None, stores: list[Path] | None = None) -> str:
+    def _restore(self, recovery_store: Path | None, stores: list[Path] | None = None, before_restore=None) -> str:
         from mwt import journal as journal_module
 
         known, own = journal_module.default_stores(self.world_dir, recovery_store or self.store)
@@ -423,6 +453,17 @@ class BackupSet:
             return ""
         recovery = BackupSet.new(self.world_dir, kind="recovery", store=recovery_store or self.store,
                                  external_files=[Path(path) for path in self.external_files])
+        if before_restore is not None:
+            # The reapply recovery is durable before any restore byte can change.
+            for entry in entries:
+                target = self._target(entry)
+                if target.is_file():
+                    recovery.add(target, commit=False)
+                elif not target.exists():
+                    recovery.record_absent(target, commit=False)
+            recovery.commit()
+            recovery.verify()
+            before_restore(self, recovery.backup_id)
         record = journal_module.Journal.create(
             recovery.root / journal_module.JOURNAL_NAME, job_id=recovery.backup_id, kind="restore",
             world_dir=self.world_dir, stores=known)
@@ -591,7 +632,7 @@ class BackupSet:
                 path = PurePosixPath(entry["path"])
                 _, x, z, _ = path.name.split(".")
                 region = str(path.with_name(f"r.{int(x) // 32}.{int(z) // 32}.mca"))
-                if not any(item["path"] == region for item in entries):
+                if region not in seen:
                     raise BackupError("New external chunk has no backed-up region")
         return entries
 
@@ -642,3 +683,10 @@ def list_backup_sets(world_dir: Path, stores: list[Path] | None = None) -> list[
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
     return sorted(result, key=lambda item: item["createdAt"], reverse=True)
+
+
+def default_restore_backup_id(world_dir: Path, stores: list[Path]) -> str:
+    for record in list_backup_sets(world_dir, stores):
+        if record["verified"] and record["kind"] != "recovery":
+            return record["backupSetId"]
+    raise BackupError("There is no verified translation backup to restore")

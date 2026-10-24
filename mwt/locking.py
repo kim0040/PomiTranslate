@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -358,6 +359,14 @@ class MinecraftSessionLocks:
                     except OSError as exc:
                         handle.close()
                         raise MinecraftWorldInUse(f"Minecraft or a server is using {root.name}") from exc
+                    if sys.platform.startswith("linux"):
+                        import fcntl
+                        try:
+                            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except OSError as exc:
+                            _unlock(handle.fileno())
+                            handle.close()
+                            raise MinecraftWorldInUse(f"Minecraft or a server is using {root.name}") from exc
                     keys = _identity_keys(session_path)
                     for key in keys:
                         _HELD[key] = self
@@ -368,6 +377,12 @@ class MinecraftSessionLocks:
 
     def release(self) -> None:
         for handle, keys in reversed(self._handles):
+            if sys.platform.startswith("linux"):
+                import fcntl
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
             try:
                 _unlock(handle.fileno())
             except OSError:

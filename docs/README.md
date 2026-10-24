@@ -13,12 +13,12 @@
 | 데이터·키 | [Privacy](privacy.en.md) | [개인정보](privacy.md) | [データ・キー](privacy.ja.md) | [数据与密钥](privacy.zh.md) |
 | 면책·권리 | [Disclaimer](disclaimer.en.md) | [면책](disclaimer.md) | [免責・権利](disclaimer.ja.md) | [免责声明](disclaimer.zh.md) |
 
-제품 UI는 **ko/en/ja**이며 중국어 간체는 문서·안내 이미지로 제공합니다. 번역 도착 언어는 별도 입력값입니다. 개발·상태·지원 표·법적 검토 문서는 한국어로 유지합니다. [언어·문구·에셋 관리](localization.md)
+제품 UI는 **ko/en/ja/zh**(중국어 간체)입니다. 번역 도착 언어는 별도 입력값입니다. 개발·상태·지원 표·법적 검토 문서는 한국어로 유지합니다. [언어·문구·에셋 관리](localization.md)
 
 ## 사용자
 
 - [서비스 소개와 화면](README.ko.md)
-- [사용 안내](user-guide.md): 스캔 → 검토 → 실행 → 복원, 설정과 CLI
+- [사용 안내](user-guide.md): 설정 도우미·설정 → 스캔 → 검토·용어집 → 실행·번역 검토·적용 → 복원, CLI
 - [데이터·개인정보·키 저장](privacy.md)
 - [면책·권리 안내](disclaimer.md)
 - [지원 범위](support-matrix.md)

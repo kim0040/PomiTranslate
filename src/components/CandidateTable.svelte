@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
-  import { describeDetail, describeLocation, formatNumber } from '../lib/format';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { describeDetail, describeLocation, rawLocation } from '../lib/format';
   import { visibleWindow } from '../lib/virtual';
   import Icon from './Icon.svelte';
 
   // `open` is true when the user asked to see the row (click, Enter), not when the selection just moved.
   let { selectedId, onSelect }: { selectedId: string; onSelect: (candidate: Candidate, open: boolean) => void } = $props();
 
-  // One line per row: the work is scanning many of them, so the rows are short.
-  const ROW = 44;
+  // One line per row: the work is scanning many of them, so the rows are short. The height follows
+  // the user's text size, so larger text is never clipped.
+  const ROW = $derived(Math.round(44 * app.fontScale / 100));
   const source = app.candidates;
   let viewport: HTMLDivElement | undefined = $state();
   let scrollTop = $state(0);
@@ -24,6 +25,9 @@
   const showWhere = $derived(width >= 860);
   const cols = $derived(2 + (showKind ? 1 : 0) + (showState ? 1 : 0) + (showWhere ? 1 : 0));
   let active = $state(0);
+  let menu = $state<{ candidate: Candidate; index: number; x: number; y: number } | null>(null);
+  let menuActive = $state(0);
+  let menuElement: HTMLDivElement | undefined = $state();
 
   const win = $derived(visibleWindow({ scrollTop, viewportHeight: height, rowHeight: ROW, total: source.total }));
   const indexes = $derived(Array.from({ length: Math.max(0, win.end - win.start) }, (_, i) => win.start + i));
@@ -48,12 +52,12 @@
   });
 
   function kindLabel(kind: string): string {
-    return t(`kind.${kind}` as MessageKey);
+    return labelFor('kind', kind);
   }
 
   function placeText(candidate: Candidate): string {
     const first = candidate.locations?.[0];
-    const where = first ? describeLocation(first, app.locale) : candidate.location ?? '';
+    const where = first ? describeLocation(first, app.locale, candidate.kind) : candidate.location ?? '';
     return where;
   }
 
@@ -90,7 +94,110 @@
     document.getElementById('manual-translation')?.focus();
   }
 
+  function openRowMenu(event: MouseEvent | KeyboardEvent, index: number, candidate: Candidate): void {
+    event.preventDefault();
+    const rect = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : null;
+    const x = event instanceof MouseEvent ? event.clientX : rect?.left ?? 12;
+    const y = event instanceof MouseEvent ? event.clientY : rect?.top ?? 12;
+    active = index;
+    onSelect(candidate, false);
+    menuActive = 0;
+    menu = { candidate, index, x: Math.max(8, Math.min(x, window.innerWidth - 248)), y: Math.max(8, Math.min(y, window.innerHeight - 176)) };
+    void tick().then(() => menuElement?.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
+  }
+
+  function toggleFromMenu(): void {
+    if (!menu) return;
+    app.setIncluded(menu.candidate.id, app.excluded.has(menu.candidate.id));
+    closeMenu();
+  }
+
+  function closeMenu(restoreFocus = true): void {
+    const index = menu?.index;
+    menu = null;
+    if (restoreFocus && index !== undefined) void tick().then(() => viewport?.querySelector<HTMLElement>(`[data-index="${index}"]`)?.focus());
+  }
+
+  function editFromMenu(): void {
+    if (!menu) return;
+    const candidate = menu.candidate;
+    const wasExcluded = app.excluded.has(candidate.id);
+    closeMenu();
+    if (wasExcluded) app.setIncluded(candidate.id, true);
+    void openEditor(candidate);
+  }
+
+  async function copySourceFromMenu(): Promise<void> {
+    if (!menu) return;
+    const sourceText = menu.candidate.source;
+    closeMenu();
+    try {
+      await navigator.clipboard.writeText(sourceText);
+      app.notify(t('review.context.copied'), 'success');
+    } catch {
+      app.notify(t('review.context.copyFailed'), 'error');
+    }
+  }
+
+  function handleDocumentPointer(event: PointerEvent): void {
+    const target = event.target;
+    if (menu && (!(target instanceof HTMLElement) || !target.closest('.candidate-menu'))) closeMenu(false);
+  }
+
+  function handleDocumentKey(event: KeyboardEvent): void {
+    if (!menu || event.key !== 'Escape') return;
+    event.preventDefault();
+    closeMenu();
+  }
+
+  async function focusMenuItem(index: number): Promise<void> {
+    const items = menuElement?.querySelectorAll<HTMLElement>('[role="menuitem"]');
+    if (!items?.length) return;
+    menuActive = Math.max(0, Math.min(items.length - 1, index));
+    await tick();
+    menuElement?.querySelectorAll<HTMLElement>('[role="menuitem"]')[menuActive]?.focus();
+  }
+
+  function handleMenuKey(event: KeyboardEvent): void {
+    if (!menu) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? 2
+        : menuActive + (event.key === 'ArrowDown' ? 1 : -1);
+      void focusMenuItem(next);
+    } else if (event.key === 'Tab') {
+      event.preventDefault();
+      closeMenu();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      menuElement?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')[menuActive]?.click();
+    }
+  }
+
+  function handleMenuFocusout(event: FocusEvent): void {
+    if (!menu) return;
+    const next = event.relatedTarget;
+    if (next instanceof Node && menuElement?.contains(next)) return;
+    const row = menu.index;
+    const nextRow = next instanceof HTMLElement && next.matches(`[data-index="${row}"]`);
+    closeMenu(!nextRow);
+  }
+
+  onMount(() => {
+    document.addEventListener('pointerdown', handleDocumentPointer);
+    document.addEventListener('keydown', handleDocumentKey);
+    return () => {
+      document.removeEventListener('pointerdown', handleDocumentPointer);
+      document.removeEventListener('keydown', handleDocumentKey);
+    };
+  });
+
   function handleKey(event: KeyboardEvent, index: number, candidate: Candidate | undefined): void {
+    if (candidate && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
+      openRowMenu(event, index, candidate);
+      return;
+    }
     const page = Math.max(1, Math.floor(height / ROW) - 1);
     const map: Record<string, () => void> = {
       ArrowDown: () => void move(index + 1),
@@ -157,6 +264,7 @@
             tabindex={index === tabbable ? 0 : -1}
             style:height="{ROW}px"
             onclick={() => { active = index; onSelect(candidate, true); }}
+            oncontextmenu={(event) => openRowMenu(event, index, candidate)}
             onkeydown={(event) => handleKey(event, index, candidate)}
           >
             <td class="c-include">
@@ -179,7 +287,7 @@
               <td class="c-kind"><span class="kind" title={detailText(candidate) ? `${kindLabel(candidate.kind)} · ${detailText(candidate)}` : kindLabel(candidate.kind)}>{kindLabel(candidate.kind)}</span></td>
             {/if}
             {#if showWhere}
-              <td class="c-where"><span class="where" title={placeText(candidate)}>{placeText(candidate)}</span></td>
+              <td class="c-where"><span class="where" title={candidate.locations?.[0] ? rawLocation(candidate.locations[0]) : candidate.location}>{placeText(candidate)}</span></td>
             {/if}
             {#if showState}
               <!-- Only a state worth noticing gets a word. "Included" is what almost every row is. -->
@@ -217,6 +325,15 @@
   {/if}
 </div>
 
+{#if menu}
+  <div bind:this={menuElement} class="candidate-menu" role="menu" aria-label={t('review.context.label')} tabindex="-1" style:left="{menu.x}px" style:top="{menu.y}px"
+    oncontextmenu={(event) => event.preventDefault()} onkeydown={handleMenuKey} onfocusout={handleMenuFocusout}>
+    <button type="button" role="menuitem" tabindex={menuActive === 0 ? 0 : -1} onclick={toggleFromMenu}>{app.excluded.has(menu.candidate.id) ? t('review.context.include') : t('review.context.exclude')}</button>
+    <button type="button" role="menuitem" tabindex={menuActive === 1 ? 0 : -1} onclick={editFromMenu}>{t('review.context.manual')}</button>
+    <button type="button" role="menuitem" tabindex={menuActive === 2 ? 0 : -1} onclick={copySourceFromMenu}>{t('review.context.copy')}</button>
+  </div>
+{/if}
+
 <style>
   .viewport { position: relative; overflow: auto; height: 100%; min-height: 240px; border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--bg-surface); box-shadow: var(--shadow-card); overscroll-behavior: contain; }
   table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: var(--text-md); }
@@ -244,4 +361,7 @@
   @keyframes shimmer { to { background-position: -200% 0; } }
   .empty { position: absolute; inset: 32px 0 0; display: grid; place-content: center; text-align: center; gap: var(--space-1); padding: var(--space-5); }
   .strong { font-weight: 600; }
+  .candidate-menu { position: fixed; z-index: 80; width: 232px; display: grid; padding: 4px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-surface); box-shadow: var(--shadow-pop); }
+  .candidate-menu button { min-height: 36px; padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text); text-align: start; font: inherit; font-size: var(--text-sm); }
+  .candidate-menu button:hover, .candidate-menu button:focus-visible { background: var(--bg-hover); outline: none; }
 </style>

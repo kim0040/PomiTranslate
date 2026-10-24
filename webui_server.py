@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from llm_backends import PROVIDER_SPECS, default_base_url
+from llm_backends import PROVIDER_SPECS, _same_endpoint, default_base_url
 from mc_world_translator import (
     DEFAULT_CONFIG,
     STYLE_PRESETS,
@@ -215,7 +215,38 @@ def build_payload_config(payload: dict[str, Any]) -> dict[str, Any]:
     if config["runtime"]["resume_from_checkpoint"]:
         config["runtime"]["checkpoint_enabled"] = True
 
-    return normalize_config(merge_nested(DEFAULT_CONFIG, config), CONFIG_BASE_PATH)
+    supplied_key = config["api"]["api_key"]
+    normalized = normalize_config(merge_nested(DEFAULT_CONFIG, config), CONFIG_BASE_PATH)
+    # A key the request did not supply (environment, OS keyring or translate.py defaults) is only
+    # ever sent to the provider's own default endpoint, never to an endpoint the request chose.
+    provider = normalized["api"]["provider"]
+    if not supplied_key and not _same_endpoint(normalized["api"]["base_url"], default_base_url(provider)):
+        normalized["api"]["api_key"] = ""
+    _check_output_paths(normalized)
+    return normalized
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _check_output_paths(config: dict[str, Any]) -> None:
+    """Reports and checkpoints are written only inside the world folder or the app data folder."""
+    from mwt.userdata import user_data_dir
+
+    roots = [user_data_dir()]
+    if config.get("world_dir"):
+        roots.append(Path(config["world_dir"]))
+    for label, value in (
+        ("report_path", config.get("report_path")),
+        ("checkpoint_path", config["runtime"].get("checkpoint_path")),
+    ):
+        if value and not any(_inside(Path(value), root) for root in roots):
+            raise ValueError(f"`{label}` must be inside the world folder or the PomiTranslate data folder.")
 
 
 def summarize_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -832,8 +863,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         if is_page:
+            self.send_header("X-Frame-Options", "DENY")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
             self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         if send_body:

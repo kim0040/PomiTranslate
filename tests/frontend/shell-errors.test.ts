@@ -104,7 +104,7 @@ describe('the exit and reset flows', () => {
   it('quits through the shell with the intent of the question after the person confirms', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = { ...ask };
+    app.exitGate.prompt = { ...ask };
     await app.exitQuit();
     expect(invokeMock).toHaveBeenCalledWith('exit_confirm', { intent: 4 });
     app.exitStay();
@@ -115,7 +115,7 @@ describe('the exit and reset flows', () => {
   it('saves the settings draft first and stays open when the save fails', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = { job: false, dirty: true, reason: 'quit', intent: 9, phase: 'ask' };
+    app.exitGate.prompt = { job: false, dirty: true, reason: 'quit', intent: 9, phase: 'ask' };
     app.saveDraft = async () => false;
     await app.exitSaveAndQuit();
     expect(invokeMock).not.toHaveBeenCalledWith('exit_confirm', expect.anything());
@@ -126,7 +126,7 @@ describe('the exit and reset flows', () => {
 
   it('stays quiet about refused refreshes while a confirmed quit waits for the job', () => {
     const app = new AppState();
-    app.exitPrompt = { ...ask, phase: 'waiting' };
+    app.exitGate.prompt = { ...ask, phase: 'waiting' };
     app.registerDialog();
     const quitting = new BackendError('PomiTranslate is quitting', 'APP_QUITTING', '', 'shell');
     app.fail(quitting);
@@ -135,7 +135,7 @@ describe('the exit and reset flows', () => {
     expect(app.banner).toBeNull();
     expect(app.toasts).toHaveLength(0);
     // Outside that phase the same error is reported as usual.
-    app.exitPrompt = null;
+    app.exitGate.prompt = null;
     app.fail(quitting);
     expect(app.dialogError).toBe(app.describe(quitting));
     expect(app.dialogError).not.toBe('');

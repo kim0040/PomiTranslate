@@ -73,6 +73,15 @@ const PYTHON_TESTS = [
   ['Real process kills at every write, durable replace and recovery boundary', 'tests/test_journal_kill.py'],
   ['The core cancels and exits when the shell closes its stdin', 'tests/test_eof_shutdown.py'],
   ['Review drafts and backup administration through the desktop dispatch', 'tests/test_desktop_dispatch.py'],
+  ['Text components', 'tests/test_text_components.py'],
+  ['Locking', 'tests/test_locking.py'],
+  ['Backup restore safety', 'tests/test_backup_restore_safety.py'],
+  ['Sidecar process', 'tests/test_sidecar_process.py'],
+  ['Provider key fallback', 'tests/test_provider_key_fallback.py'],
+  ['Review apply', 'tests/test_review_apply.py'],
+  ['Model suitability', 'tests/test_model_suitability.py'],
+  ['Merge core safety regressions (R8/R10)', 'tests/test_core_safety_merge.py'],
+  ['Merge review fixes (glossary scale, resume, spending cap, restore)', 'tests/test_merge_review_fixes.py'],
 ];
 
 const GROUPS = ['python', 'frontend', 'rust'];

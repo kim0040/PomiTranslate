@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { app } from '../lib/app.svelte';
   import type { Candidate } from '../lib/api';
   import type { SortMode, StateFilter } from '../lib/candidates.svelte';
-  import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { labelFor, t, type MessageKey } from '../lib/i18n/index.svelte';
   import { formatNumber } from '../lib/format';
   import CandidateTable from '../components/CandidateTable.svelte';
   import CandidateDetail from '../components/CandidateDetail.svelte';
@@ -147,6 +147,18 @@
       busyBulk = false;
     }
   }
+
+  // Ctrl/Cmd+Z takes back the last include/exclude choice, except while typing in a field.
+  onMount(() => {
+    const undo = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z' || event.shiftKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('textarea, [contenteditable="true"], input:not([type="checkbox"]):not([type="radio"])')) return;
+      if (app.undoIncluded()) event.preventDefault();
+    };
+    window.addEventListener('keydown', undo);
+    return () => window.removeEventListener('keydown', undo);
+  });
 </script>
 
 <div class="review">
@@ -178,7 +190,7 @@
           <button type="button" class="chip" aria-pressed={!source.kind} onclick={() => setKind('')}>{t('review.allKinds')}</button>
           {#each kindEntries as [kind, count] (kind)}
             <button type="button" class="chip" aria-pressed={source.kind === kind} onclick={() => setKind(kind)}>
-              {t(`kind.${kind}` as MessageKey)} <span class="num n">{formatNumber(count, app.locale)}</span>
+              {labelFor('kind', kind)} <span class="num n">{formatNumber(count, app.locale)}</span>
             </button>
           {/each}
         </div>
@@ -253,10 +265,11 @@
   .chip[aria-pressed='true'] .n { color: inherit; }
   @media (hover: hover) { .chip[aria-pressed='false']:hover { background: var(--bg-hover); } }
   .reset { justify-self: start; }
-  .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; }
+  /* The reduced-motion reset leaves a 0.01ms transition on every property, which holds the old column widths for one frame; a resized panel must be exact at once. */
+  .workarea { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-3); min-height: 0; transition: none; }
   .workarea.wide { grid-template-columns: minmax(0, 1fr) 360px; }
   .workarea.wide.compact { grid-template-columns: minmax(0, 1fr) 300px; }
-  .tablewrap, .detailwrap { min-height: 0; height: 100%; }
+  .tablewrap, .detailwrap { min-width: 0; min-height: 0; height: 100%; }
   .foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; padding-top: var(--space-3); border-top: 1px solid var(--border); }
   .meta { display: flex; align-items: center; gap: var(--space-2) var(--space-4); flex-wrap: wrap; min-width: 0; }
   .counts { display: inline-flex; gap: var(--space-3); font-size: var(--text-sm); color: var(--text-secondary); }

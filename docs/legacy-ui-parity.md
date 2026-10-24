@@ -21,7 +21,7 @@
 | report path/event/raw JSON | Scan/Result structured summary, native JSON report export | native export 검증, 저장 위치 직접 선택. persistent report path/raw timeline은 다른 UX로 대체 |
 | translate.py 상속/경로 | settings.import_legacy, desktop_legacy_import | 선택한 Python을 실행하지 않고 literal AST 읽기 전용 preview→draft→명시적 Save. native chooser/discard PASS. 동적 Python 상속은 미지원 |
 | settings export/reset/import | public schema JSON, SettingsScreen/settings-import | 공개 allowlist만 export; preview/import/reset draft/save 및 validation/busy 회귀 PASS |
-| locale/theme/contact/About | ko/en/ja, System/Light/Dark, AboutScreen | browser 화면/keyboard/dark 확인, contact mailto 구현. 중국어는 기존 지원 언어에 없음 |
+| locale/theme/contact/About | ko/en/ja, System/Light/Dark, AboutScreen | browser 화면/keyboard/dark 확인, contact mailto 구현. 중국어 간체 UI는 2026-10-04부터 제공(ko/en/ja/zh) |
 
 ## 남은 계약과 실제 gate
 

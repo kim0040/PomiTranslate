@@ -143,6 +143,7 @@ function build() {
     '-m', 'PyInstaller', '--noconfirm', '--onedir', '--contents-directory', '_internal',
     ...(flags.has('--clean') ? ['--clean'] : []),
     '--name', 'pomi-sidecar', '--paths', root,
+    '--python-option', 'X utf8',
     '--hidden-import', 'lz4.block',
     '--hidden-import', 'keyring', '--hidden-import', 'mwt.desktop_entry',
     '--hidden-import', 'mc_world_translator', '--hidden-import', 'llm_backends',

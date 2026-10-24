@@ -4,6 +4,13 @@
 
 | 기록 | 읽는 이유 |
 | --- | --- |
+| [2026-10-24 main UX 개편·리뷰 수정 WIP 병합](merge-main-wip-2026-10-24.md) | commercial-readiness(172 commit)에 main의 UX 개편과 WIP 3개를 합친 내용, 해결 원칙, 문서 쪽 결정. 병합된 소스의 검증은 대기 |
+| [2026-10-23 소개 화면 재캡처·사용 안내](docs-recapture-2026-10-23.md) | ko/en/ja 소개 화면과 manifest 재캡처, 4개 언어 사용 안내 갱신 |
+| [2026-10-23 설정 화면 두 부분](settings-parts-2026-10-23.md) | 환경 설정 "번역"/"앱" 분리, 키 저장 직후 모델 목록 자동 조회 |
+| [2026-10-23 COMP-02 component 형태](comp02-component-shapes-2026-10-23.md) | 최신 component(object fallback·hover item/entity·separator·mannequin description) 합성 fixture 구현 |
+| [2026-10-23 상용 수준 점검](commercial-readiness-2026-10-23.md) | 쓰기 저널, sidecar 감독, 자격 증명, 종료 경로, Windows native·Docker Linux 검증 |
+| [2026-10-11 리뷰 수정 WIP 중단·인계](review-fixes-pause-2026-10-11.md) | 전체 코드 리뷰(R1–R13, U1–U6)와 WIP 브랜치 3개(원격 백업; 2026-10-24에 commercial-readiness에 병합, 병합된 소스는 검증 대기)의 구현·테스트 상태, 비용 한도 계약, 통합 순서. `6e46710` 기준 check0/0·frontend108·Python26 suites·Rust63 PASS |
+| [2026-10-04 상용 수준 UX 개편](ux-overhaul-2026-10-04.md) | 적용 전 번역 검토·수정 재적용·실패만 재시도·비용 한도·용어집·설정 도우미·설정 탭·닫기 보호·완료 알림·창 복원·중국어 UI, 독립 검토 R1/R2 수정, 최종 gate check/frontend108/Python/Rust63/browser260 |
 | [2026-10-02 문서·에셋 현지화](localization-2026-10-02.md) | 사용자 문서4언어·문자 에셋20개·UI 언어별 합성 소개 화면9장, 재생성·hash·검증 경계 |
 | [2026-10-02 main 통합·잔여 대조](main-integration-2026-10-02.md) | 작업 브랜치 7개 commit 통합, 구현 완료/검증 대기 구분과 최신 backlog |
 | [2026-10-02 도움말·업데이트·데이터 보존](../updates-and-data.md) | 도움말·시작 안내·앱 안 라이선스·Minecraft 고지 원문, updater(서명 키 있을 때만 설치)·외부 링크 허용 목록·데이터 위치·두 단계 초기화·설정 fsync/사본/손상 복구, 이어서 라이트/다크/시스템 화면 모드. Python23/Rust30/frontend62/browser114. 서명 release 업데이트·각 OS native 미확인 |

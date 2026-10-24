@@ -40,7 +40,7 @@ describe('the stuck quit dialog', () => {
   it('"Keep waiting" tells the shell and returns to the waiting state', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = prompt({ job: true, dirty: false, phase: 'stuck' });
+    app.exitGate.prompt = prompt({ job: true, dirty: false, phase: 'stuck' });
     await app.exitKeepWaiting();
     expect(invokeMock).toHaveBeenCalledWith('exit_keep_waiting');
     expect(app.exitPrompt?.phase).toBe('waiting');
@@ -50,7 +50,7 @@ describe('the stuck quit dialog', () => {
   it('"Quit now" still ends the core by force', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = prompt({ job: true, dirty: false, phase: 'stuck' });
+    app.exitGate.prompt = prompt({ job: true, dirty: false, phase: 'stuck' });
     await app.exitNow();
     expect(invokeMock).toHaveBeenCalledWith('exit_force');
   });
@@ -58,7 +58,7 @@ describe('the stuck quit dialog', () => {
   it('shows the error and closes the dialog when the shell cannot wait again', async () => {
     invokeMock.mockRejectedValue({ code: 'INTERNAL', message: 'x' });
     const app = new AppState();
-    app.exitPrompt = prompt({ job: true, dirty: false, phase: 'stuck' });
+    app.exitGate.prompt = prompt({ job: true, dirty: false, phase: 'stuck' });
     await app.exitKeepWaiting();
     expect(app.exitPrompt).toBeNull();
     expect(app.banner?.message).toBeTruthy();
@@ -69,7 +69,7 @@ describe('the update question', () => {
   it('Save then confirms with the intent and closes the dialog so the install carries on', async () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = prompt({ reason: 'update', intent: 21 });
+    app.exitGate.prompt = prompt({ reason: 'update', intent: 21 });
     app.saveDraft = async () => true;
     await app.exitSaveAndQuit();
     expect(invokeMock).toHaveBeenCalledWith('exit_confirm', { intent: 21 });
@@ -81,7 +81,7 @@ describe('the update question', () => {
     const app = new AppState();
     const save = vi.fn(async () => true);
     app.saveDraft = save;
-    app.exitPrompt = prompt({ reason: 'update', intent: 22 });
+    app.exitGate.prompt = prompt({ reason: 'update', intent: 22 });
     await app.exitQuit();
     expect(save).not.toHaveBeenCalled();
     expect(invokeMock).toHaveBeenCalledWith('exit_confirm', { intent: 22 });
@@ -91,7 +91,7 @@ describe('the update question', () => {
   it('Cancel tells the shell to call the install off', () => {
     invokeMock.mockResolvedValue(undefined);
     const app = new AppState();
-    app.exitPrompt = prompt({ reason: 'update', intent: 23 });
+    app.exitGate.prompt = prompt({ reason: 'update', intent: 23 });
     app.exitStay();
     expect(invokeMock).toHaveBeenCalledWith('exit_cancel', { intent: 23 });
     expect(app.exitPrompt).toBeNull();
@@ -100,12 +100,12 @@ describe('the update question', () => {
   it.each(['UPDATE_CANCELLED', 'INVALID_REQUEST'])('%s from an answer means the question is gone: close and do nothing else', async (code) => {
     invokeMock.mockRejectedValue({ code, message: 'gone' });
     const app = new AppState();
-    app.exitPrompt = prompt({ reason: 'update', intent: 5 });
+    app.exitGate.prompt = prompt({ reason: 'update', intent: 5 });
     await app.exitQuit();
     expect(app.exitPrompt).toBeNull();
     expect(app.banner).toBeNull();
     // A late Cancel for a question that is gone is quiet too.
-    app.exitPrompt = prompt({ reason: 'update', intent: 5 });
+    app.exitGate.prompt = prompt({ reason: 'update', intent: 5 });
     app.exitStay();
     await Promise.resolve();
     expect(app.banner).toBeNull();
@@ -114,7 +114,7 @@ describe('the update question', () => {
   it('any other refusal of the answer is shown', async () => {
     invokeMock.mockRejectedValue({ code: 'INTERNAL', message: 'x' });
     const app = new AppState();
-    app.exitPrompt = prompt({ intent: 6 });
+    app.exitGate.prompt = prompt({ intent: 6 });
     await app.exitQuit();
     expect(app.banner?.message).toBe(en['error.INTERNAL']);
   });
@@ -131,7 +131,7 @@ describe('the update question', () => {
         return undefined;
       });
       const app = new AppState();
-      app.exitPrompt = prompt({ reason: 'update', intent: 8 });
+      app.exitGate.prompt = prompt({ reason: 'update', intent: 8 });
       await app.installUpdate();
       expect(app.updateState).toBe('error');
       expect(app.updateError).toBe(code);
@@ -274,7 +274,7 @@ describe('recovery results', () => {
     });
     const app = new AppState();
     app.worldDir = '/elsewhere';
-    app.interruptedJobs = [job()];
+    app.recovery.jobs = [job()];
     const result = await app.recover(job(), 'rollback');
     expect(result?.settledBy).toBe('unpublished_continuation');
     expect(app.interruptedJobs.map((item) => item.jobId)).toEqual(['earlier']);
@@ -293,7 +293,7 @@ describe('recovery results', () => {
     });
     const app = new AppState();
     app.worldDir = '/elsewhere';
-    app.interruptedJobs = [job()];
+    app.recovery.jobs = [job()];
     await app.recover(job(), 'keep', { acceptConflicts: true });
     expect(invokeMock).toHaveBeenCalledWith('sidecar_request', expect.objectContaining({
       request: expect.objectContaining({ payload: { jobId: 'cont', mode: 'keep', acceptConflicts: true } })
@@ -369,13 +369,13 @@ describe('review drafts and backups talk to the core', () => {
     const app = new AppState();
     app.scan = { scanPlanId: 'p'.repeat(64), status: 'completed', fingerprint: 'f' } as any;
     app.excluded.add(ids[0]);
-    (app as any).draftDirty = true;
+    app.job.draft.dirty = true;
     expect(await app.storeReview(true)).toBe(true);
     expect(seen).toContain('review.draft.set');
-    await (app as any).restoreDraft(app.scan!.scanPlanId);
+    await app.job.draft.restore(app.scan!.scanPlanId);
     expect(app.excluded.has(ids[0])).toBe(true);
     expect(app.overrides[ids[1]]).toBe('typed');
-    await (app as any).clearDraft(app.scan!.scanPlanId);
+    await app.job.draft.clear(app.scan!.scanPlanId);
     expect(seen).toContain('review.draft.clear');
   });
 });

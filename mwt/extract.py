@@ -17,7 +17,15 @@ from typing import Any, Callable
 from mwt import nbtio as nbt
 
 # Bump when the set of texts a scan finds changes, so saved scan plans stop matching.
-EXTRACTOR_VERSION = 5
+# 4: a component stored as a JSON string literal ("\"Welcome home\"") is its inner text.
+EXTRACTOR_VERSION = 6
+
+# The DataVersion of 25w02a, the first 1.21.5 snapshot. From it on, text components in NBT are NBT
+# (a plain string is literal text). Before it, every component is a JSON string, so the string
+# "\"Welcome home\"" is the text Welcome home, and a translation must be written back as a JSON
+# string again. Data without a DataVersion is read the older way: the value written back is still
+# a JSON string literal, which shows the same quote-wrapped text if it was literal after all.
+TEXT_COMPONENT_NBT_DATA_VERSION = 4298
 
 # What a text is, in words the interface translates. One string per kind of place.
 CATEGORIES = (
@@ -43,6 +51,42 @@ class Scope:
     pos: tuple[int, int, int] | None = None
     entity: bool = False
     in_item: bool = False
+    # The DataVersion of the chunk or file being read, when it records one.
+    data_version: int | None = None
+
+    @property
+    def components_are_json(self) -> bool:
+        """Whether a text component stored as a string is JSON (before 1.21.5) or literal text."""
+        return self.data_version is None or self.data_version < TEXT_COMPONENT_NBT_DATA_VERSION
+
+
+def json_string_text(raw: str) -> str | None:
+    """The text of a component stored as a JSON string literal, such as ``"\"Welcome home\""``."""
+    stripped = raw.strip()
+    if len(stripped) < 2 or stripped[0] != '"' or stripped[-1] != '"':
+        return None
+    try:
+        parsed = json.loads(stripped, strict=False)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, str) else None
+
+
+def match_wrapping_quotes(source: str, answer: str) -> str:
+    """Keep a translation's outer double quotes the way the source has them.
+
+    A model often drops the quotes around a quoted line, or adds quotes to a line that had none.
+    Only a pair that wraps the whole text is touched; quotes inside the text stay as written.
+    """
+    if not isinstance(answer, str) or not answer:
+        return answer
+    source_wrapped = len(source) >= 2 and source.startswith('"') and source.endswith('"')
+    answer_wrapped = len(answer) >= 2 and answer.startswith('"') and answer.endswith('"')
+    if source_wrapped and not answer.startswith('"') and not answer.endswith('"'):
+        return f'"{answer}"'
+    if answer_wrapped and not source.startswith('"') and not source.endswith('"') and '"' not in answer[1:-1]:
+        return answer[1:-1]
+    return answer
 
 
 class TextRef:
@@ -702,11 +746,22 @@ class TextExtractionMixin:
         """What ``_walk_json`` walks: a bare string literal sits in a one-item list so it can be replaced."""
         return [component] if isinstance(component, str) else component
 
+    def _json_string_component(self, raw: str, scope: Scope) -> str | None:
+        """The text of a pre-1.21.5 component stored as a JSON string literal, otherwise ``None``."""
+        return json_string_text(raw) if scope.components_are_json else None
+
     def _collect_component_string(self, tag: Any, refs: list[TextRef], path: str, scope: Scope, category: str, detail: str) -> None:
+        text = self._json_string_component(tag.value, scope)
+        if text is not None:
+            if self.should_translate_text(text):
+                refs.append(self._ref("json_string_tag", path, scope, category, detail, tag=tag))
+            return
         component = self._json_component(tag.value)
+        if isinstance(component, str):
+            component = None  # Modern TAG_String is literal text, including wrapping quotes.
         if component is not None:
             found: list[str] = []
-            self._walk_json(self._component_root(component), lambda container, key, source: found.append(source))
+            self._walk_json(component, lambda container, key, source: found.append(source))
             if found:
                 refs.append(self._ref("json_tag", path, scope, category, detail, tag=tag))
         elif self.should_translate_text(tag.value):
@@ -833,7 +888,7 @@ class TextExtractionMixin:
             return scope
         pos = self._position(tag)
         if pos is not None:
-            return Scope(holder=ident.value, pos=pos, entity="Pos" in tag)
+            return replace(scope, holder=ident.value, pos=pos, entity="Pos" in tag, in_item=False)
         if "count" in tag or "Count" in tag:
             return replace(scope, in_item=True)
         return scope
@@ -899,8 +954,21 @@ class TextExtractionMixin:
             for index, line in enumerate(lore):
                 self._collect_component(line, refs, f"{path}/Lore/{index}", scope, "item_lore", f"line:{index + 1}")
 
+    @staticmethod
+    def _data_version(tag: Any) -> int | None:
+        if not isinstance(tag, nbt.TAG_Compound):
+            return None
+        version = tag.get("DataVersion")
+        if version is None and isinstance(tag.get("Data"), nbt.TAG_Compound):
+            version = tag["Data"].get("DataVersion")  # level.dat keeps it under Data
+        if isinstance(version, nbt.TAG_Number) and isinstance(version.value, int):
+            return int(version.value)
+        return None
+
     def collect_tag_refs(self, tag: Any, refs: list[TextRef], path: str, scope: Scope | None = None) -> None:
-        scope = scope or Scope()
+        if scope is None:
+            # A chunk or entity file names its DataVersion at the root, level.dat under Data.
+            scope = Scope(data_version=self._data_version(tag))
         if isinstance(tag, nbt.TAG_List):
             for index, item in enumerate(tag):
                 if isinstance(item, (nbt.TAG_Compound, nbt.TAG_List)):
@@ -965,6 +1033,10 @@ class TextExtractionMixin:
         for ref in refs:
             if ref.kind == "plain_tag":
                 add(ref.tag.value, ref)
+            elif ref.kind == "json_string_tag":
+                text = self._json_string_component(ref.tag.value, ref.scope)
+                if text is not None:
+                    add(text, ref)
             elif ref.kind == "json_text":
                 add(ref.obj[ref.key], ref)
             elif ref.kind == "translate_key":
@@ -1001,6 +1073,16 @@ class TextExtractionMixin:
                 translated = translations.get(original)
                 if translated and translated != original:
                     ref.tag.value = translated
+                    changed += 1
+            elif ref.kind == "json_string_tag":
+                original = self._json_string_component(ref.tag.value, ref.scope)
+                if original is None:
+                    continue
+                translated = translations.get(original)
+                if translated and translated != original:
+                    # Still a JSON string, so the game reads it as before; quotes and backslashes
+                    # in the translation are escaped instead of ending the string.
+                    ref.tag.value = json.dumps(translated, ensure_ascii=False)
                     changed += 1
             elif ref.kind == "json_tag":
                 try:

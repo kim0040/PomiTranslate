@@ -1,0 +1,37 @@
+name: rust
+
+# Actions quota is unavailable; run this workflow only by explicit manual dispatch.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-test:
+    name: cargo test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: "1.98.1" # keep equal to rust-toolchain.toml
+      # The onedir core is mapped as a resource; unit tests only need its folder and a frontend.
+      - name: Placeholder frontend and onedir resource
+        shell: bash
+        run: |
+          mkdir -p dist build/sidecar/dist/pomi-sidecar
+          [ -f dist/index.html ] || printf '<!doctype html><title>PomiTranslate</title>\n' > dist/index.html
+          : > build/sidecar/dist/pomi-sidecar/PLACEHOLDER.txt
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked

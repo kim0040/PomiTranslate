@@ -1,4 +1,6 @@
-# 현재 상태 — 2026-10-23
+# 현재 상태 — 2026-10-24
+
+> **2026-10-24 병합 — 병합됨, 병합된 소스의 검증 대기.** 브랜치 `improve/commercial-readiness`(2026-10-02 `ad9f2c6`~2026-10-23 `8247f6f`의 172 commit, Windows native·Linux 컨테이너·`pnpm verify:local` 60/60으로 검증)에 main의 2026-10-04 상용 수준 UX 개편(2026-10-03~10-11)과 2026-10-11 리뷰 수정 WIP 3개(`core-safety` `5b4150d`·`native-security` `f3ebeee`·`ui-ux` `99b7efd`, [인계](history/review-fixes-pause-2026-10-11.md))를 `integrate/main-wip-2026-10-24`를 통해 합쳤다. 병합 전 commercial-readiness는 브랜치 `backup/commercial-readiness-pre-merge`에 있다. 사용자 결정에 따라 main과 WIP 셋을 모두 합쳤고 push하지 않았다. 충돌은 commercial-readiness의 구조(onedir sidecar 요청별 실행·프로세스 감독, Rust 소유 자격 증명, `exit_gate`, UPPER_SNAKE 오류 코드와 `error.<CODE>` 문구)를 기준으로 풀고 양쪽의 사용자 기능과 안전 수정은 모두 남겼다. **병합된 소스의 결과:** 자동 검사 69/69·browser 419 PASS(1 skip)·Windows 설치본 native E2E PASS. 실제 유료 제공사·게임 로드·서명·macOS·Linux 데스크톱은 확인하지 않았다. 아래 표의 다른 PASS 수치는 병합 전 각 갈래의 기록이다. 명령·결과·리뷰 수정은 [병합 기록](history/merge-main-wip-2026-10-24.md)에 있다.
 
 ## 판정
 
@@ -21,14 +23,14 @@
 - 재개 요청의 최신 후보 제외·직접 번역을 우선 적용하며, 이전 클라이언트가 생략한 필드만 checkpoint로 보충한다. Native 회귀에서 변경 파일1/요청0/최신 번역문을 확인하고 대상4파일 byte-identical 복원했다.
 - Collect → Translate → Write, provider fail-fast/circuit breaker, checkpoint·retry·cancel, 사용량·실패·경고 보고. 취소 뒤 늦게 도착한 응답 사용량도 최종 보고에 합산한다.
 - NBT 원본 바이트 보존, Java modified UTF-8(NUL/CESU-8 emoji), nested component·extra/with/fallback/hover/click/container/text_display/command text 추출.
-- 명령 텍스트: JSON과 Java 1.21.5+ SNBT(`mwt/snbt.py`, 바뀐 문자열만 원래 따옴표로 재기록), 선행 `/` 명령과 문자열 컴포넌트. 해석 불가 명령은 원본 유지 + `command_unparsed` 경고. `EXTRACTOR_VERSION` 5(2026-10-23 COMP-02: object fallback·hover item/entity·separator·mannequin description 추가, 검토 후 중첩 JSON은 바뀐 문자열 구간만 고쳐 쓰고 SNBT 따옴표 유지·구형 hover 수집 유지·명시한 component type 우선, 합성 fixture 검증). 서식 토큰은 개수 완전 일치·추가 금지로 검증.
+- 명령 텍스트: JSON과 Java 1.21.5+ SNBT(`mwt/snbt.py`, 바뀐 문자열만 원래 따옴표로 재기록), 선행 `/` 명령과 문자열 컴포넌트. 해석 불가 명령은 원본 유지 + `command_unparsed` 경고. `EXTRACTOR_VERSION` 6(5는 2026-10-23 COMP-02, 6은 2026-10-24 병합에서 1.20.3–1.21.4의 JSON 문자열 컴포넌트 `json_string_tag`를 더한 값. 5의 내용: object fallback·hover item/entity·separator·mannequin description 추가, 검토 후 중첩 JSON은 바뀐 문자열 구간만 고쳐 쓰고 SNBT 따옴표 유지·구형 hover 수집 유지·명시한 component type 우선, 합성 fixture 검증). 서식 토큰은 개수 완전 일치·추가 금지로 검증.
 - 앱 데이터의 검증된 백업, legacy `.pomi-backups` 발견/복원, 복원 직전 recovery snapshot.
 - 번역 후 처음 생성된 `.mcc`의 원래 부재를 백업하고 복원 직전 payload를 recovery에 보존한다. payload→region 순 write/restore, 물리 `.mcc` 변경 파일 집계와 255-sector 경계·중간 write 실패 fixture/native 검증.
 - 기본 credential은 Rust SQLite/AES-256-GCM + 별도 설치별 key 파일. Session과 opt-in OS keychain; 자동 keychain 읽기/import 없음. 2026-10-23부터 앱은 `PomiTranslate/<제공사>` 이름의 항목만, 사람이 요청한 삭제·방식 변경·초기화 때만 지우며 keychain을 쓴 적이 없는 사용자에게는 OS 저장소를 부르지 않는다. 저장된 키 전체는 UI에 반환하지 않는다. Local→Session 전환 시 stale local ciphertext 제거를 atomic metadata transaction으로 처리한다.
 - 같은 계정으로 DB와 key 파일을 모두 읽는 프로세스까지 막는 설계는 아니다. Windows permission 코드는 target typecheck만 통과했으며 native 검증 전이다.
 - OpenAI/Gemini/Anthropic/OpenRouter/Comet/Custom, provider endpoint 고정과 Custom wire format·URL 검증. Gemini는 헤더 인증, thinking 제어(3.x level/2.5 budget), 사고 토큰 사용량 합산, MAX_TOKENS 실패 처리. CLI 환경변수 호환과 Rust-owned sidecar 환경변수 차단을 구분한다.
 - 설정 그룹/disclosure, 종류별 scope 및 curated presets, 파일/key 규칙, global source overrides, performance/file retry/error 정책, 공개 JSON import/export/reset, literal `translate.py` 읽기 전용 preview, 명시적 확인 후 style helper.
-- System/Light/Dark 즉시 적용·설정 파일 저장·보기 메뉴 동기화·OS 변경 추적·시작 전 배경 적용, ko/en/ja semantic i18n. 중국어 UI는 현재 제공하지 않는다. 최신 macOS/Windows 창 확인은 남아 있다.
+- System/Light/Dark 즉시 적용·설정 파일 저장·보기 메뉴 동기화·OS 변경 추적·시작 전 배경 적용, ko/en/ja/zh semantic i18n(카탈로그 4개 일치 검사 포함; 중국어 간체 UI는 2026-10-04 main에서 들어왔고 commercial-readiness의 새 문구는 병합 때 중국어로 옮겼다). 최신 macOS/Windows 창 확인은 남아 있다.
 - 도움말 화면·F1/⌘? 메뉴·첫 실행 Tour, 허용 목록 외부 링크·데이터 폴더 열기, About 앱 버전·license 뷰어. 공개 설정 import/export/reset과 전체 앱 두 단계 초기화(백업 유지, 저장된 키 삭제 선택).
 - 설정 파일 fsync·atomic replace·동일 내용 사본·손상본 보존/복구, app_prefs 테마·안내 동의 저장. 모델 catalog는 atomic write를 사용하며 설정과 같은 사본 복구는 구현하지 않았다.
 - updater 확인·자동 알림·작업 잠금·서명 검증 설치/재시작 경로 연결. 공개키는 비어 있고 signed release/latest.json 게시와 실제 업데이트 검증은 RELEASE-01에 남아 있다.
@@ -36,11 +38,15 @@
 - alternate app identifier는 명시적인 sidecar data root로 격리한다. 테스트 설정·DB·키·월드가 production root로 흘러가지 않는다.
 - 선택한 월드 밖으로 연결된 level/region/entity/resource pack은 읽기·API 전에 차단한다. resources.zip symlink는 내부 대상이어도 restore 경로 보존을 위해 차단한다. 큰 파일 지문/백업 해시는 스트리밍한다.
 
+2026-10-04 상용 수준 UX 개편: 적용 전 번역 검토(기본값)·행별 수정·실패한 문장만 다시 번역·적용 뒤 번역문 수정(작업 백업 복원 후 캐시 재적용, 중단 시 복구 snapshot·`reapply_interrupted`), 실패 이유 코드화, 비용 한도(`max_cost_usd`)·추론/용어집 여유를 포함한 추정·사용자 입력 단가, 전역·월드별 용어집(프롬프트 주입·불일치 1회 재요청·변경 시 적용 차단), 첫 실행 설정 도우미(저장하지 않은 키로 연결 확인·추천 모델·도착 언어 목록), 설정 탭(번역/스캔 범위/고급/앱)·표/칩 편집기, 진행 남은 시간·최근 번역·OS 완료 알림, 창 닫기/⌘Q 저장 확인(설정·도우미·용어집·검토 수정본)·작업 중 종료 보호 재확인, 창 크기·위치 복원, Rust 오류 코드화, 재방문 요약·백업 행 압축·후보 위치/`/tp` 복사·우클릭 메뉴·되돌리기, 중국어 간체 UI. 최종 gate check 0/0·frontend108·Python 전체·Rust63·browser260 PASS(macOS arm64 browser fixture). native 창·OS 알림·실제 제공사·설치본은 확인하지 않았다. 서명·공증·updater 키는 사용자 결정으로 제외. [기록](history/ux-overhaul-2026-10-04.md) · 남은 문제: [알려진 UI/UX 문제](ux-issues.md)
+
+2026-10-11 리뷰 수정 WIP(2026-10-24 병합, 검증 전): core-safety(DataVersion 4298 미만·없음의 JSON 문자열 컴포넌트 `json_string_tag`와 `EXTRACTOR_VERSION` 6, Linux `fcntl` 세션 잠금 감지, 백업·manifest fsync, CLI 복원 잠금과 `--backup-set-id`, 쓰기 단계 해시·reapply 성능, 비용 한도 가격 모름 거부 `COST_CAP_UNPRICED`와 `--allow-unpriced-cost-cap`, 재시도 증폭 상한, `--no-backup` 무시, 표준이 아닌 리전 이름 건너뛰기), native-security(webui token·Host/Origin 검사, Windows UTF-8 stdio, custom key를 서버 주소에 묶기와 `http://`는 localhost만, 요청 크기 상한 `REQUEST_TOO_LARGE`, JSONL 모드에서 keyring 사용 안 함, 다른 제공사 환경변수 키로 대체하지 않음, CSP 보강, `reveal_world_folder`, Time Machine 제외, CI의 Python suite 추가와 `rust.yml`), ui-ux(비용 한도 설정 도우미 5달러 제안·"시작 전" 요약·가격 모름 확인과 결과의 "한도 미적용" 안내, 오류 배너 묶음·저장 오류 인라인, `translate()` 동적 키 fallback, 단계 이름 변경, 설정 번역 탭 정리, `AppState`·`SettingsScreen` 분리, aria-live 단계만 알림, 글자 크기 100/115/130%). sidecar 수명(R1)은 commercial-readiness의 onedir 구조와 프로세스 감독(Job Object·PDEATHSIG·stdin EOF·cancel marker)이 대신한다. 어느 쪽 구현을 남겼는지는 병합 기록이 정한다. **이 항목들은 병합된 소스에서 실행·검증하지 않았다.** WIP 시점의 남은 일(core-safety 테스트 실행, browser spec 갱신, R8·R10 회귀 테스트, 새 오류 코드 문구, ja/zh 용어 점검, 소개 화면 재캡처)이 병합 뒤에도 유효한지는 검증 때 확인한다.
+
 2026-10-02 UI/UX 실사용 점검: 설정 이탈 시 저장 확인, 새 설치 설정 안내·돌아가기, 좁은 창 키보드 검토, toast 위치, 표시 언어 즉시 적용, 복원 확인 정리, 후속으로 시작 실패 시 도움말·정보 접근, 복원 후 다시 스캔 안내, 작업 영역 폭 기준 후보 상세 패널, 낮은 창의 검토 다음 단계 버튼 고정, 처음부터 다시 번역(비용 확인), 결과 화면 다음 행동·실패 목록 개수 안내 등. UI-only이며 Phase 상태는 바뀌지 않는다. [기록](history/ux-audit-2026-10-02.md) · 남은 문제: [알려진 UI/UX 문제](ux-issues.md)
 
 ## 문서·라이선스 정리
 
-2026-10-02 현지화 후속: 영어·한국어·일본어·중국어 간체 README/사용 안내/개인정보/면책을 같은 진입점으로 연결했다. 문자 에셋은 4개 언어의 공유4+안내16을 공통 catalog/SVG/PNG로 관리하며, 현재 UI 언어 ko/en/ja의 소개 화면9장을 합성 데이터로 다시 캡처했다. 중국어는 문서만 제공하며 영어 UI 화면을 명시한다. 타입 검사0오류/0경고·i18n3 PASS·문서 링크/이미지 hash/시각 검토는 이 범위의 결과이며 Phase3·native·release 완료 검증이 아니다. [문구·에셋 관리](localization.md) · [작업 기록](history/localization-2026-10-02.md)
+2026-10-02 현지화 후속: 영어·한국어·일본어·중국어 간체 README/사용 안내/개인정보/면책을 같은 진입점으로 연결했다. 문자 에셋은 4개 언어의 공유4+안내16을 공통 catalog/SVG/PNG로 관리하며, 현재 UI 언어 ko/en/ja의 소개 화면9장을 합성 데이터로 다시 캡처했다. 당시 중국어는 문서만 제공했고, 2026-10-04 중국어 UI와 중국어 소개 화면을 더했다. 2026-10-23에 ko/en/ja 9장을 commercial-readiness UI로 다시 캡처했고([기록](history/docs-recapture-2026-10-23.md)), 2026-10-24 병합 뒤 소개 화면 12장(ko/en/ja는 병합 전 commercial-readiness UI, zh는 병합 전 main UI)은 병합된 UI와 맞지 않을 수 있어 UI가 안정되면 모두 다시 캡처해야 한다. 타입 검사0오류/0경고·i18n3 PASS·문서 링크/이미지 hash/시각 검토는 이 범위의 결과이며 Phase3·native·release 완료 검증이 아니다. [문구·에셋 관리](localization.md) · [작업 기록](history/localization-2026-10-02.md)
 
 서비스 소개와 사용법은 root README(영어 메인)와 [한국어판](README.ko.md), 자세한 실행·복원은 user-guide, 비용·키 저장은 privacy, 개인 프로젝트/보증·책임 제한은 disclaimer로 구분했다. 기여자는 김현민(mini0227kim@gmail.com)이다. 기존 MIT를 유지하고 제3자 metadata 검토·미확인 플랫폼/배포 고지를 legal 문서와 LEGAL-01에 기록했다. 날짜별 기록은 history, 의도적인 합성 소개 화면은 images에서 관리한다. 2026-10-01 다국어 README(ko/en/ja/zh)를 같은 범위로 맞추고 user-guide에 설정·결과·CLI·문제 해결을 보강했고, 2026-10-02 메인 README를 영어로 전환하고 한국어판을 docs/README.ko.md로 옮기며 개인 프로젝트 배경 안내를 기여자 절로 이동했다. [2026-10-01 기록](history/docs-refresh-2026-10-01.md) · [2026-10-02 기록](history/readme-restructure-2026-10-02.md) 이번 문서 작업으로 유료 API·전체 matrix·installer 빌드를 실행하지 않았다.
 
@@ -50,6 +56,9 @@
 
 | 영역 | 기록된 증거 | 범위 |
 | --- | --- | --- |
+| **병합(2026-10-24)** | **검증됨** | verify:local 69/69, browser 419 PASS/1 skip, clean build, Windows 설치본 E2E(설정 도우미·번역·검토·적용·SHA-256 복원·종료). 아래 행은 병합 전 각 갈래의 기록 |
+| 병합 전 commercial-readiness(2026-10-23) | `pnpm verify:local` 60/60, Docker Linux Python core 51/51·Rust 238·clippy 0, Windows native(설치·packaged core smoke·UI Automation 닫기 확인·자격 증명 관리자·127.0.0.1 대역 제공사 E2E) | 병합 전 소스([기록](history/commercial-readiness-2026-10-23.md)). 병합된 UI·core에는 해당하지 않음 |
+| 병합 전 main UX 개편(2026-10-04) | check 0/0·frontend108·Python 전체·Rust63·browser260(macOS arm64 browser fixture) | 병합 전 main 소스([기록](history/ux-overhaul-2026-10-04.md)). native·실제 제공사 미확인 |
 | 후속(2026-10-02) | Python23/Rust30/check·build/frontend62/browser114 PASS: 도움말·시작 안내·라이선스 뷰어·업데이트·데이터 위치·초기화·설정 내구성, 라이트/다크/시스템 화면 모드(설정 타일·보기 메뉴·OS 변경 추적·시작 전 적용·전 화면 다크 axe) | [업데이트·데이터](updates-and-data.md). 실제 서명 release 업데이트·각 OS native 미확인 |
 | 후속(2026-10-01) | Python22/Rust28/check·build/frontend58/browser98 PASS(부드러움·일관성 후속 포함), 실제 Gemini 실측 | [네이티브 UX·Gemini·SNBT](history/native-ux-and-compat-2026-10-01.md). Linux 환경, macOS native 미확인 |
 | Python | 최종20 suites PASS | 신규 .mcc 경계/복원/실패/물리 집계 및 기존 core/provider/JSONL |

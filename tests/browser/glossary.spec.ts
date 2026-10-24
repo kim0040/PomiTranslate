@@ -557,7 +557,7 @@ test.describe('importing and exporting', () => {
 test.describe('adding from the review', () => {
   async function toReview(page: Page) {
     await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-    await page.getByRole('button', { name: /^후보 검토/ }).last().click();
+    await page.getByRole('button', { name: /^번역할 문장 고르기/ }).last().click();
     await expect(page.getByRole('grid')).toBeVisible();
     await page.locator('tr[data-index="0"]').click();
   }
@@ -595,7 +595,7 @@ test.describe('adding from the review', () => {
   test('without a selection the whole sentence is the source, keep needs no translation, and a rule that exists is reported', async ({ page }) => {
     await boot(page, 'scenario=selected&glossary=seeded');
     await page.getByRole('button', { name: '스캔 시작', exact: true }).click();
-    await page.getByRole('button', { name: /^후보 검토/ }).last().click();
+    await page.getByRole('button', { name: /^번역할 문장 고르기/ }).last().click();
     await expect(page.getByRole('grid')).toBeVisible();
     await page.locator('tr[data-index="0"]').click();
     await page.getByRole('button', { name: '용어집에 추가' }).click();
@@ -617,7 +617,7 @@ test.describe('adding from the review', () => {
 test.describe('quality warnings of a run', () => {
   test('the run shows the counts quietly and a glossary change in one line', async ({ page }) => {
     await boot(page, 'scenario=run-progress&progress=quality');
-    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
     await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
     const consent = page.getByRole('dialog');
     if (await consent.count()) await consent.getByRole('button', { name: /전송|보내|번역 시작|계속/ }).last().click();
@@ -628,7 +628,7 @@ test.describe('quality warnings of a run', () => {
 
   test('the result lists the counts with an explanation, five samples, and the rule each one missed', async ({ page }) => {
     await boot(page, 'scenario=result-quality&glossary=seeded');
-    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 진행/ }).click();
+    await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
     await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
     const consent = page.getByRole('dialog');
     if (await consent.count()) await consent.getByRole('button', { name: /전송|보내|번역 시작|계속/ }).last().click();

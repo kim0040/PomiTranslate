@@ -16,7 +16,7 @@ const background = (page: Page) => page.evaluate(() => getComputedStyle(document
 
 async function openAppearance(page: Page) {
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
-  await page.getByRole('tab', { name: '앱', exact: true }).click();
+  await page.getByRole('tab', { name: '앱' }).click();
   return page.locator('#application-settings');
 }
 
@@ -32,7 +32,7 @@ test('settings switch light, dark and system at once and keep the choice', async
   await expect.poll(async () => (await chrome(page, 'plugin:window|set_theme')).at(-1)?.value).toBe('dark');
   await expect.poll(async () => (await chrome(page, 'set_menu_theme')).at(-1)?.choice).toBe('dark');
   await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute('content', '#0e0f11');
-  await expect(page.locator('.action-bar')).toHaveCount(0); // nothing to save: no save bar
+  await expect(page.locator('.save-bar')).toHaveCount(0); // nothing to save
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 
   await section.getByRole('radio', { name: '라이트' }).check();
@@ -92,7 +92,7 @@ test('the saved mode is on the page before the app code runs, so a dark start ne
 test('every screen passes contrast checks in dark mode', async ({ page }) => {
   await boot(page, 'scenario=review&theme=dark');
   const step = (name: string) => page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: new RegExp(`^${name}`) }).click();
-  for (const name of ['월드 선택', '월드 스캔', '후보 검토', '번역 진행']) {
+  for (const name of ['월드 고르기', '번역할 문장 찾기', '번역할 문장 고르기', '번역 준비']) {
     await step(name);
     expect((await new AxeBuilder({ page }).analyze()).violations, name).toEqual([]);
   }

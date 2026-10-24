@@ -347,7 +347,7 @@ def test_bare_json_string_components_stay_valid_json() -> None:
         "Hello there", "Object line", 'Say "hi"', "Back bare", "Back object", "Old Guard", "Plain Name",
         "Lore bare", "Lore object",
     }, texts
-    assert all(ref.kind == "json_tag" for ref in refs if ref.tag.value.startswith('"')), "bare literals are components"
+    assert all(ref.kind == "json_string_tag" for ref in refs if ref.tag.value.startswith('"')), "bare literals are components"
     # Translating returns text without the quotes: the stored value must still be a JSON string.
     translations = {text: f"[KO] {text}" for text in texts}
     answer = '[KO] 말해 "안녕"\n끝'
@@ -369,7 +369,7 @@ def test_bare_json_string_components_stay_valid_json() -> None:
     # A model answer is plain text. Whatever it holds, quoting is the extractor's job and never the model's.
     again: list = []
     wt.collect_tag_refs(tree, again, "p")
-    ref = next(item for item in again if item.kind == "json_tag" and item.tag.value.startswith('"[KO] Hello'))
+    ref = next(item for item in again if item.kind == "json_string_tag" and item.tag.value.startswith('"[KO] Hello'))
     wt.apply_translations([ref], {"[KO] Hello there": "Bonjour"})
     assert json.loads(ref.tag.value) == "Bonjour"
     # Literal-string semantics of 1.21.5+ are untouched: a plain, unquoted string is still plain text.

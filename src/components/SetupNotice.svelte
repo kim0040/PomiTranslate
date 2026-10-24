@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app, type RunBlocker } from '../lib/app.svelte';
   import { t, type MessageKey } from '../lib/i18n/index.svelte';
+  import { providerLabel } from '../lib/providers';
   import Callout from './Callout.svelte';
   import Icon from './Icon.svelte';
 
@@ -8,8 +9,7 @@
   // explains every reason Start is unavailable and links to where each is fixed.
   let { blocking = false }: { blocking?: boolean } = $props();
 
-  const providerLabels: Record<string, string> = { openai: 'OpenAI', gemini: 'Gemini', anthropic: 'Anthropic', openrouter: 'OpenRouter', comet: 'Comet API' };
-  const provider = $derived(providerLabels[app.settings.provider] ?? t('settings.provider.custom'));
+  const provider = $derived(providerLabel(app.settings.provider));
   const reasons = $derived<RunBlocker[]>(blocking ? app.runBlockers : app.setupNeeds);
   const text: Record<RunBlocker, MessageKey> = {
     recovery: 'setup.recovery',
@@ -19,6 +19,8 @@
     key: 'setup.key'
   };
   const needsSettings = $derived(reasons.some((reason) => reason !== 'interrupted'));
+  // A missing model or key is what the setup wizard collects, so it is offered beside Settings.
+  const needsSetup = $derived(reasons.includes('model') || reasons.includes('key'));
 </script>
 
 {#if reasons.length}
@@ -26,11 +28,16 @@
     <ul class="needs">
       {#each reasons as reason (reason)}<li>{t(text[reason], { provider })}</li>{/each}
     </ul>
-    {#if reasons.includes('model') || reasons.includes('key')}<p>{t(blocking ? 'setup.manualHint' : 'setup.later')}</p>{/if}
+    {#if needsSetup}<p>{t(blocking ? 'setup.manualHint' : 'setup.later')}</p>{/if}
     {#snippet actions()}
       {#if needsSettings}
         <button type="button" class="btn btn-secondary btn-sm" disabled={app.busy === 'settings'} onclick={() => app.openSettingsFor()}>
           <Icon name="sliders" size={14} /> {t('setup.open')}
+        </button>
+      {/if}
+      {#if needsSetup}
+        <button type="button" class="btn btn-secondary btn-sm" disabled={app.busy === 'settings'} onclick={() => app.openWizard()}>
+          <Icon name="play" size={12} /> {t('help.wizardButton')}
         </button>
       {/if}
       {#if reasons.includes('interrupted')}

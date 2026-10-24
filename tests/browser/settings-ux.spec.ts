@@ -2,47 +2,71 @@ import { test, expect, type Page } from '@playwright/test';
 import { resolve } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 
+// Reasoning, the user-entered price, key storage and the style prompt sit in the closed "고급 번역 옵션" section of the 번역 tab.
+async function translateAdvanced(page: Page) {
+  const toggle = page.locator('#translate-advanced > .head > .toggle');
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+}
+
 async function settings(page: Page, parameters = '') {
   await page.addInitScript({ path: resolve('tests/frontend/tauri-fixture-init.js') });
   await page.goto(`/?scenario=review&model=deepseek/deepseek-v4.1-flash${parameters}`);
   await page.getByRole('button', { name: '환경 설정', exact: true }).click();
+  await translateAdvanced(page);
 }
 async function calls(page: Page, type: string) {
   return page.evaluate((kind) => (window as unknown as { __pomiRequests: { type: string }[] }).__pomiRequests.filter((request) => request.type === kind).length, type);
 }
 
+async function openaiLists(page: Page) {
+  return page.evaluate(() => (window as unknown as { __pomiRequests: { type: string; provider?: string; hasDraftKey?: boolean }[] }).__pomiRequests.filter((request) => request.type === 'models.list' && request.provider === 'openai'));
+}
+
 test('model lookup never saves drafts, keys or invalidates reviewed candidates', async ({ page }) => {
   await settings(page);
   await expect(page.getByText('모델 기본값: 켜짐 · 강하게 (high)', { exact: true })).toBeVisible();
-  await page.locator('#target-language').fill('unsaved-language');
+  await page.locator('#target-language').selectOption('English');
   await page.getByRole('button', { name: '키 변경', exact: true }).click();
   await page.locator('#api-key').fill('synthetic-unsaved-key');
   await page.getByRole('button', { name: '모델 목록 불러오기', exact: true }).click();
-  await expect(page.locator('#target-language')).toHaveValue('unsaved-language');
+  await expect(page.locator('#target-language')).toHaveValue('English');
   await expect(page.locator('#api-key')).toHaveValue('synthetic-unsaved-key');
   expect(await calls(page, 'settings.set')).toBe(0);
   expect(await calls(page, 'translate.start')).toBe(0);
-  const publicRequests = await page.evaluate(() => (window as unknown as { __pomiRequests: { type: string; publicCatalog?: boolean }[] }).__pomiRequests.filter((request) => request.type === 'models.list'));
-  expect(publicRequests.every((request) => request.publicCatalog === true)).toBe(true);
+  // Without a typed key only the public catalog is read; the typed key goes out once, as a draft, and nowhere else.
+  const lookups = await page.evaluate(() => (window as unknown as { __pomiRequests: { type: string; publicCatalog?: boolean; connectionCheck?: boolean; hasDraftKey?: boolean }[] }).__pomiRequests.filter((request) => request.type === 'models.list'));
+  expect(lookups.filter((request) => !request.hasDraftKey).every((request) => request.publicCatalog === true)).toBe(true);
+  expect(lookups.filter((request) => request.hasDraftKey).map((request) => request.connectionCheck)).toEqual([true]);
+  const leaked = await page.evaluate(() => (window as unknown as { __pomiRequests: { type: string; hasApiKey?: boolean }[] }).__pomiRequests.filter((request) => request.type !== 'models.list' && request.hasApiKey));
+  expect(leaked).toEqual([]);
   await page.getByRole('button', { name: '변경 취소', exact: true }).click();
   await expect(page.locator('#target-language')).toHaveValue('한국어');
   await expect(page.locator('#api-key')).toHaveCount(0);
-  // Nothing left to save: the save bar is gone, not a disabled button.
-  await expect(page.locator('.action-bar')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '저장', exact: true })).toHaveCount(0);
+  // Nothing is left to save, so the save bar is gone.
+  await expect(page.locator('.save-bar')).toHaveCount(0);
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await page.getByRole('button', { name: /^후보 검토/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역할 문장 고르기/ }).click();
   await expect(page.getByRole('grid')).toHaveAttribute('aria-rowcount', '7');
 });
 
-test('authenticated model lookup requests key saving without committing other drafts', async ({ page }) => {
+test('an authenticated model lookup works with a typed key that is not saved', async ({ page }) => {
   await settings(page, '&missingKey=1');
   await page.locator('#provider').selectOption('openai');
   await expect(page.locator('#api-key')).toBeVisible();
+  // No key typed and none saved: the lookup says what is missing and asks nothing.
+  await page.getByRole('button', { name: '모델 목록 불러오기', exact: true }).click();
+  await expect(page.getByText('API 키를 입력하거나 저장한 뒤 목록을 불러올 수 있습니다.', { exact: true })).toBeVisible();
+  // The app already read OpenRouter's public list at start; nothing is requested for OpenAI without a key.
+  expect(await openaiLists(page)).toHaveLength(0);
   await page.locator('#api-key').fill('synthetic-unsaved-openai-key');
   await page.getByRole('button', { name: '모델 목록 불러오기', exact: true }).click();
-  await expect(page.getByText('새 API 키는 먼저 저장해 주세요. 모델 조회는 저장된 키만 사용합니다.', { exact: true })).toBeVisible();
+  await expect(page.getByText('모델 지원 정보 확인됨').or(page.getByText(/^이 제공사의 모델 목록에 없는 ID입니다/))).toBeVisible();
+  const draft = await openaiLists(page);
+  expect(draft).toEqual([expect.objectContaining({ provider: 'openai', hasDraftKey: true, connectionCheck: true })]);
+  await page.locator('#model').click();
+  await expect(page.getByRole('option', { name: /GPT-5 Mini/ })).toBeVisible();
   expect(await calls(page, 'settings.set')).toBe(0);
+  await expect(page.locator('#api-key')).toHaveValue('synthetic-unsaved-openai-key');
 });
 
 test('metadata failure offers retry and keeps model default available', async ({ page }) => {
@@ -79,9 +103,9 @@ test('key management is explicit and changing storage mode remains a draft', asy
   await settings(page);
   await expect(page.locator('#api-key')).toHaveCount(0);
   await expect(page.locator('#credential-mode')).not.toBeVisible();
-  await page.locator('#key-management > summary').click();
+  await page.getByRole('button', { name: '키 관리 및 보안', exact: true }).click();
   await page.locator('#credential-mode').selectOption('session');
-  await expect(page.getByText('저장하지 않은 변경사항', { exact: true })).toBeVisible();
+  await expect(page.getByText('번역 탭에 저장하지 않은 변경 1개', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '변경 취소', exact: true }).click();
   await expect(page.locator('#credential-mode')).toHaveValue('local');
   await page.getByRole('button', { name: '저장된 키 삭제', exact: true }).click();
@@ -95,9 +119,9 @@ test('run preflight shows the saved reasoning choice and cost boundary', async (
   await page.getByRole('radio', { name: '직접 설정', exact: true }).check();
   await page.locator('#openrouter-reasoning').selectOption('max');
   await page.getByRole('button', { name: '저장', exact: true }).click();
-  await expect(page.getByText('저장된 설정과 같습니다', { exact: true })).toBeVisible();
+  await expect(page.locator('.save-bar')).toHaveCount(0);
   await page.getByRole('button', { name: '번역 작업', exact: true }).click();
-  await page.getByRole('button', { name: /^번역 진행/ }).click();
+  await page.getByRole('navigation', { name: '작업 단계' }).getByRole('button', { name: /^번역 준비/ }).click();
   await expect(page.getByRole('definition').filter({ hasText: '직접 설정 · 최대 (max)' })).toBeVisible();
   await expect(page.getByText('추론 토큰과 재시도는 이 추정에 포함되지 않으며 실제 비용이 늘어날 수 있습니다.', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'output/playwright/reasoning-preflight.png', fullPage: true });
@@ -129,7 +153,7 @@ for (const width of [1440, 840, 320]) {
     await settings(page);
     await expect(page.getByText('모델 기본값: 켜짐 · 강하게 (high)', { exact: true })).toBeAttached();
     // Clean page: no save bar and no Save button at all.
-    await expect(page.locator('.action-bar')).toHaveCount(0);
+    await expect(page.locator('.save-bar')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '저장', exact: true })).toHaveCount(0);
     await page.locator('#model').fill('edited-model');
     const save = page.getByRole('button', { name: '저장', exact: true });
@@ -137,9 +161,9 @@ for (const width of [1440, 840, 320]) {
     await expect(save).toBeInViewport();
     await page.locator('#style-prompt').focus();
     const editor = await page.locator('#style-prompt').boundingBox();
-    const bar = await page.locator('.action-bar').boundingBox();
+    const bar = await page.locator('.save-bar').boundingBox();
     expect(editor!.y + editor!.height).toBeLessThanOrEqual(bar!.y);
-    await page.evaluate(() => document.getElementById('main-content')!.scrollTo(0, 99999));
+    await page.locator('main').evaluate((main) => { main.scrollTop = main.scrollHeight; });
     await expect(save).toBeInViewport();
     expect(await save.evaluate((button) => {
       const box = button.getBoundingClientRect();
@@ -147,12 +171,12 @@ for (const width of [1440, 840, 320]) {
     })).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-    await page.evaluate(() => document.getElementById('main-content')!.scrollTo(0, 0));
+    await page.locator('main').evaluate((main) => { main.scrollTop = 0; });
     await page.screenshot({ path: `output/playwright/settings-ux-${width}.png` });
     // Saving removes the bar again and leaves focus on something that is still there.
     await save.click();
-    await expect(page.locator('.action-bar')).toHaveCount(0);
-    await expect(page.locator('.section-nav a:focus')).toHaveCount(1);
+    await expect(page.locator('.save-bar')).toHaveCount(0);
+    expect(await page.evaluate(() => !!document.activeElement && document.activeElement !== document.body && document.activeElement.isConnected)).toBe(true);
   });
 }
 
@@ -221,9 +245,11 @@ test.describe('model list before and after the key', () => {
 
   test('no list is fetched when something other than a key is saved', async ({ page }) => {
     await fresh(page);
-    await page.locator('#target-language').fill('English');
+    await page.locator('#target-language').selectOption('English');
     await page.getByRole('button', { name: '저장', exact: true }).click();
-    await expect(page.getByRole('status').filter({ hasText: '저장된 설정과 같습니다' })).toBeVisible();
+    // The save bar leaves once nothing is pending; the saved notice is the toast (the old header status line is gone).
+    await expect(page.getByRole('status').filter({ hasText: '설정을 성공적으로 저장했습니다' })).toBeVisible();
+    await expect(page.locator('.save-bar')).toHaveCount(0);
     expect(await requests(page)).toEqual(['settings.set']);
   });
 });

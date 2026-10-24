@@ -181,11 +181,60 @@
       "height": 980,
       "bytes": 152366,
       "sha256": "25e05ff97b4fbfdc5fe57ac4afc446e23ee3593e5e79749e3bcfca73c186dc91"
+    },
+    {
+      "path": "locales/zh/review.png",
+      "locale": "zh",
+      "screen": "review",
+      "width": 1440,
+      "height": 980,
+      "bytes": 159685,
+      "sha256": "5a9d22dbe65ff3fff35bfb9a56953272ac54d0eb06df531f5ac8e1000ee58b85"
+    },
+    {
+      "path": "locales/zh/settings.png",
+      "locale": "zh",
+      "screen": "settings",
+      "width": 1440,
+      "height": 980,
+      "bytes": 120691,
+      "sha256": "14018654dd02e7e8306ce4f1f32ff1e0467cd8b26d1932e1a477589dc3c5c8a3"
+    },
+    {
+      "path": "locales/zh/run.png",
+      "locale": "zh",
+      "screen": "run",
+      "width": 1440,
+      "height": 980,
+      "bytes": 146652,
+      "sha256": "c8658d25774600f770c5f6c8416886c8a60b26eff2573bd40d0b4f7b67e149fe"
     }
   ],
   "aliases": {
     "review.png": "locales/ko/review.png",
     "settings.png": "locales/ko/settings.png",
     "run.png": "locales/ko/run.png"
-  }
+  },
+  "captures": [
+    {
+      "locales": [
+        "ko",
+        "en",
+        "ja"
+      ],
+      "capturedOn": "2026-10-23",
+      "environment": "Windows 10 / Playwright Chromium",
+      "sourceHash": "43299199e0a6142e8a1e3568a7c205ff83bee33a6b9d97c3d9fda96b3521ed05",
+      "note": "Captured from the pre-merge improve/commercial-readiness UI (docs-recapture-2026-10-23)."
+    },
+    {
+      "locales": [
+        "zh"
+      ],
+      "capturedOn": "2026-10-04",
+      "environment": "macOS / Playwright Chromium",
+      "sourceHash": "e535fd0a018e861b781ea70404e686ef395dedfdfb2d65d0640717f742a34d77",
+      "note": "Captured from the 2026-10-04 UX-overhaul UI of the merged-in main branch. Recapture all 12 screenshots once the merged UI settles; sourceHash/sourceFiles above describe only the ko/en/ja capture."
+    }
+  ]
 }

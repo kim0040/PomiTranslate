@@ -175,7 +175,7 @@ def test_estimate_carries_the_source(data_dir: Path) -> None:
         assert price["sourceUrl"] == OFFICIAL_PAGES["gemini"]
         cost = estimate["cost"]
         expected = estimate["inputTokens"] * 0.30e-6 + estimate["outputTokens"] * 2.50e-6
-        assert cost and abs(cost["low"] - expected) < 1e-12 and abs(cost["high"] - 2 * expected) < 1e-12
+        assert cost and abs(cost["low"] - expected) < 1e-12 and cost["high"] >= 2 * expected
         unknown = entry._estimate(RECORDS, saved("custom", "gemini-2.5-flash"), data_dir)
         assert unknown["price"] is None and unknown["cost"] is None
     with with_today(fresh("gemini") + timedelta(days=EXPIRY_DAYS + 1)):

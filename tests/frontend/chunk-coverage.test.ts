@@ -210,7 +210,7 @@ describe('continuing an interrupted job of a newer world', () => {
   function opened() {
     const app = new AppState();
     app.worldDir = '/worlds/Roguefire';
-    app.interruptedJobs = [job];
+    app.recovery.jobs = [job];
     app.step = 'world';
     return app;
   }
@@ -315,7 +315,7 @@ describe('one recovery action at a time, bound to the context it was asked in', 
   function opened() {
     const app = new AppState();
     app.worldDir = '/worlds/A';
-    app.interruptedJobs = [job];
+    app.recovery.jobs = [job];
     app.step = 'world';
     return app;
   }
@@ -326,7 +326,7 @@ describe('one recovery action at a time, bound to the context it was asked in', 
     await app.continueInterrupted(job);
     expect(app.continuation?.jobId).toBe('job-A');
     app.newerAccepted = true;
-    app.draftDirty = true;
+    app.job.draft.dirty = true;
     gates.draft = true;
     const first = app.confirmContinuation();
     await vi.waitFor(() => expect(held.draft).toBeTypeOf('function'));

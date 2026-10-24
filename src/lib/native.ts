@@ -155,10 +155,24 @@ export async function revealDataFolder(): Promise<void> {
  * Show a file or folder the app made (a quarantine folder, a report) in Finder or Explorer.
  * Returns false when the shell has no such command or refused; the caller then shows the path.
  */
-export async function revealPath(path: string): Promise<boolean> {
+export async function revealQuarantineFolder(path: string): Promise<boolean> {
   if (!inShell()) return false;
   try {
-    await invoke('reveal_path', { path });
+    await invoke('reveal_quarantine_folder', { path });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Show a world folder (its level.dat) in Finder or Explorer. The shell checks that the folder holds a real world.
+ * Returns false when the shell refused or has no such command; the caller then shows the path.
+ */
+export async function revealWorldFolder(worldDir: string): Promise<boolean> {
+  if (!inShell()) return false;
+  try {
+    await invoke('reveal_world_folder', { worldDir });
     return true;
   } catch {
     return false;

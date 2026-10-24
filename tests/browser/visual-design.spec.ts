@@ -37,7 +37,7 @@ test('the bundled Pretendard face is what text is set in, and Japanese keeps its
 test('the review table shows at least eight single-line rows at 840x620 and no empty band', async ({ page }) => {
   await page.setViewportSize({ width: 840, height: 620 });
   await boot(page, 'scenario=review&count=300');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await expect(page.locator('tr[data-index="0"]')).toBeVisible();
   const view = await page.locator('.viewport').boundingBox();
   expect(view).not.toBeNull();
@@ -52,7 +52,7 @@ test('the review table shows at least eight single-line rows at 840x620 and no e
 
 test('the filters popover holds category and sort, counts what is applied, and Escape returns focus', async ({ page }) => {
   await boot(page, 'scenario=review&count=300');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   const trigger = page.getByRole('button', { name: /^필터(?! 초기화)/ });
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   await trigger.click();
@@ -72,29 +72,30 @@ test('the filters popover holds category and sort, counts what is applied, and E
 
 test('the bulk actions live in a popover next to the primary button', async ({ page }) => {
   await boot(page, 'scenario=review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   await page.getByRole('button', { name: '일괄 작업' }).click();
   await expect(page.getByRole('button', { name: '현재 표시된 항목 모두 제외' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: '현재 표시된 항목 모두 제외' })).toHaveCount(0);
 });
 
-test('at the narrowest window the stepper reads "n/5단계 · name" and the page title is not repeated', async ({ page }) => {
+test('at the narrowest window the stepper shows the current name and "n/5", and the page title is not repeated', async ({ page }) => {
   await page.setViewportSize({ width: 840, height: 620 });
   await boot(page, 'scenario=review');
-  await step(page, '후보 검토');
+  await step(page, '번역할 문장 고르기');
   const steps = page.getByRole('navigation', { name: '작업 단계' });
-  await expect(steps).toContainText('3/5단계 · 후보 검토');
+  await expect(steps.locator('.name')).toHaveText('번역할 문장 고르기');
+  await expect(steps.locator('.step-count')).toHaveText('3/5');
   // The names of the other steps are hidden by width but every step keeps its accessible name.
   await expect(steps.getByRole('button')).toHaveCount(5);
-  for (const name of ['월드 선택', '월드 스캔', '후보 검토', '번역 진행', '완료 결과']) await expect(steps.getByRole('button', { name: new RegExp(`^${name}`) })).toHaveCount(1);
-  await expect(steps.getByRole('button', { name: /^후보 검토 \(/ })).toHaveAttribute('aria-current', 'step');
+  for (const name of ['월드 고르기', '번역할 문장 찾기', '번역할 문장 고르기', '번역 준비', '결과 확인·적용']) await expect(steps.getByRole('button', { name: new RegExp(`^${name}`) })).toHaveCount(1);
+  await expect(steps.getByRole('button', { name: /^번역할 문장 고르기 \(/ })).toHaveAttribute('aria-current', 'step');
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
 });
 
 test('a finished translation has one primary next action and a numbers strip', async ({ page }) => {
   await boot(page, 'scenario=result-success');
-  await step(page, '번역 진행');
+  await step(page, '번역 준비');
   await page.getByRole('button', { name: /^(번역 시작|이어서 번역)$/ }).click();
   await expect(page.getByRole('heading', { name: '번역 결과', exact: true })).toBeVisible();
   await expect(page.locator('main .btn-primary')).toHaveCount(1);
@@ -105,7 +106,7 @@ test('a finished translation has one primary next action and a numbers strip', a
 
 test('the coverage list on the scan result is collapsed until asked for', async ({ page }) => {
   await boot(page, 'scenario=scanned');
-  await step(page, '월드 스캔');
+  await step(page, '번역할 문장 찾기');
   const coverage = page.locator('details.coverage');
   await expect(coverage).toBeVisible();
   expect(await coverage.evaluate((el: HTMLDetailsElement) => el.open)).toBe(false);

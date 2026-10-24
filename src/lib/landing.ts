@@ -1,4 +1,4 @@
-import type { BackupSummary, ResumeStatus, TranslationResult } from './api';
+import type { BackupSummary, LastJob, LastScan, ResumeStatus, TranslationResult } from './api';
 
 /**
  * What the app already knows about the world that is open, for the screens a person lands on when
@@ -24,6 +24,9 @@ export type LandingInput = {
   resultAt: number;
   backups: Pick<BackupSummary, 'kind' | 'createdAt' | 'fileCount'>[];
   resume: Pick<ResumeStatus, 'status' | 'translatedCount'> | null;
+  /** What the core remembers of the last visit (times in seconds), used while no scan or result is held in memory. */
+  lastScan?: LastScan | null;
+  lastJob?: Pick<LastJob, 'status' | 'at' | 'changedFiles'> | null;
 };
 
 /** The newest backup made by a translation (recovery copies are not a translation). */
@@ -36,9 +39,13 @@ export function landingSummary(input: LandingInput): LandingSummary {
   const backup = latestTranslationBackup(input.backups);
   const backupAt = backup ? Date.parse(backup.createdAt) : 0;
   return {
-    scan: input.scan ? { at: input.scanAt > 0 ? input.scanAt : 0, count: input.scan.candidateCount } : null,
+    scan: input.scan
+      ? { at: input.scanAt > 0 ? input.scanAt : 0, count: input.scan.candidateCount }
+      : input.lastScan ? { at: input.lastScan.at > 0 ? input.lastScan.at * 1000 : 0, count: input.lastScan.candidateCount } : null,
     translation: input.result
       ? { kind: 'result', status: input.result.status, at: input.resultAt > 0 ? input.resultAt : 0, files: input.result.changedFileCount ?? 0 }
+      : input.lastJob
+        ? { kind: 'result', status: input.lastJob.status, at: input.lastJob.at > 0 ? input.lastJob.at * 1000 : 0, files: input.lastJob.changedFiles ?? 0 }
       : backup
         ? { kind: 'backup', at: Number.isFinite(backupAt) ? backupAt : 0, files: backup.fileCount }
         : null,

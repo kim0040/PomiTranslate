@@ -24,6 +24,7 @@ from typing import Any
 from env_utils import load_dotenv_chain
 from llm_backends import (
     LLMProviderClient,
+    _current_accounting,
     ModelCatalogError,
     PROVIDER_SPECS,
     ProviderError,
@@ -54,7 +55,7 @@ from mwt.coverage import (
     level_data_versions,
 )
 from mwt.durable import CommittedWriteError, atomic_write_bytes, atomic_write_text, fsync_dir, fsync_fd, replace as durable_replace
-from mwt.extract import TextExtractionMixin, TextRef
+from mwt.extract import TextExtractionMixin, TextRef, match_wrapping_quotes
 from mwt.locking import object_identity
 from mwt.journal import (
     JOURNAL_NAME,
@@ -236,8 +237,24 @@ class TranslationCancelled(RuntimeError):
 # A language file is a few hundred KiB at most. Larger members are left untouched and reported.
 MAX_LANG_MEMBER_BYTES = 32 * 1024 * 1024
 # Result keys of a file step that mean "this file is not translated and no write was made".
-UNWRITABLE_SKIPS = {"unsupported_compression", "region_layout_unsafe"}
+UNWRITABLE_SKIPS = {"unsupported_compression", "region_layout_unsafe", "nonstandard_region_name"}
 
+
+class BudgetStopped(TranslationCancelled):
+    """The run's spending reached the user's cap. Finished batches stay in the checkpoint."""
+
+    def __init__(self, spent: float, cap: float) -> None:
+        super().__init__(f"Spending reached the cap of ${cap:g} (${spent:.4f} so far).")
+        self.spent = spent
+        self.cap = cap
+
+def _clip(text: Any, limit: int = 200) -> str:
+    text = str(text or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+def failure_code_for_stop(code: str) -> str:
+    """The failure code for a provider error code that stopped the whole run."""
+    return _PROVIDER_CODE_FAILURES.get(str(code or ""), "unknown")
 
 def merge_nested(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(base)
@@ -339,7 +356,7 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
     if args.no_backup:
         # Accepted for old scripts, ignored: a world write without a backup set cannot be recovered.
         print("Notice: --no-backup is ignored. World writes always make a verified backup first.", file=sys.stderr)
-        result["backup"] = False
+        result["backup"] = True
     if args.resource_pack_zip:
         result["resource_pack"]["zip_paths"] = args.resource_pack_zip
         result["runtime"]["authorized_external_pack_paths"] = args.resource_pack_zip
@@ -437,7 +454,7 @@ def normalize_config(config: dict[str, Any], config_path: Path | None) -> dict[s
     result["api"]["base_url"] = resolve_base_url(provider, result["api"]["base_url"])
     result["api"]["model"] = resolve_model(provider, result["api"]["model"])
 
-    result["api"]["api_key"] = resolve_api_key(provider, result["api"]["api_key"])
+    result["api"]["api_key"] = resolve_api_key(provider, result["api"]["api_key"], base_url=result["api"]["base_url"])
 
     world_dir_raw = str(result["world_dir"]).strip()
     if world_dir_raw:
@@ -606,7 +623,11 @@ def classify_failure(exc: BaseException) -> str:
         return {"rate_limit": "rate_limit", "rejected": "bad_request"}.get(kind, "provider_unavailable")
     if isinstance(exc, TimeoutError):
         return "timeout"
-    if "incomplete translation json" in message or isinstance(exc, json.JSONDecodeError):
+    if isinstance(exc, OSError):
+        return "provider_unavailable"
+    if any(word in message for word in ("content_filter", "finish reason safety", "content filtered")):
+        return "bad_request"
+    if any(hint in message for hint in ("invalid json", "incomplete translation json", "format tokens", "format-token", "no text", "no candidates")) or isinstance(exc, json.JSONDecodeError):
         return "format_mismatch"
     return "other"
 
@@ -629,6 +650,37 @@ FAILURE_MESSAGES = {
 
 def public_failure_message(failure: str) -> str:
     return FAILURE_MESSAGES.get(failure, FAILURE_MESSAGES["other"])
+
+# Failure codes for a reply that arrived but could not be used. The first such reply for a batch
+# counts toward the circuit breaker; retries of the same batch do not.
+_MALFORMED_FAILURES = {"invalid_response", "content_filter"}
+
+# Providers whose replies carry what each request cost, so a cost cap holds without a price list.
+COST_REPORTING_PROVIDERS = frozenset({"openrouter"})
+COST_CAP_UNPRICED = "COST_CAP_UNPRICED"
+COST_CAP_UNPRICED_MESSAGE = (
+    "A cost cap is set, but the cost of this model cannot be measured: there is no published or "
+    "saved price for it, and the provider does not report what each request cost."
+)
+
+
+def cost_cap_state(provider: Any, max_cost_usd: Any, price: Any) -> str:
+    """"off" without a cap, "enforced" when spending can be measured, "unpriced" when it cannot."""
+    try:
+        cap = float(max_cost_usd or 0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if not math.isfinite(cap) or cap <= 0:
+        return "off"
+    if isinstance(price, dict):
+        try:
+            if all(math.isfinite(float(price[key])) and float(price[key]) >= 0 for key in ("input", "output")):
+                return "enforced"
+        except (KeyError, TypeError, ValueError):
+            pass
+    if str(provider or "").strip().lower() in COST_REPORTING_PROVIDERS:
+        return "enforced"
+    return "unpriced"
 
 
 class ProviderUnavailable(RuntimeError):
@@ -767,12 +819,28 @@ class BatchTranslator:
         # The client looks at this before every request and while it waits for another batch, so a cancelled
         # or given-up job sends nothing more.
         self.client = LLMProviderClient(config)
+        # The totals the spending cap reads. Pool threads of this job see the job's own object here; the class-level
+        # ``LLMProviderClient.usage`` would resolve to the calling thread's (empty) totals.
+        self._accounting = getattr(self.client, "accounting", None) or _current_accounting()  # a stand-in client has none
         self.client.stop_guard = self._should_stop
+        self._request_budget = threading.local()
+        self.client.request_guard = self._charge_transport_request
         self.rpm_limit = int(config["api"].get("rpm_limit", 0))
         self.tpm_limit = int(config["api"].get("tpm_limit", 0))
         self.last_request_time = 0.0
         self.failed: dict[str, str] = {}
         self.failed_codes: dict[str, str] = {}
+
+        runtime = config.get("runtime") or {}
+        # An explicit list wins, an empty one included: the caller decided that no rule applies.
+        if "glossary_entries" in runtime:
+            self.glossary_entries = list(runtime["glossary_entries"] or [])
+        else:
+            self.glossary_entries = list(self.glossary.entries)
+        self.glossary = Glossary(self.glossary_entries)
+        self.glossary_mismatches: set[str] = set(runtime.get("initial_glossary_mismatches") or [])
+        self.max_cost_usd = max(0.0, float(runtime.get("max_cost_usd") or 0))
+        self.price = runtime.get("price") if isinstance(runtime.get("price"), dict) else None
         self.consecutive_failures = 0
         self.consecutive_rejections = 0
         self.sleep = time.sleep
@@ -869,6 +937,32 @@ class BatchTranslator:
             prompt = f"{prompt}\n\n[재시도 안내]\n" + "\n".join(f"- {hint}" for hint in hints)
         return prompt
 
+    def spent_usd(self) -> float | None:
+        """Cost of this run so far: what the provider reported, else tokens at the model's list price."""
+        usage = dict(self._accounting.usage)
+        if usage.get("cost_reported"):
+            return float(usage.get("cost") or 0)
+        price = self.price
+        if price:
+            return (
+                float(usage.get("prompt_tokens") or 0) * float(price.get("input") or 0)
+                + float(usage.get("completion_tokens") or 0) * float(price.get("output") or 0)
+            )
+        return None
+
+    def _check_budget(self) -> None:
+        if self.max_cost_usd <= 0:
+            return
+        spent = self.spent_usd()
+        if spent is not None and spent >= self.max_cost_usd:
+            stop = BudgetStopped(spent, self.max_cost_usd)
+            with self._lock:
+                if self._abort is None:
+                    self._abort = stop
+                else:
+                    stop = self._abort if isinstance(self._abort, BudgetStopped) else stop
+            raise stop
+
     def pending(self, texts: list[str]) -> list[str]:
         """Texts that still need a provider call: not cached and not manually overridden.
 
@@ -880,7 +974,7 @@ class BatchTranslator:
                 self.cache[text] = self.overrides[text]
                 with self._lock:
                     self.quality_warnings.pop(text, None)
-        return [text for text in texts if text not in self.cache]
+        return [text for text in texts if text not in self.cache or text in self.failed]
 
     def lookup(self, texts: list[str]) -> dict[str, str]:
         """Cache-only view. It never calls the provider."""
@@ -910,8 +1004,15 @@ class BatchTranslator:
                 for source, target in translated.items()
                 if isinstance(target, str) and target.strip() and target != source
             ][:PROGRESS_SAMPLES]
-            usage = LLMProviderClient.usage
+            usage = self._accounting.usage
             cost = usage.get("cost") if usage.get("cost_reported") else None
+            # A few finished pairs per batch let the screen show what the AI is producing.
+            shown = 0
+            for text in batch:
+                answer = translated.get(text)
+                if isinstance(answer, str) and answer and answer != text and shown < 3:
+                    shown += 1
+                    self.emit("translation_sample", source=_clip(text), translated=_clip(answer))
             self.emit(
                 "translation_progress",
                 completed=done,
@@ -920,10 +1021,11 @@ class BatchTranslator:
                 warnings=self.warning_counts(),
                 batch=number,
                 batches=len(groups),
-                requests=LLMProviderClient.request_count,
+                requests=self._accounting.request_count,
                 samples=samples,
                 cost=cost if isinstance(cost, (int, float)) and math.isfinite(cost) else None,
             )
+            self._check_budget()
 
         workers = min(self.concurrency, len(groups))
         if workers <= 1:
@@ -932,6 +1034,7 @@ class BatchTranslator:
                 finished(number, batch, self._translate_batch(batch, batch_size))
             return self.lookup(texts)
 
+        stopped: BaseException | None = None
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pomi-translate") as pool:
             futures = {pool.submit(self._translate_batch, batch, batch_size): (number, batch) for number, batch in enumerate(groups, start=1)}
             try:
@@ -942,10 +1045,17 @@ class BatchTranslator:
                 self._abort = exc
                 for pending in futures:
                     pending.cancel()
-                raise
+                stopped = exc
+        if stopped is not None:
+            # Batches already in flight when this stopped were paid for; keep their answers.
+            with self._lock:
+                for future in futures:
+                    if future.done() and not future.cancelled() and future.exception() is None:
+                        self.cache.update(future.result())
+            raise stopped
         return self.lookup(texts)
 
-    def _note_failure(self, exc: Exception, *, attempt: int, max_retries: int, batch_size: int) -> float:
+    def _note_failure(self, exc: Exception, *, attempt: int, max_retries: int, batch_size: int, count_malformed: bool = True) -> float:
         """Record one failed request and return how long to wait before the next try.
 
         The decision comes from the failure's kind (see ``failure_kind``): fatal kinds stop the job,
@@ -957,7 +1067,7 @@ class BatchTranslator:
         code = getattr(exc, "code", "REQUEST_FAILED")
         failure = classify_failure(exc)
         with self._lock:
-            if kind in RETRY_KINDS:
+            if kind in RETRY_KINDS or (count_malformed and (classify_failure(exc) == "format_mismatch" or kind == "filtered")):
                 self.consecutive_failures += 1
             if kind == "rejected":
                 self.consecutive_rejections += 1
@@ -1008,10 +1118,24 @@ class BatchTranslator:
 
         return bounded_public_text(str(exc), str(self.config["api"].get("api_key") or ""), 500)
 
-    @staticmethod
-    def _charge_extra_requests(budget: dict[str, Any], requests_before: int) -> None:
+    def _charge_transport_request(self) -> None:
+        """Charge adaptation POSTs before sending, within the current thread's original batch cap."""
+        active = getattr(self._request_budget, "active", None)
+        if active is None:
+            return
+        budget = active["budget"]
+        if active["sent"]:
+            if budget["left"] <= 0:
+                raise RuntimeError("The request limit for this batch was reached.")
+            budget["left"] -= 1
+        active["sent"] += 1  # the first POST was reserved by the batch/quality caller
+
+    def _charge_extra_requests(self, budget: dict[str, Any], requests_before: int) -> None:
         """Requests the client made beyond the one already counted (parameter adaptation retries)."""
-        made = LLMProviderClient.request_count - requests_before
+        active = getattr(self._request_budget, "active", None)
+        if active is not None and active["sent"]:
+            return  # real transport requests have already been charged before sending
+        made = self._accounting.request_count - requests_before
         if made > 1:
             budget["left"] -= made - 1
 
@@ -1069,8 +1193,10 @@ class BatchTranslator:
         if budget["left"] <= 0:
             return None
         self.ensure_not_cancelled()
+        self._check_budget()
         budget["left"] -= 1
-        requests_before = LLMProviderClient.request_count
+        self._request_budget.active = {"budget": budget, "sent": 0}
+        requests_before = self._accounting.request_count
         try:
             self.throttle(1)
             self.ensure_not_cancelled()
@@ -1098,6 +1224,8 @@ class BatchTranslator:
             self.consecutive_failures = 0
             self.consecutive_rejections = 0
         answer = parsed.get("0")
+        if isinstance(answer, str):
+            answer = match_wrapping_quotes(text, answer)
         return answer if isinstance(answer, str) and answer.strip() else None
 
     def _review_answers(self, texts: list[str], answered: dict[str, str], budget: dict[str, Any]) -> dict[str, str]:
@@ -1128,7 +1256,10 @@ class BatchTranslator:
                 terms = [entry for entry in matching if id(entry) in shown]
                 issues, _usable = self._quality_issues(text, candidate, terms)
                 if issues:
-                    retried = self._retry_once(text, self._retry_hints(issues, terms), budget)
+                    try:
+                        retried = self._retry_once(text, self._retry_hints(issues, terms), budget)
+                    except BudgetStopped:
+                        retried = None  # keep the paid first answer; finished() records it before stopping
                     if retried is not None:
                         fresh, usable = self._quality_issues(text, retried, terms)
                         if usable and len(fresh) < len(issues):
@@ -1201,15 +1332,19 @@ class BatchTranslator:
     def _translate_batch(self, texts: list[str], batch_size: int, budget: dict[str, Any] | None = None) -> dict[str, str]:
         payload = {str(i): text for i, text in enumerate(texts)}
         max_retries = max(1, int(self.config["runtime"]["max_batch_retries"]))
+        if budget is not None:
+            max_retries = min(max_retries, 2)
         if budget is None:
             # Everything one original batch may spend, retries and splits together.
-            budget = {"left": 2 * len(texts) + max_retries, "error": "", "code": "other"}
+            budget = {"left": len(texts) + max_retries, "error": "", "code": "other"}
         for attempt in range(1, max_retries + 1):
             if budget["left"] <= 0:
                 break
             self.ensure_not_cancelled()
+            self._check_budget()
             budget["left"] -= 1
-            requests_before = LLMProviderClient.request_count
+            self._request_budget.active = {"budget": budget, "sent": 0}
+            requests_before = self._accounting.request_count
             try:
                 self.throttle(len(texts))
                 # The breaker may have tripped while this worker waited for the shared throttle.
@@ -1226,8 +1361,11 @@ class BatchTranslator:
                 with self._lock:
                     self.consecutive_failures = 0
                     self.consecutive_rejections = 0
+                    for text in texts:
+                        self.failed.pop(text, None)
+                        self.failed_codes.pop(text, None)
                 answered = {
-                    text: parsed.get(str(i), text)
+                    text: match_wrapping_quotes(text, parsed.get(str(i), text))
                     for i, text in enumerate(texts)
                 }
                 # On disk before anything else can fail: this answer was paid for.
@@ -1247,14 +1385,27 @@ class BatchTranslator:
                 # Raw provider text goes to the report file (through the failed-strings table), never to progress events.
                 budget["error"] = self._raw_failure_text(exc)
                 budget["code"] = classify_failure(exc)
-                delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts))
+                malformed = classify_failure(exc) == "format_mismatch" or failure_kind(exc) == "filtered"
+                try:
+                    delay = self._note_failure(exc, attempt=attempt, max_retries=max_retries, batch_size=len(texts),
+                                               count_malformed=malformed and not budget.get("malformed_counted", False))
+                except ProviderUnavailable:
+                    with self._lock:
+                        for text in texts:
+                            self.failed[text] = budget["error"]
+                            self.failed_codes[text] = budget["code"]
+                    raise
+                if malformed:
+                    budget["malformed_counted"] = True
+                if failure_kind(exc) in {"too_large", "filtered"}:
+                    budget["split_singletons"] = True
                 if failure_kind(exc) in SPLIT_NOW_KINDS:
                     break  # the same request would fail the same way; a smaller one may not
                 if attempt < max_retries and budget["left"] > 0:
                     self.wait(delay)
 
         if len(texts) > 1 and budget["left"] > 0:
-            next_size = max(1, len(texts) // 5)
+            next_size = 1 if budget.get("split_singletons") else max(1, len(texts) // 5)
             merged: dict[str, str] = {}
             for i in range(0, len(texts), next_size):
                 self.ensure_not_cancelled()
@@ -1277,9 +1428,19 @@ class WorldTranslator(TextExtractionMixin):
         progress_callback: Any = None,
         cancel_check: Any = None,
     ) -> None:
-        self.config = config
+        self.config = dict(config)
         self.scan_config = config["scan"]
-        self.runtime_config = config["runtime"]
+        self.runtime_config = dict(config["runtime"])
+        self.config["runtime"] = self.runtime_config
+        from mwt.glossary import entries_hash
+
+        if "glossary_entries" in self.runtime_config:
+            glossary_entries = list(self.runtime_config.get("glossary_entries") or [])
+        else:
+            glossary_entries = list((config.get("glossary") or {}).get("entries") or [])
+        self.runtime_config["glossary_entries"] = glossary_entries
+        self.runtime_config["glossary_hash"] = entries_hash(glossary_entries)
+        self._recovery = None
         self.external_pack_inputs: dict[str, str] = {}
         self.external_pack_parents: dict[str, str] = {}
         self.component_prefixes = tuple(self.scan_config["component_translate_key_prefixes"])
@@ -1297,7 +1458,8 @@ class WorldTranslator(TextExtractionMixin):
         self._log_recovered: dict[str, str] = {}
         self._log_quality: dict[str, list[dict[str, Any]]] = {}
         self._log_selection: dict[str, list[str]] = {}
-        self.glossary_fingerprint = Glossary((config.get("glossary") or {}).get("entries")).fingerprint
+        self.glossary_fingerprint = Glossary(glossary_entries).fingerprint
+        self._row_hash_cache: dict[str, str] = {}  # text -> glossary row hash, for this run's one glossary
         self.candidate_texts: set[str] = set()
         self.file_errors: list[dict[str, Any]] = []
         self._candidate_order: dict[str, None] = {}
@@ -1308,6 +1470,15 @@ class WorldTranslator(TextExtractionMixin):
         self.coverage = ChunkCoverage()
         self._level_versions: list[dict[str, Any]] | None = None
         self._detected_unsupported: dict[str, int] = {}
+
+        # Desktop review flow: the user's edits to translations, the usage of earlier runs of this
+        # job, and the write that already happened (so a later correction can restore it first).
+        self.edits: dict[str, str] = {}
+        self.prior_usage: dict[str, Any] = {}
+        self.applied: dict[str, Any] | None = None
+        self.stop_code: str = ""
+        self._adopted_failures: dict[str, Any] = {}
+        self._adopted_glossary_mismatches: set[str] = set()
         self._run_backup = None
         self._backup_published = False
         self._write_lock = None
@@ -1343,6 +1514,7 @@ class WorldTranslator(TextExtractionMixin):
             "resource_packs": [],
             "errors": [],
             "warnings": [],
+            "price_source": (self.runtime_config.get("price") or {}).get("source"),
         }
         self.batch_log = (
             BatchLog(BatchLog.path_for(self.checkpoint_path))
@@ -1352,9 +1524,21 @@ class WorldTranslator(TextExtractionMixin):
         self.load_checkpoint()
         if self.batch_log is not None and not self.checkpoint_loaded:
             self.batch_log.clear()  # answers of a run this one does not continue
+
+        adopted = self.runtime_config.get("adopt_checkpoint")
+        if not self.checkpoint_loaded and isinstance(adopted, dict):
+            self.adopt_checkpoint(adopted, keep_report=bool(self.runtime_config.get("adopt_report")))
+        for source, text in (self.runtime_config.get("edits") or {}).items():
+            # An edit equal to the saved translation, or null, takes the string back to the AI's answer.
+            if text is None or text == self.translation_cache.get(source):
+                self.edits.pop(source, None)
+            else:
+                self.edits[source] = text
         self.translator = None if config["dry_run"] else BatchTranslator(
-            config,
-            progress_callback=self.emit,
+            self.config,
+            progress_callback=lambda event: self.emit(
+                event["event"], **{key: value for key, value in event.items() if key != "event"}
+            ),
             cancel_check=self.is_cancelled,
             initial_cache=self.translation_cache,
             initial_warnings=self.quality_warnings,
@@ -1363,6 +1547,12 @@ class WorldTranslator(TextExtractionMixin):
             self.translator.sink = self._batch_sink
             if self._log_recovered:
                 self.translator.restore_quality(self._log_recovered, self._log_quality, self._log_selection)
+
+            for text, info in self._adopted_failures.items():
+                if isinstance(info, dict):
+                    self.translator.failed[text] = str(info.get("detail") or "")
+                    self.translator.failed_codes[text] = str(info.get("reason") or "unknown")
+            self.translator.glossary_mismatches.update(self._adopted_glossary_mismatches)
 
     def emit(self, event: str, **payload: Any) -> None:
         if self.progress_callback is not None:
@@ -1430,6 +1620,7 @@ class WorldTranslator(TextExtractionMixin):
 
     def checkpoint_payload(self) -> dict[str, Any]:
         self.refresh_report_counts()
+        from mwt.glossary import row_hashes
         return {
             "version": 2,
             "world_dir": self.config["world_dir"],
@@ -1443,6 +1634,9 @@ class WorldTranslator(TextExtractionMixin):
             "resume": {
                 "scan_plan_id": str(self.runtime_config.get("scan_plan_id") or ""),
                 "translation_settings_fingerprint": str(self.runtime_config.get("translation_settings_fingerprint") or ""),
+                "glossary_hash": self.runtime_config["glossary_hash"],
+                "glossary_row_hashes": row_hashes(
+                    list(self.candidate_texts), self.runtime_config["glossary_entries"], cache=self._row_hash_cache),
                 "expected_world_fingerprint": str(self.runtime_config.get("expected_world_fingerprint") or ""),
                 "excluded_candidate_ids": list(self.runtime_config.get("excluded_candidate_ids") or []),
                 "manual_overrides": dict(self.scan_config.get("overrides") or {}),
@@ -1458,7 +1652,59 @@ class WorldTranslator(TextExtractionMixin):
             "quality_warnings": dict(self.translator.quality_warnings if self.translator is not None else self.quality_warnings),
             "candidate_texts": sorted(self.candidate_texts),
             "report": self.report,
+            # Additive fields (older checkpoints lack them and still resume): why strings failed,
+            # the user's edits, what every run of this job cost, and the write that was applied.
+            "failures": self.failure_info(),
+            "edits": dict(self.edits),
+            "usage_total": self.usage_total(),
+            "stop_code": self.stop_code,
+            "applied": self.applied,
+            "glossary_refreshed": bool(self.runtime_config.get("glossary_refreshed")),
             "saved_at": time.time(),
+        }
+
+    def adopt_checkpoint(self, checkpoint: dict[str, Any], *, keep_report: bool = False) -> None:
+        """Take over a saved job's translations without the resume checks.
+
+        Applying or retrying a reviewed job must not depend on the settings fingerprint (the user's
+        edits change it) or on the world still matching the checkpoint (an applied job's world has
+        changed on purpose). The caller has already checked what matters for its own request.
+        """
+        self.translation_cache = dict(checkpoint.get("translation_cache") or {})
+        self.candidate_texts = set(checkpoint.get("candidate_texts") or [])
+        self.prior_usage = dict(checkpoint.get("usage_total") or {})
+        self.edits = {k: v for k, v in dict(checkpoint.get("edits") or {}).items() if isinstance(v, str)}
+        self.applied = checkpoint.get("applied") or None
+        self.stop_code = str(checkpoint.get("stop_code") or "")
+        self._adopted_failures = dict(checkpoint.get("failures") or {})
+        mismatch_rows = ((checkpoint.get("report") or {}).get("glossary_mismatches") or [])
+        self._adopted_glossary_mismatches = {
+            str(row.get("source")) for row in mismatch_rows if isinstance(row, dict) and isinstance(row.get("source"), str)
+        }
+        if keep_report and isinstance(checkpoint.get("report"), dict):
+            self.report.update(checkpoint["report"])
+            self.completed_region_files = set(checkpoint.get("completed_region_files") or [])
+            self.completed_resource_pack_paths = set(checkpoint.get("completed_resource_pack_paths") or [])
+
+    def failure_info(self) -> dict[str, dict[str, str]]:
+        if self.translator is None:
+            return {}
+        return {
+            text: {"reason": self.translator.failed_codes.get(text, "unknown"), "detail": str(detail)[:300]}
+            for text, detail in self.translator.failed.items()
+        }
+
+    def usage_total(self) -> dict[str, Any]:
+        """Usage of every run of this job: earlier runs from the checkpoint plus the current one."""
+        current = dict(LLMProviderClient.usage)
+        prior = self.prior_usage
+        return {
+            "prompt_tokens": int(prior.get("prompt_tokens") or 0) + int(current.get("prompt_tokens") or 0),
+            "completion_tokens": int(prior.get("completion_tokens") or 0) + int(current.get("completion_tokens") or 0),
+            "cost": float(prior.get("cost") or 0) + float(current.get("cost") or 0),
+            "cost_reported": bool(prior.get("cost_reported") or current.get("cost_reported")),
+            # Requests of the whole job too, so a result never pairs one call's count with the job's cost.
+            "requests": int(prior.get("requests") or 0) + int(LLMProviderClient.request_count),
         }
 
     def load_checkpoint(self) -> None:
@@ -1489,6 +1735,15 @@ class WorldTranslator(TextExtractionMixin):
         self.translation_cache = dict(checkpoint.get("translation_cache", {}))
         self.quality_warnings = self._saved_quality_warnings(checkpoint.get("quality_warnings"))
         self.candidate_texts = set(checkpoint.get("candidate_texts", []))
+        self.prior_usage = dict(checkpoint.get("usage_total") or {})
+        self.edits = dict(checkpoint.get("edits") or {})
+        self.applied = checkpoint.get("applied") or None
+        self.stop_code = str(checkpoint.get("stop_code") or "")
+        self._adopted_failures = dict(checkpoint.get("failures") or {})
+        mismatch_rows = ((checkpoint.get("report") or {}).get("glossary_mismatches") or [])
+        self._adopted_glossary_mismatches = {
+            str(row.get("source")) for row in mismatch_rows if isinstance(row, dict) and isinstance(row.get("source"), str)
+        }
         saved_report = checkpoint.get("report")
         if isinstance(saved_report, dict):
             self.report.update(saved_report)
@@ -1635,6 +1890,8 @@ class WorldTranslator(TextExtractionMixin):
 
         try:
             from mwt.layout import detect_write_blockers
+            if self._refuse_unpriced_cost_cap():
+                return self.report
             from mwt.locking import (
                 MinecraftSessionLocks,
                 MinecraftWorldInUse,
@@ -1803,12 +2060,20 @@ class WorldTranslator(TextExtractionMixin):
             )
             # A first checkpoint before any request is paid for, so a crash can be resumed from the answer log.
             self.save_checkpoint()
-            try:
-                self.translator.translate_texts(ordered)
-            except ProviderUnavailable as exc:
-                return self._stop_before_write(ordered, exc)
-            self.final_translations = self._guard_translations(ordered, self.translator.cache)
+            if self.runtime_config.get("apply_only"):
+                resolved = self._resolve_for_apply(ordered)
+            else:
+                try:
+                    self.translator.translate_texts(ordered)
+                except BudgetStopped as exc:
+                    return self._stop_before_write(ordered, None, budget=exc)
+                except ProviderUnavailable as exc:
+                    return self._stop_before_write(ordered, exc)
+                resolved = self.translator.cache
+            self.final_translations = self._guard_translations(ordered, resolved)
             self.report["translation"] = self._translation_stats(ordered)
+            if self.runtime_config.get("review_before_apply") and not self.runtime_config.get("apply_only"):
+                return self._await_review()
             if self.translator.failed and str(self.runtime_config.get("on_translation_failure") or "stop") != "skip":
                 return self._stop_before_write(ordered, None)
             self.save_checkpoint()
@@ -2034,14 +2299,26 @@ class WorldTranslator(TextExtractionMixin):
         return paths
 
     def _guard_translations(self, texts: list[str], translations: dict[str, str]) -> dict[str, str]:
-        from mwt.tokens import preserve_tokens
+        from mwt.tokens import _without_trailing_reset, preserve_tokens, tokens_preserved
 
         guarded = {}
         for text in texts:
-            translated = preserve_tokens(text, translations.get(text, text))
+            answer = translations.get(text, text)
+            translated = preserve_tokens(text, answer)
+            problem = ""
+            if not isinstance(answer, str) or not answer.strip():
+                problem = "The provider returned an empty or invalid translation."
+            elif not tokens_preserved(text, _without_trailing_reset(text, answer)):
+                problem = "The translation's format tokens differ from the original."
             # NBT stores a string with a 16-bit length. Keep the original rather than fail the file.
             if len(translated.encode("utf-8")) > 30000:
                 translated = text
+                problem = "The translation exceeds the safe NBT string length."
+            if problem and self.translator is not None and self.runtime_config.get("keep_checkpoint"):
+                # Desktop review/retry can correct unusable answers. Legacy CLI still counts
+                # these as kept originals, preserving its single-pass behavior.
+                self.translator.failed[text] = problem
+                self.translator.failed_codes[text] = "format_mismatch"
             guarded[text] = translated
         return guarded
 
@@ -2063,6 +2340,62 @@ class WorldTranslator(TextExtractionMixin):
                 self.digest_cache.forget(path)
         if last_error is not None:
             raise last_error
+    def _reapply_recovery(self) -> Any:
+        set_id = str(self.runtime_config.get("recovery_backup_set_id") or "")
+        if not set_id:
+            return None
+        if self._recovery is None:
+            from mwt.safety import BackupSet
+
+            self._recovery = BackupSet.open_existing(
+                Path(self.config["world_dir"]).resolve(), set_id, self._backup_store(),
+                external_files=self._external_backup_files(),
+            )
+        return self._recovery
+
+    def _keep_for_recovery(self, existing: list[Path], created: list[Path] | None = None) -> None:
+        """Reapply: before a file is written, its applied bytes (or its absence) join the recovery set.
+
+        The recovery set already holds every file the earlier apply wrote. A file it does not hold
+        was not changed by that apply, so its current bytes are the applied state.
+        """
+        recovery = self._reapply_recovery()
+        if recovery is None:
+            return
+        recovery.add_many(existing)
+        recovery.record_new_external_chunks([path for path in created or [] if not path.exists()])
+        recovery.verify()
+
+    def _recovery_written(self, paths: list[Path]) -> None:
+        if self._recovery is not None:
+            self._recovery.mark_written(paths)
+
+    def _stamp_cost_cap(self) -> str:
+        """Record in the report whether a cost cap holds for this run's provider requests."""
+        # Apply-only runs and manual-only starts (skip_provider_validation) send no request.
+        sends = (
+            not self.config["dry_run"] and self.translator is not None
+            and not self.runtime_config.get("apply_only") and not self.runtime_config.get("skip_provider_validation")
+        )
+        state = cost_cap_state(
+            self.config["api"]["provider"], self.runtime_config.get("max_cost_usd"), self.runtime_config.get("price"),
+        ) if sends else "off"
+        if state == "off":
+            self.report.pop("cost_cap_enforced", None)
+        else:
+            self.report["cost_cap_enforced"] = state == "enforced"
+        return state
+
+    def _refuse_unpriced_cost_cap(self) -> bool:
+        """Stop before any provider request when a cap is set that cannot be measured, unless allowed."""
+        if self._stamp_cost_cap() != "unpriced" or self.runtime_config.get("unpriced_cost_cap_ack"):
+            return False
+        self.report["status"] = "failed"
+        self.report["error"] = COST_CAP_UNPRICED_MESSAGE
+        self.report["errors"].append({"scope": "budget", "code": COST_CAP_UNPRICED, "message": COST_CAP_UNPRICED_MESSAGE})
+        self.refresh_report_counts()
+        self.write_report()
+        return True
 
     def _backup_store(self) -> Path | None:
         """The configured backup folder, or ``None`` for the legacy folder inside the world."""
@@ -2086,7 +2419,7 @@ class WorldTranslator(TextExtractionMixin):
     def _run_file_step(self, step: Any, file_path: Path) -> dict[str, Any]:
         try:
             return step(file_path)
-        except (TranslationCancelled, ProviderUnavailable):
+        except (TranslationCancelled, ProviderUnavailable, PlanInvalidated):
             raise
         except Exception as exc:
             result = self._file_error_result(file_path, exc)
@@ -2203,6 +2536,11 @@ class WorldTranslator(TextExtractionMixin):
 
     def collect_region_file(self, path: Path) -> dict[str, Any]:
         """Find translatable text in one region file. Never calls the provider or writes."""
+        from mwt.region import is_standard_region_name
+        if not is_standard_region_name(path):
+            self._coverage_file(path, FILE_NOT_INSPECTED)
+            self._warn("file_unwritable", file=self._relative(path), reason="nonstandard_region_name")
+            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "nonstandard_region_name"}
         region, early = self._open_region(path)
         record = self._coverage_file(
             path, FILE_UNREADABLE if early is not None and early.get("skipped") == "parse_error" else FILE_SCANNED
@@ -2287,7 +2625,8 @@ class WorldTranslator(TextExtractionMixin):
             stores, _own = self._world_stores(world_dir)
             self._journal = Journal.load(path) if path.is_file() else Journal.create(
                 path, job_id=backup.backup_id, kind="translate", world_dir=world_dir, stores=stores,
-                supersedes=self._resume_job_id if self._resume_old_path is not None else "")
+                supersedes=self._resume_job_id if self._resume_old_path is not None else "",
+                parent_job_id=str(self.runtime_config.get("recovery_backup_set_id") or ""))
         return self._journal, backup
 
     def _acquire_target_locks(self) -> None:
@@ -2420,6 +2759,10 @@ class WorldTranslator(TextExtractionMixin):
             raise
         self.report["backup_set_id"] = backup.backup_id
         self.report["job_id"] = backup.backup_id
+        if self.runtime_config.get("recovery_backup_set_id"):
+            targets = [target.path for unit in units for target in unit.targets]
+            self._keep_for_recovery([path for path in targets if path.is_file()],
+                                    [path for path in targets if not path.exists()])
         transaction = WriteTransaction(
             journal, backup, Path(self.config["world_dir"]).resolve(), retries=1,
             write_bytes=self._write_world_bytes, should_stop=self.is_cancelled,
@@ -2429,6 +2772,8 @@ class WorldTranslator(TextExtractionMixin):
             outcome = transaction.run(units, stop_on_error=stop_on_error, on_unit_done=on_unit_done)
         finally:
             self._backup_published = True
+        if self._recovery is not None:
+            self._recovery_written([path for result in outcome.units for path in result.written])
         self.report["write_state"] = outcome.state
         unknown = [str(path) for result in outcome.units for path in result.unknown]
         if unknown:
@@ -2583,7 +2928,10 @@ class WorldTranslator(TextExtractionMixin):
 
     def _plan_region_file(self, path: Path) -> tuple[dict[str, Any], UnitSpec | None]:
         """Work out the new bytes of one region file (and its ``.mcc`` payloads) without writing any."""
-        from mwt.region import external_chunk_path
+        from mwt.region import external_chunk_path, is_standard_region_name
+
+        if not is_standard_region_name(path):
+            return {"file": str(path), "changed_chunks": 0, "unique_texts": 0, "candidates": 0, "skipped": "nonstandard_region_name"}, None
 
         region, early = self._open_region(path)
         if early is not None:
@@ -2664,9 +3012,91 @@ class WorldTranslator(TextExtractionMixin):
             raise self._unit_failure(unit_result, path.name)
         return result
 
-    def _translation_stats(self, ordered: list[str]) -> dict[str, Any]:
+    def retry_failed(self, ordered: list[str], sources: list[str]) -> dict[str, Any]:
+        """Send only ``sources`` to the provider again. Reads and writes no world file."""
+        LLMProviderClient.reset_counters()
+        if self._refuse_unpriced_cost_cap():
+            return self.report
+        translator = self.translator
+        for text in sources:
+            translator.cache.pop(text, None)
+            translator.failed.pop(text, None)
+            translator.failed_codes.pop(text, None)
+            translator.glossary_mismatches.discard(text)
+        batch_size = max(1, int(self.config["batch_size"]))
+        self.emit(
+            "phase_start",
+            phase="translate",
+            total=len(sources),
+            batch_size=batch_size,
+            requests_estimate=math.ceil(len(translator.pending(sources)) / batch_size),
+        )
+        status = "awaiting_review"
+        self.stop_code = ""
+        self.report["errors"] = [item for item in self.report.get("errors", [])
+                                 if item.get("scope") not in {"provider", "translation", "budget"}]
+        try:
+            translator.translate_texts(sources)
+        except BudgetStopped as exc:
+            status = "budget_stopped"
+            self.report.setdefault("errors", []).append({"scope": "budget", "code": "BUDGET_EXCEEDED", "message": str(exc)[:400]})
+        except ProviderUnavailable as exc:
+            status = "failed" if exc.fatal else "needs_retry"
+            self.stop_code = exc.code
+            self.report.setdefault("errors", []).append({"scope": "provider", "code": exc.code, "message": str(exc)[:400]})
+        except TranslationCancelled:
+            status = "cancelled"
+        resolved = self._resolve_for_apply(ordered, record_pending=False)
+        self.final_translations = self._guard_translations(ordered, resolved)
+        self.report["translation"] = self._translation_stats(ordered, resolved)
+        self.report["status"] = status
+        self.report["provider_requests"] = LLMProviderClient.request_count
+        self.report["usage"] = dict(LLMProviderClient.usage)
+        self.write_report()
+        self.save_checkpoint()
+        self.emit("awaiting_review" if status == "awaiting_review" else "translation_stopped", status=status)
+        return self.report
+
+    def _resolve_for_apply(self, ordered: list[str], record_pending: bool = True) -> dict[str, str]:
+        """What to write for every candidate, without the provider: edit, then manual override, then
+        the saved translation. A string with none of these is recorded as failed and stays as it is."""
+        translator = self.translator
+        resolved: dict[str, str] = {}
+        for text in ordered:
+            if text in self.edits:
+                resolved[text] = self.edits[text]
+            elif text in translator.overrides:
+                resolved[text] = translator.overrides[text]
+            elif text in translator.cache and text not in translator.failed:
+                resolved[text] = translator.cache[text]
+            elif record_pending:
+                translator.failed.setdefault(text, "Not translated yet.")
+                translator.failed_codes.setdefault(text, failure_code_for_stop(self.stop_code) if self.stop_code else "unknown")
+        for text in list(translator.failed):
+            if text in self.edits or text in translator.overrides:
+                translator.failed.pop(text, None)
+                translator.failed_codes.pop(text, None)
+        return resolved
+
+    def _await_review(self) -> dict[str, Any]:
+        """Translation is done and saved; nothing was written. The user reviews before anything is."""
+        self.refresh_report_counts()
+        self.report["status"] = "awaiting_review"
+        self.report["provider_requests"] = LLMProviderClient.request_count
+        self.report["usage"] = dict(LLMProviderClient.usage)
+        self.write_report()
+        self.save_checkpoint()
+        self.emit(
+            "awaiting_review",
+            candidate_text_count=self.report.get("candidate_text_count", 0),
+            failed=len(self.translator.failed),
+        )
+        self.release_write_lock()
+        return self.report
+
+    def _translation_stats(self, ordered: list[str], resolved: dict[str, str] | None = None) -> dict[str, Any]:
         failed = set(self.translator.failed)
-        cache = self.translator.cache
+        cache = resolved if resolved is not None else self.translator.cache
         translated = kept = unchanged = 0
         kept_samples: list[str] = []
         for text in ordered:
@@ -2697,10 +3127,18 @@ class WorldTranslator(TextExtractionMixin):
             codes[code] = codes.get(code, 0) + 1
         self.report["translation_failure_codes"] = codes
         self._report_quality_warnings(ordered)
+        from mwt.glossary import output_matches
+        mismatches = [text for text in ordered if text not in failed and text in cache
+                      and not output_matches(text, self.final_translations.get(text, cache[text]), self.translator.glossary_entries)]
+        self.translator.glossary_mismatches = set(mismatches)
+        self.report["glossary_mismatch_count"] = len(mismatches)
+        self.report["glossary_mismatches"] = [{"source": text, "reason": "glossary_mismatch"} for text in mismatches]
+        pending = sum(text not in failed and text not in cache for text in ordered)
         return {
             "unique": len(ordered),
             "translated": translated,
             "failed": len(failed),
+            "pending": pending,
             "kept_original": kept,
             "unchanged": unchanged,
         }
@@ -2767,11 +3205,20 @@ class WorldTranslator(TextExtractionMixin):
             except Exception as exc:
                 self._warn("resume_job_not_closed", message=type(exc).__name__)
         self.write_report()
-        if status in {"partial", "needs_retry"} and not self.config["dry_run"]:
-            # Only a fully completed job (or an explicit discard) clears its checkpoint. A partial run,
-            # including one whose only problem was a backup that failed verification, stays resumable.
+        if not self.config["dry_run"] and self.runtime_config.get("keep_checkpoint") and status in {"completed", "partial"}:
+            # A run that committed no file discarded its own backup set; it must not replace the record of the
+            # write that is really in the world (Reapply restores that record's backup set).
+            if self.report["changed_file_count"] > 0 or not self.applied:
+                self.applied = {
+                    "backup_set_id": str(self.report.get("backup_set_id") or ""),
+                    "world_fingerprint": world_fingerprint(Path(self.config["world_dir"])),
+                    "at": time.time(),
+                    "external_pack_fingerprints": {str(path.resolve()): file_sha256(path) for path in self._external_backup_files()},
+                }
             self.save_checkpoint()
-        else:
+        elif status in {"partial", "needs_retry"} and not self.config["dry_run"]:
+            self.save_checkpoint()
+        elif not self.runtime_config.get("apply_only"):
             self.clear_checkpoint()
         self._cleanup_staging()
         self.emit(
@@ -2785,12 +3232,21 @@ class WorldTranslator(TextExtractionMixin):
         self.release_write_lock()
         return self.report
 
-    def _stop_before_write(self, ordered: list[str], exc: ProviderUnavailable | None) -> dict[str, Any]:
+    def _stop_before_write(
+        self,
+        ordered: list[str],
+        exc: ProviderUnavailable | None,
+        budget: BudgetStopped | None = None,
+    ) -> dict[str, Any]:
         """Stop with the world untouched. Cached translations stay in the checkpoint for a retry."""
         failed = self.translator.failed
-        if exc is not None:
+        if budget is not None:
+            status = "budget_stopped"
+            entry = {"scope": "budget", "code": "BUDGET_EXCEEDED", "message": str(budget)[:400]}
+        elif exc is not None:
             status = "failed" if exc.fatal else "needs_retry"
             # The raw text stays in the report file; ``failure`` is the structured category progress and results use.
+            self.stop_code = exc.code
             entry = {"scope": "provider", "code": exc.code, "failure": classify_failure(exc),
                      "message": self.translator._raw_failure_text(exc)[:400]}
         else:
@@ -2801,7 +3257,7 @@ class WorldTranslator(TextExtractionMixin):
                 "message": f"{len(failed)} strings could not be translated. Nothing was written to the world.",
             }
         self.report["errors"].append(entry)
-        if exc is not None:
+        if exc is not None or budget is not None:
             self.final_translations = self._guard_translations(ordered, self.translator.cache)
             self.report["translation"] = self._translation_stats(ordered)
         self.refresh_report_counts()
@@ -3135,6 +3591,7 @@ class WorldTranslator(TextExtractionMixin):
 
     def write_report(self) -> None:
         report_path = Path(self.config["report_path"])
+        self.report["job_usage"] = self.usage_total()
         write_text_atomic(
             report_path,
             json.dumps(self.report, ensure_ascii=False, indent=2),
@@ -3194,10 +3651,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Refuse to write if the world data fingerprint differs from this scan fingerprint",
     )
-    parser.add_argument("--restore-backup", action="store_true", help="Restore the verified latest backup")
+    parser.add_argument("--restore-backup", action="store_true", help="Restore the newest verified translation backup")
+    parser.add_argument(
+        "--backup-set-id",
+        default="",
+        help="With --restore-backup: restore this backup set instead, for example the recovery set an earlier restore printed",
+    )
+    parser.add_argument(
+        "--allow-unpriced-cost-cap",
+        action="store_true",
+        help="Run even though runtime.max_cost_usd is set and this model's cost cannot be measured (the cap is then not enforced)",
+    )
     parser.add_argument("--print-notices", action="store_true", help="Print the first-launch safety notice")
     parser.add_argument("--resume", action="store_true", help="Resume from the last saved checkpoint if it exists")
-    parser.add_argument("--no-backup", action="store_true", help="Do not create backup files")
+    parser.add_argument("--no-backup", action="store_true", help="Ignored: files are always backed up before they are written")
     parser.add_argument(
         "--resource-pack-zip",
         action="append",
@@ -3224,6 +3691,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expand a short style brief into a more detailed prompt using the configured provider/model",
     )
     return parser
+
+
+def restore_backup_cli(config: dict, data_dir: Path, backup_id: str = "latest") -> dict:
+    from mwt.safety import BackupError, BackupSet, backup_store, legacy_backup_store, default_restore_backup_id
+    from mwt.locking import hold_world, target_lock_dir, WorldWriteLocked, MinecraftWorldInUse, TargetLocked
+    backup_id = backup_id or "latest"
+    world = Path(config["world_dir"])
+    stores = [backup_store(world, data_dir), legacy_backup_store(world)]
+    external = [Path(path) for path in config["runtime"].get("authorized_external_pack_paths", [])]
+    try:
+        with hold_world(world, "restore", external_targets=external, lock_dir=target_lock_dir(data_dir)):
+            if backup_id == "latest":
+                backup_id = default_restore_backup_id(world, stores)
+            source = BackupSet.find(world, backup_id, stores, external_files=external)
+            recovery_id = source.restore(recovery_store=stores[0], hold_guards=False, stores=stores)
+    except (WorldWriteLocked, MinecraftWorldInUse, TargetLocked, JournalError) as exc:
+        raise SystemExit(f"Nothing was restored: {exc}") from None
+    except BackupError as exc:
+        # Also raised after a restore began (the message then names the recovery set), so no claim about the world.
+        raise SystemExit(f"Restore failed: {exc}") from None
+    return {"status": "restored", "world_dir": str(world), "backupSetId": source.backup_id, "recoverySetId": recovery_id}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -3278,20 +3766,9 @@ def main(argv: list[str] | None = None) -> None:
     if not config["world_dir"]:
         raise SystemExit("`world_dir` is required. Set it in config or pass --world-dir.")
     if args.restore_backup:
-        from mwt.safety import BackupSet, backup_store
-
-        world = Path(config["world_dir"])
-        store = backup_store(world, data_dir)
-        external_files = [Path(path) for path in config["runtime"].get("authorized_external_pack_paths", [])]
-        source = BackupSet(world, "latest", store, external_files=external_files) if (store / "latest.json").is_file() else BackupSet(world, "latest", external_files=external_files)
-        from mwt.locking import MinecraftWorldInUse, WorldWriteLocked
-
-        try:
-            source.restore(recovery_store=store)  # holds the write lock and the game's session locks
-        except (WorldWriteLocked, MinecraftWorldInUse, JournalError) as exc:
-            raise SystemExit(f"Nothing was restored: {exc}") from exc
-        print(json.dumps({"status": "restored", "world_dir": config["world_dir"]}, ensure_ascii=False))
+        print(json.dumps(restore_backup_cli(config, data_dir, args.backup_set_id), ensure_ascii=False))
         return
+
     if args.expect_fingerprint:
         config["runtime"]["expected_world_fingerprint"] = args.expect_fingerprint
     if not config["dry_run"]:
@@ -3299,6 +3776,13 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("API key is missing. Set it in config, environment, or translate.py defaults.")
         if not config["api"]["model"]:
             raise SystemExit("Model is missing. Set it in config or translate.py defaults.")
+        cap = cost_cap_state(config["api"]["provider"], config["runtime"].get("max_cost_usd"), config["runtime"].get("price"))
+        if cap == "unpriced" and not args.allow_unpriced_cost_cap:
+            raise SystemExit(
+                f"{COST_CAP_UNPRICED}: {COST_CAP_UNPRICED_MESSAGE} Set runtime.price in the config "
+                "(USD per token, input and output), or pass --allow-unpriced-cost-cap to run without the cap."
+            )
+        config["runtime"]["unpriced_cost_cap_ack"] = bool(args.allow_unpriced_cost_cap)
 
     translator = WorldTranslator(config)
     report = translator.run()
