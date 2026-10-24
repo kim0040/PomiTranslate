@@ -6,7 +6,7 @@
 
 - **받는 쪽(OURS):** 브랜치 `improve/commercial-readiness`. 2026-10-02(`ad9f2c6`)부터 2026-10-23(`8247f6f`)까지 172 commit의 상용 수준 점검. Windows native(설치본·UI Automation)·Docker Linux·`pnpm verify:local` 60/60으로 검증했다. 병합 전 상태는 브랜치 `backup/commercial-readiness-pre-merge`.
 - **들어온 쪽(THEIRS):** `integrate/main-wip-2026-10-24` = origin/main의 2026-10-03~10-11 UX 개편([기록](ux-overhaul-2026-10-04.md)) + 검증하지 않은 리뷰 수정 WIP 3개(`core-safety` `5b4150d`, `native-security` `f3ebeee`, `ui-ux` `99b7efd`; [인계](review-fixes-pause-2026-10-11.md)). 공통 조상은 `ad9f2c6`.
-- 사용자 결정: main과 WIP 셋을 모두 합친다. push하지 않는다.
+- 사용자 결정: main과 WIP 셋을 모두 합친다. 처음에는 push하지 않기로 했고, 검증이 끝난 뒤 브랜치를 push했다. 이어서 사용자 결정에 따라 실제 유료 제공사 확인은 하지 않고 main에 fast-forward로 통합해 push했다(`[skip ci]`, Actions 할당량 없음). Linux 컨테이너 재검사는 마무리 요청으로 중간에 멈췄으므로 결과가 없다.
 
 ## 해결 원칙
 
