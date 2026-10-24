@@ -510,6 +510,7 @@ export const ja: Record<MessageKey, string> = {
   "settings.language.title": "言語と文体",
   "settings.language.target": "翻訳先言語",
   "settings.language.targetHelp": "例: 日本語、한국어、English",
+  "settings.style.title": "翻訳の文体",
   "settings.style.label": "基本文体プリセット",
   "settings.style.neutral": "標準・自然（推奨）",
   "settings.style.casual": "親しみやすい会話調",

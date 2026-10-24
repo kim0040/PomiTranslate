@@ -254,7 +254,7 @@
   </div>
 
   <div class="sf-group" id="style-settings">
-    <h3>{t('settings.style.label')}</h3>
+    <h3>{t('settings.style.title')}</h3>
     <div class="sf-fields sf-two">
       <div class="sf-field">
         <label class="sf-label" for="style-preset">{t('settings.style.label')}</label>

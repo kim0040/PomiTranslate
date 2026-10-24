@@ -6,7 +6,7 @@
 
 ## 지금 할 순서 (2026-10-24 병합 기준)
 
-0. **MERGE-2026-10-24 — 병합된 소스 검증(최우선).** 2026-10-11 리뷰 수정 WIP 3개(core-safety·native-security·ui-ux)와 main의 UX 개편이 2026-10-24에 `improve/commercial-readiness`에 병합됐다([병합 기록](history/merge-main-wip-2026-10-24.md), [WIP 인계](history/review-fixes-pause-2026-10-11.md)). **2026-10-24 병합된 소스에서 검증됨**(verify:local 69/69, browser 419 PASS, Windows 설치본 E2E, 독립 리뷰 수정; [기록](history/merge-main-wip-2026-10-24.md)). 남은 것은 소개 화면 12장 재캡처뿐이다. 아래는 원래 순서: 순서: 소스 안정화 → `pnpm verify:plan`으로 계획 확인 → 관련 검사(Python 전체·frontend·browser·`cargo test`) → WIP가 남긴 일(core-safety 테스트 실행과 R8·R10 회귀 테스트, ui-ux browser spec 갱신·접근성 확인, 새 오류 코드 문구, ja/zh 용어) → 데이터 손실·보안이 걸린 core·native 변경의 독립 리뷰 → 소개 화면 12장 재캡처 → sidecar 재빌드 후 native 확인. 이것이 끝나기 전에는 아래 1번 이후의 "확인" 항목을 병합된 앱의 PASS로 쓰지 않는다.
+0. **MERGE-2026-10-24 — 병합된 소스 검증(최우선).** 2026-10-11 리뷰 수정 WIP 3개(core-safety·native-security·ui-ux)와 main의 UX 개편이 2026-10-24에 `improve/commercial-readiness`에 병합됐다([병합 기록](history/merge-main-wip-2026-10-24.md), [WIP 인계](history/review-fixes-pause-2026-10-11.md)). **2026-10-24 병합된 소스에서 검증됨**(verify:local 69/69, browser 419 PASS, Windows 설치본 E2E, 독립 리뷰 수정; [기록](history/merge-main-wip-2026-10-24.md)). 소개 화면 12장 재캡처도 끝났다. 아래는 원래 순서: 순서: 소스 안정화 → `pnpm verify:plan`으로 계획 확인 → 관련 검사(Python 전체·frontend·browser·`cargo test`) → WIP가 남긴 일(core-safety 테스트 실행과 R8·R10 회귀 테스트, ui-ux browser spec 갱신·접근성 확인, 새 오류 코드 문구, ja/zh 용어) → 데이터 손실·보안이 걸린 core·native 변경의 독립 리뷰 → 소개 화면 12장 재캡처 → sidecar 재빌드 후 native 확인. 이것이 끝나기 전에는 아래 1번 이후의 "확인" 항목을 병합된 앱의 PASS로 쓰지 않는다.
 
 [main 통합·잔여 작업 대조](history/main-integration-2026-10-02.md)에서 `e97261c`의 코드와 문서를 대조했다. 도움말·초기화·화면 모드·업데이트 연결까지 구현됐으며, 이전 Linux 검증 기록과 이번 코드 확인을 구분한다. 아래는 실제로 남은 작업의 권장 순서다. 아래 표의 ID와 완료 조건이 기준이다.
 
@@ -38,7 +38,7 @@
 ## 이번에 완료한 범위
 
 - [x] 2026-10-23 상용 수준 점검(commercial-readiness): 쓰기 저널·sidecar 감독·응답 계약·진단 정리·자격 증명 경로·종료 의도 경로·용어집·최신 component·chunk coverage·가격표. 병합 전 소스 기준 `pnpm verify:local` 60/60, Windows native·Docker Linux. [기록](history/commercial-readiness-2026-10-23.md)
-- [x] 2026-10-24 main UX 개편 + 리뷰 수정 WIP 3개 병합: 병합됨, 병합된 소스에서 검증됨(위 0번). 소개 화면 재캡처는 별도. [기록](history/merge-main-wip-2026-10-24.md)
+- [x] 2026-10-24 main UX 개편 + 리뷰 수정 WIP 3개 병합: 병합됨, 병합된 소스에서 검증됨(위 0번). 소개 화면 12장도 병합된 UI로 다시 캡처했다. [기록](history/merge-main-wip-2026-10-24.md)
 - [x] 2026-10-04 상용 수준 UX 개편(서명 제외): 적용 전 검토·수정 재적용·실패만 재시도·비용 한도·용어집·설정 도우미·설정 탭·닫기 보호·완료 알림·창 복원·중국어 UI, 독립 검토 R1/R2 지적 수정. check 0/0·frontend108·Python 전체·Rust63·browser260. [기록](history/ux-overhaul-2026-10-04.md)
 - [x] 2026-10-02 후속: 도움말 화면·메뉴(F1/⌘?), 첫 실행 시작 안내, 앱 안 오픈소스 라이선스(생성기), Minecraft 비공식 고지 원문, 외부 링크를 기본 브라우저로(허용 목록), 앱 안 업데이트(서명 키가 있을 때만 설치), 데이터 위치 표시·열기, 두 단계 초기화(백업 유지), 설정 파일 fsync·사본·손상 복구, 테마·안내 동의를 설정 파일로 이전. Python23/Rust29/frontend62/browser108. [업데이트·데이터](updates-and-data.md)
 - [x] 2026-10-02 화면 모드: 설정의 시스템/라이트/다크 미리보기 타일(즉시 적용·설정 파일 저장·작업 중이면 끝난 뒤 저장 재시도), 보기 → 화면 모드 메뉴와 체크 표시, OS 변경 실시간 추적, `theme-boot.js`와 Rust 시작 시 창 배경으로 다크 시작 깜빡임 제거, 다크 정보 화면 로고, 전 화면 다크 axe. Rust30/browser114. macOS·Windows 실제 창에서 깜빡임·타이틀바 색은 UX-NATIVE-01에서 확인.

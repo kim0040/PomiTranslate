@@ -510,6 +510,7 @@ export const en: Record<MessageKey, string> = {
   "settings.language.title": "Language & Tone",
   "settings.language.target": "Target Language",
   "settings.language.targetHelp": "e.g. 한국어, English, 日本語",
+  "settings.style.title": "Translation style",
   "settings.style.label": "Tone & Style Preset",
   "settings.style.neutral": "Standard / Natural (Recommended)",
   "settings.style.casual": "Casual / Conversational",

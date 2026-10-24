@@ -510,6 +510,7 @@ export const ko = {
   "settings.language.title": "번역 언어 및 문체",
   "settings.language.target": "도착 언어 (번역 대상 언어)",
   "settings.language.targetHelp": "예: 한국어, English, 日本語",
+  "settings.style.title": "번역 문체",
   "settings.style.label": "기본 문체",
   "settings.style.neutral": "표준/자연스러움 (권장)",
   "settings.style.casual": "친근함/대화체",

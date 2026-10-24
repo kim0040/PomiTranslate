@@ -1,6 +1,7 @@
 // Run after the current UI has been captured in every supported UI language.
 import { createHash } from 'node:crypto';
-import { copyFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { release } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,7 +22,13 @@ for (const locale of ['ko', 'en', 'ja', 'zh']) {
 }
 // Preserve existing Korean image URLs using this capture, not old screenshots.
 for (const screen of ['review', 'settings', 'run']) copyFileSync(resolve(root, `docs/images/locales/ko/${screen}.png`), resolve(root, `docs/images/${screen}.png`));
-const manifest = { schema: 1, capturedOn: new Date().toISOString().slice(0, 10), environment: 'macOS / Playwright Chromium', theme: 'light', synthetic: true, externalRequests: 0, paidRequests: 0, sourceHash, sourceFiles: sources, images, aliases: { 'review.png': 'locales/ko/review.png', 'settings.png': 'locales/ko/settings.png', 'run.png': 'locales/ko/run.png' } };
+const capturedOn = new Date().toISOString().slice(0, 10);
+// The screenshots are taken wherever the capture ran; POMI_CAPTURE_ENVIRONMENT overrides the detected OS name.
+const osName = process.platform === 'win32' ? (Number(release().split('.')[2]) >= 22000 ? 'Windows 11' : 'Windows 10') : process.platform === 'darwin' ? 'macOS' : 'Linux';
+const environment = process.env.POMI_CAPTURE_ENVIRONMENT || `${osName} / Playwright Chromium`;
+const locales = ['ko', 'en', 'ja', 'zh'];
+const captures = [{ locales, capturedOn, environment, sourceHash, note: 'All screenshots were captured in one run from the same UI source.' }];
+const manifest = { schema: 1, capturedOn, environment, theme: 'light', synthetic: true, externalRequests: 0, paidRequests: 0, sourceHash, sourceFiles: sources, images, aliases: { 'review.png': 'locales/ko/review.png', 'settings.png': 'locales/ko/settings.png', 'run.png': 'locales/ko/run.png' }, captures };
 writeFileSync(resolve(root, 'docs/images/manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 const assetImages = [];
 const assetAliases = {};
@@ -41,6 +48,11 @@ for (const card of ['scan_first', 'backup_first', 'api_notice', 'unsupported']) 
   copyFileSync(resolve(root, 'assets', localized), resolve(root, 'assets', alias));
   assetAliases[alias] = localized;
 }
-writeFileSync(resolve(root, 'assets/localization-manifest.json'), JSON.stringify({ schema: 1, renderedOn: manifest.capturedOn, environment: manifest.environment, catalogHash: sha(readFileSync(resolve(root, 'assets/localization.json'))), generatorHash: sha(readFileSync(resolve(root, 'scripts/generate-localized-assets.mjs'))), images: assetImages, aliases: assetAliases }, null, 2) + '\n');
+// Only the screenshots are retaken by a normal recapture; the card PNGs keep their render date and environment unless
+// they were re-rendered too (pass --assets-rendered), so another OS's fonts do not rewrite them.
+const assetsManifestPath = resolve(root, 'assets/localization-manifest.json');
+const previousAssets = existsSync(assetsManifestPath) ? JSON.parse(readFileSync(assetsManifestPath, 'utf8')) : {};
+const assetsRendered = process.argv.includes('--assets-rendered') || !previousAssets.renderedOn;
+writeFileSync(assetsManifestPath, JSON.stringify({ schema: 1, renderedOn: assetsRendered ? manifest.capturedOn : previousAssets.renderedOn, environment: assetsRendered ? manifest.environment : previousAssets.environment, catalogHash: sha(readFileSync(resolve(root, 'assets/localization.json'))), generatorHash: sha(readFileSync(resolve(root, 'scripts/generate-localized-assets.mjs'))), images: assetImages, aliases: assetAliases }, null, 2) + '\n');
 console.log(`Recorded ${images.length} localized screenshots; refreshed 3 Korean compatibility aliases.`);
 console.log(`Recorded ${assetImages.length} localized SVG/PNG assets; refreshed 4 Korean guide aliases.`);

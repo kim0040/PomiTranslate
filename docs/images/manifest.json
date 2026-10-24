@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "capturedOn": "2026-10-23",
+  "capturedOn": "2026-10-24",
   "environment": "Windows 10 / Playwright Chromium",
   "theme": "light",
   "synthetic": true,
   "externalRequests": 0,
   "paidRequests": 0,
-  "sourceHash": "43299199e0a6142e8a1e3568a7c205ff83bee33a6b9d97c3d9fda96b3521ed05",
+  "sourceHash": "270e3be12d964327a123f7ad96a63e5ac6cd0b176f673df58b99696527270bfe",
   "sourceFiles": [
     "package.json",
     "pnpm-lock.yaml",
@@ -14,22 +14,29 @@
     "src/App.svelte",
     "src/app.css",
     "src/components/AppMaintenance.svelte",
+    "src/components/ApplyDialog.svelte",
     "src/components/Brand.svelte",
     "src/components/Callout.svelte",
     "src/components/CandidateDetail.svelte",
     "src/components/CandidateTable.svelte",
+    "src/components/ChipListEditor.svelte",
+    "src/components/ChunkCoverageSummary.svelte",
     "src/components/CrashScreen.svelte",
     "src/components/CredentialStoreNotice.svelte",
     "src/components/Dialog.svelte",
     "src/components/DiscardReviewDialog.svelte",
+    "src/components/Disclosure.svelte",
     "src/components/ExitDialog.svelte",
     "src/components/ExternalResourcePacks.svelte",
+    "src/components/FileRulesSettings.svelte",
     "src/components/GlossaryAddDialog.svelte",
     "src/components/GlossaryImportDialog.svelte",
     "src/components/Icon.svelte",
     "src/components/InterruptedWork.svelte",
     "src/components/LicensesDialog.svelte",
     "src/components/ListRow.svelte",
+    "src/components/ModelPicker.svelte",
+    "src/components/NewerVersionNotice.svelte",
     "src/components/PageHeader.svelte",
     "src/components/Pill.svelte",
     "src/components/Popover.svelte",
@@ -39,24 +46,57 @@
     "src/components/ResourcePackSettings.svelte",
     "src/components/ScanScopeSettings.svelte",
     "src/components/SettingsHint.svelte",
+    "src/components/SetupKey.svelte",
+    "src/components/SetupLanguage.svelte",
+    "src/components/SetupModel.svelte",
     "src/components/SetupNotice.svelte",
+    "src/components/SetupProvider.svelte",
+    "src/components/SetupWelcome.svelte",
+    "src/components/SetupWizard.svelte",
     "src/components/Sidebar.svelte",
     "src/components/SourceOverrides.svelte",
     "src/components/StatGrid.svelte",
     "src/components/StatusScreen.svelte",
     "src/components/Stepper.svelte",
+    "src/components/TargetLanguageSelect.svelte",
     "src/components/Toasts.svelte",
     "src/components/Tour.svelte",
+    "src/components/TranslationDetail.svelte",
+    "src/components/TranslationReview.svelte",
+    "src/components/TranslationTable.svelte",
+    "src/components/UnpricedNotice.svelte",
     "src/components/WorldCard.svelte",
     "src/components/WorldSummary.svelte",
+    "src/components/settings/AdvancedTab.svelte",
+    "src/components/settings/AppTab.svelte",
+    "src/components/settings/ScopeTab.svelte",
+    "src/components/settings/TranslateTab.svelte",
     "src/lib/api.ts",
     "src/lib/app.svelte.ts",
+    "src/lib/app/exit-gate.svelte.ts",
+    "src/lib/app/feedback.svelte.ts",
+    "src/lib/app/guards.svelte.ts",
+    "src/lib/app/maintenance.svelte.ts",
+    "src/lib/app/model-catalog.svelte.ts",
+    "src/lib/app/notifications.ts",
+    "src/lib/app/preferences.svelte.ts",
+    "src/lib/app/recovery.svelte.ts",
+    "src/lib/app/review-draft.svelte.ts",
+    "src/lib/app/settings-store.svelte.ts",
+    "src/lib/app/translation-job.svelte.ts",
+    "src/lib/app/types.ts",
+    "src/lib/app/updater.svelte.ts",
+    "src/lib/app/worlds.svelte.ts",
     "src/lib/backups.ts",
     "src/lib/candidates.svelte.ts",
+    "src/lib/chunk-coverage.ts",
     "src/lib/clock.svelte.ts",
+    "src/lib/cost-safety.ts",
     "src/lib/diagnostics.ts",
     "src/lib/document-export.ts",
+    "src/lib/errors.ts",
     "src/lib/failures.ts",
+    "src/lib/font-scale.ts",
     "src/lib/format.ts",
     "src/lib/glossary-casefold.json",
     "src/lib/glossary.ts",
@@ -64,21 +104,30 @@
     "src/lib/i18n/index.svelte.ts",
     "src/lib/i18n/ja.ts",
     "src/lib/i18n/ko.ts",
+    "src/lib/i18n/locale.ts",
+    "src/lib/i18n/zh.ts",
     "src/lib/landing.ts",
+    "src/lib/languages.ts",
     "src/lib/licenses.ts",
     "src/lib/local-prefs.ts",
+    "src/lib/models.ts",
     "src/lib/motion.ts",
     "src/lib/native.ts",
     "src/lib/plugins.ts",
+    "src/lib/providers.ts",
     "src/lib/reasoning.ts",
     "src/lib/recommended-models.ts",
     "src/lib/reset.ts",
     "src/lib/resource-pack.ts",
     "src/lib/review.ts",
+    "src/lib/settings-draft.svelte.ts",
     "src/lib/settings-import.ts",
+    "src/lib/settings-tabs.ts",
     "src/lib/settings.ts",
+    "src/lib/setup-connection.ts",
     "src/lib/theme.ts",
     "src/lib/tokens.ts",
+    "src/lib/translation-review.svelte.ts",
     "src/lib/version.ts",
     "src/lib/virtual.ts",
     "src/lib/workflow.ts",
@@ -96,6 +145,7 @@
     "src/styles/base.css",
     "src/styles/components.css",
     "src/styles/forced-colors.css",
+    "src/styles/settings-form.css",
     "src/styles/tokens.css",
     "tests/frontend/preview.html",
     "tests/frontend/tauri-fixture-init.js"
@@ -107,8 +157,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 112105,
-      "sha256": "18baecb76ef65cc2556030c943de64db8489d3dc41c45c1226228e0b7a312e70"
+      "bytes": 120880,
+      "sha256": "3694579f89652868526cdccc0b1a0b412ab58cd899a010515e3c026fb1615b06"
     },
     {
       "path": "locales/ko/settings.png",
@@ -116,8 +166,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 122792,
-      "sha256": "b3d288d793c43e951d72d253820ad56ae71b1af641cd8e485c32a5e359f57e63"
+      "bytes": 103926,
+      "sha256": "8469b3d943a6fd9b3a58db3a3bfc800d7a52d3649d945d907965a7b0a4caf3f8"
     },
     {
       "path": "locales/ko/run.png",
@@ -125,8 +175,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 131685,
-      "sha256": "5cf1db14f62952d9bb3d982ec5a2296b48b66f97b72bdf3403fd4d0e2e9d7fbe"
+      "bytes": 148726,
+      "sha256": "c01bd24affe5e9990e3398720a6dfa30aa6acc565e7b2982ef57a59c19afb20a"
     },
     {
       "path": "locales/en/review.png",
@@ -134,8 +184,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 121830,
-      "sha256": "b273805de827c767bf4e15e6a0d2cd047be8a16702cd97e8d1f5bce4b595a736"
+      "bytes": 133822,
+      "sha256": "9911b12c5607c0ab44837ceab6d1bc0eb01f3b7a851af40df449529ce4fb83c9"
     },
     {
       "path": "locales/en/settings.png",
@@ -143,8 +193,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 131699,
-      "sha256": "06bbd68c5e14b90a782d2fa0c1141d79ef45a2cc5da67447957564579dd70f84"
+      "bytes": 112960,
+      "sha256": "f74fdb0dfb28c1306d11176669a57867768abd39dee645420f9dbe68dd751733"
     },
     {
       "path": "locales/en/run.png",
@@ -152,8 +202,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 142897,
-      "sha256": "eb44165f6a694b5b162465a0533090d393726a35d46cf7ff491a2ce27119396c"
+      "bytes": 172104,
+      "sha256": "89b1301ee88e16235393b7c2529d9a8c9a4a09a0e946712eaf659584a0e399fb"
     },
     {
       "path": "locales/ja/review.png",
@@ -161,8 +211,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 127777,
-      "sha256": "acc80e599fa3a74e124bb2b7c68cfdc9b3fc330c06c6f608ef26b5fc84d6710a"
+      "bytes": 141205,
+      "sha256": "2d8028cc24d16a7f7462d56849397a5a203e419a23ded188f071347ef5af9c5d"
     },
     {
       "path": "locales/ja/settings.png",
@@ -170,8 +220,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 143657,
-      "sha256": "9b76cb19f85da4e4fe64fde01237ad01764f24eaca76ae230fafd063e4b67175"
+      "bytes": 118406,
+      "sha256": "ca8d6930e0bdcd5a7759aa678e8b3b968fa09610e421dd25da83e35099b1139b"
     },
     {
       "path": "locales/ja/run.png",
@@ -179,8 +229,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 152366,
-      "sha256": "25e05ff97b4fbfdc5fe57ac4afc446e23ee3593e5e79749e3bcfca73c186dc91"
+      "bytes": 178852,
+      "sha256": "2d2546eb23ba11e3d76a86ec5df899a714e8973bc8f0e3b014b94eddcb1d732f"
     },
     {
       "path": "locales/zh/review.png",
@@ -188,8 +238,8 @@
       "screen": "review",
       "width": 1440,
       "height": 980,
-      "bytes": 159685,
-      "sha256": "5a9d22dbe65ff3fff35bfb9a56953272ac54d0eb06df531f5ac8e1000ee58b85"
+      "bytes": 108049,
+      "sha256": "bbe31e5b772ee8b1b72c3b1a0dc1c950851be483b5478449c7061b15d00ba454"
     },
     {
       "path": "locales/zh/settings.png",
@@ -197,8 +247,8 @@
       "screen": "settings",
       "width": 1440,
       "height": 980,
-      "bytes": 120691,
-      "sha256": "14018654dd02e7e8306ce4f1f32ff1e0467cd8b26d1932e1a477589dc3c5c8a3"
+      "bytes": 87269,
+      "sha256": "e5956dfcec71c321f92b04b17bd767c3bfa49caca969f300461d76a93530a214"
     },
     {
       "path": "locales/zh/run.png",
@@ -206,8 +256,8 @@
       "screen": "run",
       "width": 1440,
       "height": 980,
-      "bytes": 146652,
-      "sha256": "c8658d25774600f770c5f6c8416886c8a60b26eff2573bd40d0b4f7b67e149fe"
+      "bytes": 122224,
+      "sha256": "2ecedc03078a05b1a9110232afb14d6759b5c09cf3089284d5ecb0b825eeacef"
     }
   ],
   "aliases": {
@@ -220,21 +270,13 @@
       "locales": [
         "ko",
         "en",
-        "ja"
-      ],
-      "capturedOn": "2026-10-23",
-      "environment": "Windows 10 / Playwright Chromium",
-      "sourceHash": "43299199e0a6142e8a1e3568a7c205ff83bee33a6b9d97c3d9fda96b3521ed05",
-      "note": "Captured from the pre-merge improve/commercial-readiness UI (docs-recapture-2026-10-23)."
-    },
-    {
-      "locales": [
+        "ja",
         "zh"
       ],
-      "capturedOn": "2026-10-04",
-      "environment": "macOS / Playwright Chromium",
-      "sourceHash": "e535fd0a018e861b781ea70404e686ef395dedfdfb2d65d0640717f742a34d77",
-      "note": "Captured from the 2026-10-04 UX-overhaul UI of the merged-in main branch. Recapture all 12 screenshots once the merged UI settles; sourceHash/sourceFiles above describe only the ko/en/ja capture."
+      "capturedOn": "2026-10-24",
+      "environment": "Windows 10 / Playwright Chromium",
+      "sourceHash": "270e3be12d964327a123f7ad96a63e5ac6cd0b176f673df58b99696527270bfe",
+      "note": "All screenshots were captured in one run from the same UI source."
     }
   ]
 }

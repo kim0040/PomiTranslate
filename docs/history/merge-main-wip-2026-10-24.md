@@ -52,5 +52,5 @@
 
 - WIP 3개가 인계 문서에 남긴 "남은 일"이 병합 뒤에도 필요한지: core-safety의 전체 Python suite 실행과 R8·R10 회귀 테스트, ui-ux의 browser spec 갱신과 접근성 확인, 새 오류 코드 문구, ja/zh 용어 점검.
 - `docs/support-matrix.md`는 fixture 결과로 생성하는 문서다. 1.20.3–1.21.4 JSON 문자열 컴포넌트(`json_string_tag`, `tests/test_text_components.py`) 행은 그 fixture를 병합된 소스에서 실행한 뒤에 더한다.
-- 소개 화면 12장 재캡처와 manifest 갱신(병합 커밋 뒤 별도 커밋).
+- ~~소개 화면 12장 재캡처와 manifest 갱신~~ 2026-10-24 병합 커밋 뒤 별도 커밋에서 끝냈다: 병합된 UI에서 ko/en/ja/zh 12장을 한 번에 다시 찍었고(Windows 10 / Playwright Chromium, 외부 요청 0), 캡처 스크립트를 새 단계 이름에 맞췄다. 캡처에서 보인 설정 화면의 중복 제목(문체 묶음 제목과 첫 칸 이름이 같음, 중국어 단가 묶음 제목과 입력 칸 이름이 같음)도 고쳤다.
 - native 확인(UX-NATIVE-01)과 각 OS 확인은 [추후 작업](../follow-up-work.md)을 따른다.
