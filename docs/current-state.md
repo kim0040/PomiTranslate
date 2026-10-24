@@ -56,7 +56,7 @@
 
 | 영역 | 기록된 증거 | 범위 |
 | --- | --- | --- |
-| **병합(2026-10-24)** | **검증됨** | verify:local 69/69, browser 419 PASS/1 skip, clean build, Windows 설치본 E2E(설정 도우미·번역·검토·적용·SHA-256 복원·종료). 아래 행은 병합 전 각 갈래의 기록 |
+| **병합(2026-10-24)** | **검증됨** | verify:local 69/69, browser 419 PASS/1 skip, clean build, Windows 설치본 E2E(설정 도우미·번역·검토·적용·SHA-256 복원·종료·제거), Linux 컨테이너 Python 60/60·Rust 243·clippy 0. 아래 행은 병합 전 각 갈래의 기록 |
 | 병합 전 commercial-readiness(2026-10-23) | `pnpm verify:local` 60/60, Docker Linux Python core 51/51·Rust 238·clippy 0, Windows native(설치·packaged core smoke·UI Automation 닫기 확인·자격 증명 관리자·127.0.0.1 대역 제공사 E2E) | 병합 전 소스([기록](history/commercial-readiness-2026-10-23.md)). 병합된 UI·core에는 해당하지 않음 |
 | 병합 전 main UX 개편(2026-10-04) | check 0/0·frontend108·Python 전체·Rust63·browser260(macOS arm64 browser fixture) | 병합 전 main 소스([기록](history/ux-overhaul-2026-10-04.md)). native·실제 제공사 미확인 |
 | 후속(2026-10-02) | Python23/Rust30/check·build/frontend62/browser114 PASS: 도움말·시작 안내·라이선스 뷰어·업데이트·데이터 위치·초기화·설정 내구성, 라이트/다크/시스템 화면 모드(설정 타일·보기 메뉴·OS 변경 추적·시작 전 적용·전 화면 다크 axe) | [업데이트·데이터](updates-and-data.md). 실제 서명 release 업데이트·각 OS native 미확인 |
